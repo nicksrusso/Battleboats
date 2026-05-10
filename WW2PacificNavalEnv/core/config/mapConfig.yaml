@@ -1,0 +1,14 @@
+Map:
+  sizeX: 160
+  sizeY: 80
+  landFraction: 0.01
+
+Player0:
+  numPorts: 10
+  areaXBounds: [0, 79]
+  areaYBounds: [0, 39]
+
+Player1:
+  numPorts: 10
+  areaXBounds: [80, 159]
+  areaYBounds: [40, 79]
