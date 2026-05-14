@@ -1,6 +1,6 @@
 from typing import Dict, List, Optional, Tuple
 import numpy as np
-
+from copy import deepcopy
 from .player import Player
 from .map.Map import Map
 from .sighting import Sighting
@@ -18,7 +18,6 @@ from .actions import (
     MerchantUnloadAction,
     EndTurnAction,
 )
-
 
 STARTING_CASH: int = 250
 PORT_PRODUCTION: int = 25  # materials per owned port per player turn
@@ -313,7 +312,7 @@ class gameEngine:
         if defender.stats.strength <= 0:
             return True
         x = (attacker.stats.strength * attack_modifier(attacker.type, defender.type)) / defender.stats.strength
-        xk = x ** self.kill_curve_k
+        xk = x**self.kill_curve_k
         p = xk / (1.0 + xk)
         return float(self.rng.random()) < p
 
@@ -351,11 +350,7 @@ class gameEngine:
     # ------------------------------------------------------------------ RL hooks
     def visible_enemy_ships(self, player_id: int) -> List[Ship]:
         """Enemy ships currently in sight of one of player_id's owned ships."""
-        return [
-            self.ships[sid]
-            for sid, s in self.players[player_id].sightings.items()
-            if s.fresh and sid in self.ships
-        ]
+        return [self.ships[sid] for sid, s in self.players[player_id].sightings.items() if s.fresh and sid in self.ships]
 
     def known_enemy_ships(self, player_id: int) -> List[Sighting]:
         """All sightings (fresh + stale) — player's last-known view of enemies."""
@@ -428,7 +423,16 @@ class gameEngine:
 
     def get_state(self) -> dict:
         """Full ground-truth state. The env layer applies fog-of-war masking."""
-        pass
+        return {
+            "terrain": self.map.terrain.copy(),
+            "port_owner": self.map.port_owner.copy(),
+            "ship_at": self.map.ship_at.copy(),
+            "ships": {sid: deepcopy(ship) for sid, ship in self.ships.items()},
+            "players": [deepcopy(self.players[0]), deepcopy(self.players[1])],
+            "current_player": self.current_player,
+            "turn": self.turn,
+            "winner": self.winner,
+        }
 
     def is_terminal(self) -> bool:
         return self.winner is not None
@@ -437,4 +441,30 @@ class gameEngine:
         """Fast snapshot for RL rollouts / search. Copies numpy grids and the
         ship registry without going through reset()/JSON load.
         """
-        pass
+        new = gameEngine.__new__(gameEngine)
+
+        new.map_json_path = self.map_json_path
+        new.kill_curve_k = self.kill_curve_k
+        new.current_player = self.current_player
+        new.turn = self.turn
+        new.winner = self.winner
+        new._next_ship_id = self._next_ship_id
+
+        new.map = deepcopy(self.map)
+        new.players = [deepcopy(p) for p in self.players]
+        new.ships = {sid: deepcopy(s) for sid, s in self.ships.items()}
+        new.rng = deepcopy(self.rng)
+
+        # Bind handlers to `new` — copying the dict would keep them bound to `self`.
+        new._dispatch = {
+            MoveAction: new._do_move,
+            AttackAction: new._do_attack,
+            BuildShipAction: new._do_build_ship,
+            BuildPortAction: new._do_build_port,
+            CapturePortAction: new._do_capture_port,
+            MerchantLoadAction: new._do_merchant_load,
+            MerchantUnloadAction: new._do_merchant_unload,
+            EndTurnAction: new._do_end_turn,
+        }
+
+        return new
