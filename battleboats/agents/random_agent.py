@@ -22,4 +22,4 @@ def random_action(engine: "gameEngine", player_id: int, rng: random.Random) -> "
         IndexError if called when no legal actions exist (e.g., player_id
         is not the current player, or the game is already terminal).
     """
-    raise NotImplementedError
+    return rng.choice(engine.enumerate_legal(player_id))

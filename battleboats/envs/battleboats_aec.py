@@ -13,7 +13,7 @@ Observation contract:
 Reward contract:
     Sparse zero-sum, terminal-only. Winner: +1, Loser: -1, otherwise 0.
     Potential-based shaping (held in reserve per project plan) would be
-    added inside _settle_rewards if/when training stalls.
+    added inside _settle_terminal_rewards if/when training stalls.
 
 Termination vs truncation:
     terminated: engine.winner is not None (capture of enemy home port).
@@ -25,7 +25,7 @@ from typing import Any, Dict, Optional
 from gymnasium.spaces import Space
 from pettingzoo import AECEnv
 
-from battleboats.core.actions import Action, EndTurnAction
+from battleboats.core.actions import Action
 from battleboats.core.gameEngine import gameEngine
 from battleboats.envs import observation
 
@@ -51,91 +51,66 @@ class BattleboatsAEC(AECEnv):
     metadata = {"name": "battleboats_aec_v0", "is_parallelizable": False}
 
     def __init__(self, map_json_path: str, max_turns: int = DEFAULT_MAX_TURNS) -> None:
-        """Construct env without resetting.
-
-        PettingZoo convention: agents / spaces / state are not finalized until
-        reset() is called. Store config here; populate state in reset().
-        """
-        raise NotImplementedError
+        """Store env config; defer state initialization to reset()."""
+        self.map_json_path = map_json_path
+        self.max_turns = max_turns
+        self.possible_agents = list(AGENTS)
 
     # ------------------------------------------------------------------ spaces
     def observation_space(self, agent: str) -> Space:
-        """Nominal observation space.
+        """Return a nominal observation space.
 
-        Our actual obs is a dict with a variable-length token tensor, which
-        doesn't cleanly fit any single gym Space primitive. Options:
-          - Declare a Dict with Box entries using nominal shapes (token shape
-            with N=some upper bound; will not match real obs but satisfies
-            tooling that introspects the space)
-          - Declare a placeholder Space() subclass
-        Pick what matches your training loop's expectations.
+        Real observation is a dict with a variable-length token tensor that
+        does not map cleanly to a single gym Space primitive.
         """
         raise NotImplementedError
 
     def action_space(self, agent: str) -> Space:
-        """Nominal action space (Approach 1: actions are engine.Action objects).
-
-        Return whatever placeholder works for your training framework. Most
-        PettingZoo wrappers don't actually use this; we use it for tooling
-        compatibility only.
-        """
+        """Return a nominal action space; actions pass through as engine.Action objects."""
         raise NotImplementedError
 
     # --------------------------------------------------------------- lifecycle
     def reset(self, seed: Optional[int] = None, options: Optional[dict] = None) -> None:
         """Start a new game.
 
-        Steps:
-            1. self.engine = gameEngine(self.map_json_path); engine.reset(seed)
-            2. self.agents = list(AGENTS)
-            3. self.agent_selection = AGENTS[0]  # mirrors engine.current_player == 0
-            4. Initialize all per-agent dicts:
-                self.rewards = {a: 0.0 for a in self.agents}
-                self._cumulative_rewards = {a: 0.0 for a in self.agents}
-                self.terminations = {a: False for a in self.agents}
-                self.truncations = {a: False for a in self.agents}
-                self.infos = {a: {} for a in self.agents}
-            5. Populate self.infos[agent_selection]["legal_actions"] for the
-               first acting agent.
-
-        PettingZoo convention: reset returns None; observations come via
-        observe() / last().
+        Re-instantiates and seeds the engine, repopulates per-agent
+        bookkeeping dicts, and primes legal_actions for the opening seat.
         """
-        raise NotImplementedError
+        self.engine = gameEngine(map_json_path=self.map_json_path)
+        self.engine.reset(seed=seed)
+        self.agents = list(AGENTS)
+        self.agent_selection = self._agent_name(self.engine.current_player)
+        self.rewards = {a: 0.0 for a in self.agents}
+        self._cumulative_rewards = {a: 0.0 for a in self.agents}
+        self.terminations = {a: False for a in self.agents}
+        self.truncations = {a: False for a in self.agents}
+        self.infos = {a: {} for a in self.agents}
+
+        self.infos[self.agent_selection]["legal_actions"] = self.engine.enumerate_legal(self.engine.current_player)
 
     def step(self, action: Optional[Action]) -> None:
         """Apply `action` for self.agent_selection.
 
-        Lifecycle:
-            1. If the current agent is already terminated/truncated:
-               - PettingZoo's "dead agent" convention says the action should
-                 be None. We honor that — no engine.step, just bookkeeping.
-               - Advance agent_selection to the next live agent (or remove
-                 from self.agents and end the cycle).
-               - Return early.
-            2. Delegate to engine.step(action). Engine ignores illegal actions
-               (silent no-op); if you want hard failure on illegal, validate
-               via engine.enumerate_legal() before stepping.
-            3. Reset self.rewards to zero for all agents (per-step delta).
-            4. Check for terminal state:
-                 - engine.winner is not None → terminated for both, deliver +1/-1
-                 - engine.turn >= self.max_turns → truncated for both, deliver 0/0
-            5. Accumulate rewards into self._cumulative_rewards.
-            6. Update agent_selection:
-                 - If action was EndTurnAction, engine.current_player has
-                   flipped; mirror that flip in agent_selection.
-                 - Otherwise agent_selection stays put (same player continues
-                   with another sub-action).
-            7. Refresh self.infos[agent_selection]["legal_actions"] = engine.enumerate_legal(...)
+        Delegates to the engine, settles terminal rewards if a game-end
+        condition was triggered, mirrors agent_selection from
+        engine.current_player, then refreshes legal_actions for the new seat.
         """
-        raise NotImplementedError
+        if self.terminations[self.agent_selection] or self.truncations[self.agent_selection]:
+            self._was_dead_step(action=action)
+            return
+
+        self.engine.step(action=action)
+        self._settle_terminal_rewards()
+
+        self.agent_selection = self._agent_name(self.engine.current_player)
+        self.infos[self.agent_selection]["legal_actions"] = self.engine.enumerate_legal(self.engine.current_player)
 
     def observe(self, agent: str) -> Dict[str, Any]:
         """Build the fog-of-war-filtered obs dict for `agent`.
 
         Delegates to observation.build_observation(self.engine, player_id).
         """
-        raise NotImplementedError
+        return observation.build_observation(self.engine, self._player_id(agent))
 
     def render(self) -> None:
         """Optional human-readable rendering. Skip for now; pygame UI later."""
@@ -155,10 +130,21 @@ class BattleboatsAEC(AECEnv):
         return f"player_{player_id}"
 
     def _settle_terminal_rewards(self) -> None:
-        """Write +1/-1 into self.rewards when engine.winner is set.
+        """Reset per-step rewards and apply terminal effects.
 
-        Called from step() once the engine reports a terminal state.
-        Reward shaping additions would go here (e.g., potential-based shaping
-        based on min distance to known enemy home port).
+        On engine winner: write +1/-1 into rewards and flip terminations.
+        On turn-limit: flip truncations. Always folds rewards into
+        _cumulative_rewards. Future home for potential-based shaping.
         """
-        raise NotImplementedError
+        self.rewards = {a: 0.0 for a in self.agents}
+        if self.engine.winner is not None:
+            winner = self._agent_name(self.engine.winner)
+            for a in self.agents:
+                self.rewards[a] = 1.0 if a == winner else -1.0
+                self.terminations[a] = True
+        elif self.engine.turn >= self.max_turns:
+            for a in self.agents:
+                self.truncations[a] = True
+
+        for a in self.agents:
+            self._cumulative_rewards[a] += self.rewards[a]
