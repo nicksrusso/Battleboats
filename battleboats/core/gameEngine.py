@@ -488,8 +488,22 @@ class gameEngine:
 
         affordable_types = [t for t, s in BASE_STATS.items() if player.cash >= s.cost]
         if affordable_types:
+            # Canonicalize the spawn position so MCTS sees one BuildShipAction
+            # per (port, ship_type) instead of one per spawn-tile variant. Each
+            # port may have up to 4 water-adjacent unoccupied spawn tiles; all
+            # of them produce a ship 1 Manhattan step from the port, so the
+            # choice has near-zero strategic impact relative to the 100+ turn
+            # game horizon. Picking deterministically here drops root branching
+            # factor by ~4× and lets MCTS spend its budget on real decisions.
+            #
+            # Rule: spawn closest to the opp home port (ties broken by lex
+            # order on position). For combat ships and landings this points
+            # them the right way out of the gate; for merchants/builders
+            # they'll move anyway and the one-tile delta is irrelevant.
+            opp_home = self.players[1 - player_id].home_port
             for port in player.owned_port_positions:
                 px, py = port
+                candidate_spawns = []
                 for dx, dy in _CARDINAL_OFFSETS:
                     spawn = (px + dx, py + dy)
                     if not self.map.in_bounds(spawn):
@@ -498,10 +512,15 @@ class gameEngine:
                         continue
                     if self.map.is_occupied(spawn):
                         continue
-                    for t in affordable_types:
-                        if t != ShipType.MERCHANT:
-                            continue
-                        actions.append(BuildShipAction(port, spawn, t))
+                    candidate_spawns.append(spawn)
+                if not candidate_spawns:
+                    continue
+                canonical_spawn = min(
+                    candidate_spawns,
+                    key=lambda s: (self.map.manhattan(s, opp_home), s),
+                )
+                for t in affordable_types:
+                    actions.append(BuildShipAction(port, canonical_spawn, t))
 
         actions.append(EndTurnAction())
         return actions

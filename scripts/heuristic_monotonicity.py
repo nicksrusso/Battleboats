@@ -15,27 +15,12 @@ Run:
 """
 from __future__ import annotations
 
-import math
 from collections import deque
 from typing import List, Optional, Tuple
 
 from battleboats.agents.heuristics import (
-    COMBAT_K_TURNS,
-    COMBAT_TYPES,
-    HOME_K_PER_DIAGONAL,
-    MAT_PORT_VALUE,
-    SCALE_COMBAT,
-    SCALE_ECON,
-    SCALE_HOME,
-    SCALE_MAT,
-    W_COMBAT,
-    W_ECON,
-    W_HOME,
-    W_MAT,
-    _combat_balance,
-    _home_threat,
-    _merchant_logistics_value,
-    _ship_value,
+    FEATURE_KEYS,
+    decompose as _h_decompose,
 )
 from battleboats.core.actions import MerchantLoadAction, MerchantUnloadAction
 from battleboats.core.gameEngine import MERCHANT_CAPACITY, gameEngine
@@ -46,63 +31,18 @@ MAP_JSON = "/home/nick/Desktop/repos/Battleboats/battleboats/core/config/map.jso
 
 # --------------------------------------------------------------- decomposition
 def decompose(engine: gameEngine, me: int) -> dict:
-    """Recompute each heuristic term independently for visibility."""
-    opp_player = engine.players[1 - me]
-    my_player = engine.players[me]
-    opp_ships = [engine.ships[s] for s in opp_player.owned_ship_ids]
-    my_ships = [engine.ships[s] for s in my_player.owned_ship_ids]
-    opp_combat = [s for s in opp_ships if s.type in COMBAT_TYPES]
-    my_combat = [s for s in my_ships if s.type in COMBAT_TYPES]
-
-    char = (engine.map.width + engine.map.height) / HOME_K_PER_DIAGONAL
-    home_raw = _home_threat(opp_player.home_port, my_ships, engine.map.manhattan, char) - _home_threat(
-        my_player.home_port, opp_ships, engine.map.manhattan, char
-    )
-    combat_raw = _combat_balance(my_combat, opp_combat, engine.kill_curve_k, engine.map.manhattan, COMBAT_K_TURNS)
-
-    opp_val = sum(_ship_value(s) for s in opp_ships) + MAT_PORT_VALUE * len(opp_player.owned_port_positions)
-    my_val = sum(_ship_value(s) for s in my_ships) + MAT_PORT_VALUE * len(my_player.owned_port_positions)
-    mat_raw = my_val - opp_val
-
-    map_diag = engine.map.width + engine.map.height
-    econ_raw = (
-        my_player.cash
-        + sum(engine.ports[pos].stockpile for pos in my_player.owned_port_positions)
-        + sum(s.cargo for s in my_ships if s.type is ShipType.MERCHANT)
-        + _merchant_logistics_value(
-            my_ships=my_ships,
-            owned_port_positions=my_player.owned_port_positions,
-            ports=engine.ports,
-            home_port=my_player.home_port,
-            manhattan=engine.map.manhattan,
-            map_diag=map_diag,
-        )
-    )
-
-    T_HOME = math.tanh(home_raw / SCALE_HOME)
-    T_COMBAT = math.tanh(combat_raw / SCALE_COMBAT)
-    T_MAT = math.tanh(mat_raw / SCALE_MAT)
-    T_ECON = math.tanh(econ_raw / SCALE_ECON)
-    H = (W_HOME * T_HOME + W_COMBAT * T_COMBAT + W_MAT * T_MAT + W_ECON * T_ECON) / (
-        W_HOME + W_COMBAT + W_MAT + W_ECON
-    )
-    return {
-        "T_HOME": T_HOME, "T_COMBAT": T_COMBAT, "T_MAT": T_MAT, "T_ECON": T_ECON,
-        "home_raw": home_raw, "combat_raw": combat_raw, "mat_raw": mat_raw, "econ_raw": econ_raw,
-        "H": H,
-    }
+    """Thin wrapper around `heuristics.decompose`."""
+    H, phi, contrib = _h_decompose(engine, me)
+    return {"H": H, "phi": phi, "contrib": contrib}
 
 
 def print_row(label: str, terms: dict, prev_H: Optional[float]) -> None:
     H = terms["H"]
     delta = H - prev_H if prev_H is not None else 0.0
     marker = "  <-- DIP" if (prev_H is not None and delta < -1e-9) else ""
-    print(
-        f"  {label:<32} H={H:+.5f} dH={delta:+.5f}  "
-        f"home={terms['T_HOME']:+.3f} combat={terms['T_COMBAT']:+.3f} "
-        f"mat={terms['T_MAT']:+.3f} econ={terms['T_ECON']:+.3f}  "
-        f"econ_raw={terms['econ_raw']:+8.1f}{marker}"
-    )
+    # Compact per-feature contribution line — all 8 contributions plus dH.
+    contrib_str = " ".join(f"{k.split('_')[0][:5]}={terms['contrib'][k]:+.3f}" for k in FEATURE_KEYS)
+    print(f"  {label:<32} H={H:+.5f} dH={delta:+.5f}  {contrib_str}{marker}")
 
 
 # ---------------------------------------------------------------- map helpers

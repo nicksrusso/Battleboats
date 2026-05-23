@@ -13,29 +13,13 @@ Run:
 from __future__ import annotations
 
 import argparse
-import math
 import random
 from typing import Optional, Tuple
 
 from battleboats.agents.debug_plot import plot_state
 from battleboats.agents.heuristics import (
-    COMBAT_K_TURNS,
-    COMBAT_TYPES,
-    HOME_K_PER_DIAGONAL,
-    MAT_PORT_VALUE,
-    SCALE_COMBAT,
-    SCALE_ECON,
-    SCALE_HOME,
-    SCALE_MAT,
-    W_CARGO,
-    W_COMBAT,
-    W_ECON,
-    W_HOME,
-    W_MAT,
-    _combat_balance,
-    _home_threat,
-    _merchant_logistics_value,
-    _ship_value,
+    FEATURE_KEYS,
+    decompose as _h_decompose,
     pk,
 )
 from battleboats.agents.random_agent import random_action
@@ -58,46 +42,30 @@ DEFAULT_OUT = "/home/nick/Desktop/repos/Battleboats/temp.md"
 
 
 # --------------------------------------------------------------- decomposition
-def decompose(engine: gameEngine, me: int) -> dict:
-    if engine.is_terminal():
-        h = 1.0 if engine.winner == me else -1.0
-        return {"T_HOME": h, "T_COMBAT": h, "T_MAT": h, "T_ECON": h, "H": h, "terminal": True}
-    opp_player = engine.players[1 - me]
-    my_player = engine.players[me]
-    opp_ships = [engine.ships[s] for s in opp_player.owned_ship_ids]
-    my_ships = [engine.ships[s] for s in my_player.owned_ship_ids]
-    opp_combat = [s for s in opp_ships if s.type in COMBAT_TYPES]
-    my_combat = [s for s in my_ships if s.type in COMBAT_TYPES]
+# Short column labels for the markdown table — must cover every key in
+# heuristics.FEATURE_KEYS, in display order.
+FEATURE_LABEL = {
+    "material_diff": "mat",
+    "home_pressure_diff": "hp",
+    "combat_balance": "comb",
+    "econ_value_self": "econ",
+    "merchant_count_value_self": "mrchN",
+    "has_landing_self": "hasL",
+    "landing_pressure_self": "lndP",
+}
 
-    char = (engine.map.width + engine.map.height) / HOME_K_PER_DIAGONAL
-    home_raw = _home_threat(opp_player.home_port, my_ships, engine.map.manhattan, char) - _home_threat(
-        my_player.home_port, opp_ships, engine.map.manhattan, char
-    )
-    combat_raw = _combat_balance(my_combat, opp_combat, engine.kill_curve_k, engine.map.manhattan, COMBAT_K_TURNS)
-    opp_val = sum(_ship_value(s) for s in opp_ships) + MAT_PORT_VALUE * len(opp_player.owned_port_positions)
-    my_val = sum(_ship_value(s) for s in my_ships) + MAT_PORT_VALUE * len(my_player.owned_port_positions)
-    mat_raw = my_val - opp_val
-    map_diag = engine.map.width + engine.map.height
-    econ_raw = (
-        my_player.cash
-        + sum(engine.ports[pos].stockpile for pos in my_player.owned_port_positions)
-        + W_CARGO * sum(s.cargo for s in my_ships if s.type is ShipType.MERCHANT)
-        + _merchant_logistics_value(
-            my_ships=my_ships,
-            owned_port_positions=my_player.owned_port_positions,
-            home_port=my_player.home_port,
-            manhattan=engine.map.manhattan,
-            map_diag=map_diag,
-        )
-    )
-    T_HOME = math.tanh(home_raw / SCALE_HOME)
-    T_COMBAT = math.tanh(combat_raw / SCALE_COMBAT)
-    T_MAT = math.tanh(mat_raw / SCALE_MAT)
-    T_ECON = math.tanh(econ_raw / SCALE_ECON)
-    H = (W_HOME * T_HOME + W_COMBAT * T_COMBAT + W_MAT * T_MAT + W_ECON * T_ECON) / (
-        W_HOME + W_COMBAT + W_MAT + W_ECON
-    )
-    return {"T_HOME": T_HOME, "T_COMBAT": T_COMBAT, "T_MAT": T_MAT, "T_ECON": T_ECON, "H": H, "terminal": False}
+
+def decompose(engine: gameEngine, me: int) -> dict:
+    """Thin wrapper around `heuristics.decompose` adapted for this script.
+
+    Returns a dict with:
+        - H              total heuristic value
+        - terminal       bool
+        - phi            features dict (raw feature values)
+        - contrib        contributions dict (post-weight, pre-tanh)
+    """
+    H, phi, contrib = _h_decompose(engine, me)
+    return {"H": H, "terminal": engine.is_terminal(), "phi": phi, "contrib": contrib}
 
 
 # ---------------------------------------------------------------- action label
@@ -192,11 +160,12 @@ def write_table_md(rows, baseline: dict, engine: gameEngine, me: int, step: int,
     lines = []
     lines.append(f"# Action table — step {step}, turn {engine.turn}")
     lines.append("")
+    baseline_contrib = " ".join(
+        f"{FEATURE_LABEL[k]}=`{baseline['contrib'][k]:+.3f}`" for k in FEATURE_KEYS
+    )
     lines.append(
         f"**Baseline** (current state, no action applied): "
-        f"H = `{baseline['H']:+.5f}`  —  "
-        f"home=`{baseline['T_HOME']:+.3f}` combat=`{baseline['T_COMBAT']:+.3f}` "
-        f"mat=`{baseline['T_MAT']:+.3f}` econ=`{baseline['T_ECON']:+.3f}`"
+        f"H = `{baseline['H']:+.5f}`  —  {baseline_contrib}"
     )
     lines.append("")
     lines.append(f"- Cash: me=`{me_player.cash}`, opp=`{opp_player.cash}`")
@@ -206,11 +175,15 @@ def write_table_md(rows, baseline: dict, engine: gameEngine, me: int, step: int,
     )
     lines.append(f"- Fleet cargo: `{fleet_cargo:.0%}` across `{len(my_merchants)}` merchant(s)")
     lines.append("")
+
+    # Build dynamic table header from feature keys (one contribution column each).
+    feat_headers = " | ".join(FEATURE_LABEL[k] for k in FEATURE_KEYS)
+    feat_sep = " | ".join(["---:"] * len(FEATURE_KEYS))
     lines.append(
-        "| # | type | ship | target | H | dH | T_HOME | T_COMBAT | T_MAT | T_ECON | cash | cargo | info |"
+        f"| # | type | ship | target | H | dH | {feat_headers} | cash | cargo | info |"
     )
     lines.append(
-        "|---:|------|------|--------|---:|---:|---:|---:|---:|---:|---:|---:|------|"
+        f"|---:|------|------|--------|---:|---:| {feat_sep} |---:|---:|------|"
     )
 
     n = len(rows)
@@ -219,13 +192,13 @@ def write_table_md(rows, baseline: dict, engine: gameEngine, me: int, step: int,
         atype, ship, target, extra = _action_parts(action, engine, me)
         dh = t["H"] - baseline["H"]
         cargo_str = f"{cargo_after:.0%}" if cargo_after is not None else "—"
-        # Markdown cells: escape pipe; tuples/parens are fine.
         target_md = str(target).replace("|", "\\|")
         info_md = str(extra).replace("|", "\\|")
+        feat_cells = " | ".join(f"{t['contrib'][k]:+.3f}" for k in FEATURE_KEYS)
         lines.append(
             f"| {i} | {atype} | {ship} | {target_md} "
             f"| {t['H']:+.5f} | {dh:+.5f} "
-            f"| {t['T_HOME']:+.3f} | {t['T_COMBAT']:+.3f} | {t['T_MAT']:+.3f} | {t['T_ECON']:+.3f} "
+            f"| {feat_cells} "
             f"| {cash_after} | {cargo_str} | {info_md} |"
         )
 

@@ -18,6 +18,8 @@ from __future__ import annotations
 
 import argparse
 import json
+import multiprocessing as mp
+import os
 import random
 import time
 from datetime import datetime
@@ -111,15 +113,29 @@ def _min_distance_to_enemy_ship(engine, player_id: int) -> str:
 
 
 def _play_one_game(
-    env: BattleboatsAEC,
+    game_idx: int,
+    map_json_path: str,
+    seed: int,
     mcts_player_id: int,
-    rng: random.Random,
     iterations: int,
+    max_turns: int,
     step_budget: int,
+    verbose: bool = True,
     debug_plot: bool = False,
     debug_plot_mcts_only: bool = False,
 ) -> Dict[str, Any]:
-    """Play one game; return a record with trajectory + outcome + timing."""
+    """Play one game; return a record with trajectory + outcome + timing.
+
+    Self-contained for multiprocessing: takes only picklable primitives and
+    constructs its own env + rng inside the function body. The `verbose`
+    flag gates per-step stdout — useful to keep on for serial single-game
+    debugging, off in parallel benchmark runs where 8 workers interleaving
+    step prints is unreadable.
+    """
+    env = BattleboatsAEC(map_json_path=map_json_path, max_turns=max_turns)
+    env.reset(seed=seed)
+    rng = random.Random(seed)
+
     trajectory: List[Dict[str, Any]] = []
     game_t0 = time.perf_counter()
     steps = 0
@@ -136,33 +152,29 @@ def _play_one_game(
             elapsed = time.perf_counter() - t0
             actor = "mcts"
             action_name = _describe_action(action, env.engine)
-            value = heuristic_eval(env.engine, mcts_player_id)
-            inventory = _format_inventory(env.engine, mcts_player_id)
-            opp_inventory = _format_inventory(env.engine, 1 - mcts_player_id)
-            spotted = _format_sightings(env.engine, mcts_player_id)
-            cash = env.engine.players[mcts_player_id].cash
-            opp_cash = env.engine.players[1 - mcts_player_id].cash
-            d_home = _min_distance_to_enemy_home(env.engine, mcts_player_id)
-            d_enemy = _min_distance_to_enemy_ship(env.engine, mcts_player_id)
-            print(
-                f"  step={steps:6d} turn={env.engine.turn:4d}  mcts {elapsed:6.2f}s  "
-                f"value={value:+.6f}  $me={cash:5d}  $opp={opp_cash:5d}  "
-                f"d_home={d_home:>3}  d_enemy={d_enemy:>3}  "
-                f"{action_name:<20}  "
-                f"mine=[{inventory}]  opp=[{opp_inventory}]  spot=[{spotted}]",
-                flush=True,
-            )
+            if verbose:
+                value = heuristic_eval(env.engine, mcts_player_id)
+                inventory = _format_inventory(env.engine, mcts_player_id)
+                opp_inventory = _format_inventory(env.engine, 1 - mcts_player_id)
+                spotted = _format_sightings(env.engine, mcts_player_id)
+                cash = env.engine.players[mcts_player_id].cash
+                opp_cash = env.engine.players[1 - mcts_player_id].cash
+                d_home = _min_distance_to_enemy_home(env.engine, mcts_player_id)
+                d_enemy = _min_distance_to_enemy_ship(env.engine, mcts_player_id)
+                print(
+                    f"  step={steps:6d} turn={env.engine.turn:4d}  mcts {elapsed:6.2f}s  "
+                    f"value={value:+.6f}  $me={cash:5d}  $opp={opp_cash:5d}  "
+                    f"d_home={d_home:>3}  d_enemy={d_enemy:>3}  "
+                    f"{action_name:<20}  "
+                    f"mine=[{inventory}]  opp=[{opp_inventory}]  spot=[{spotted}]",
+                    flush=True,
+                )
         else:
             action = random_action(env.engine, env._player_id(agent), rng)
             actor = "random"
             elapsed = 0.0
             action_name = _describe_action(action, env.engine)
 
-        # --- DEBUG PLOT HOOK -------------------------------------------------
-        # Renders the full game state (no fog) with the just-chosen action
-        # highlighted. The breakpoint() below is the place to set an IDE
-        # breakpoint — execution pauses here with the figure visible so you
-        # can inspect state, then continue (pdb 'c') to advance one action.
         debug_plot_mcts_only = True
         debug_plot = False
         if debug_plot and (not debug_plot_mcts_only or actor == "mcts"):
@@ -194,11 +206,15 @@ def _play_one_game(
         env.step(action)
         steps += 1
         if steps > step_budget:
-            print(f"  [step budget {step_budget} hit; aborting game]", flush=True)
+            if verbose:
+                print(f"  [step budget {step_budget} hit; aborting game]", flush=True)
             break
 
     return {
+        "game_idx": game_idx,
+        "iterations": iterations,
         "mcts_player_id": mcts_player_id,
+        "seed": seed,
         "winner": env.engine.winner,  # 0 / 1 / None
         "steps": steps,
         "final_turn": env.engine.turn,
@@ -207,13 +223,30 @@ def _play_one_game(
     }
 
 
+def _worker_run_game(kwargs: Dict[str, Any]) -> Dict[str, Any]:
+    """Top-level multiprocessing entry point.
+
+    A bare wrapper around `_play_one_game(**kwargs)` so that
+    `multiprocessing.Pool.imap_unordered` can dispatch it — closures and
+    nested functions don't pickle reliably across spawn/fork boundaries.
+    """
+    return _play_one_game(**kwargs)
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description="MCTS vs random benchmark with telemetry.")
-    parser.add_argument("--iterations", type=int, default=30, help="MCTS iterations per move.")
+    parser.add_argument("--iterations", type=int, default=2500, help="MCTS iterations per move.")
     parser.add_argument("--num-games", type=int, default=4, help="Total games (sides alternate).")
-    parser.add_argument("--max-turns", type=int, default=50, help="Env truncation turn cap.")
+    parser.add_argument("--max-turns", type=int, default=250, help="Env truncation turn cap.")
     parser.add_argument("--step-budget", type=int, default=50_000, help="Per-game step cap.")
     parser.add_argument("--seed", type=int, default=0, help="Base seed; per-game seed = base + i.")
+    parser.add_argument(
+        "--workers",
+        type=int,
+        default=os.cpu_count() or 1,
+        help="Parallel game workers. 1 = serial (with per-step prints). "
+        "Default = os.cpu_count(). Larger values oversubscribe physical cores.",
+    )
     parser.add_argument(
         "--debug-plot",
         action=argparse.BooleanOptionalAction,
@@ -233,10 +266,32 @@ def main() -> None:
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     out_path = OUTPUT_DIR / f"mcts_vs_random_{timestamp}.json"
 
+    # Clamp workers so we never spawn more processes than there are games.
+    workers = max(1, min(args.workers, args.num_games))
+
     print(f"Running {args.num_games} games at {args.iterations} iters/move.")
-    print(f"max_turns={args.max_turns}, step_budget={args.step_budget}")
+    print(f"max_turns={args.max_turns}, step_budget={args.step_budget}, workers={workers}")
     print(f"Output: {out_path}")
     print()
+
+    # Build all work items up front. `verbose=True` only in serial mode —
+    # interleaved per-step prints from 8 workers are unreadable.
+    work_items: List[Dict[str, Any]] = []
+    for game_idx in range(args.num_games):
+        work_items.append(
+            {
+                "game_idx": game_idx,
+                "map_json_path": MAP_JSON,
+                "seed": args.seed + game_idx,
+                "mcts_player_id": game_idx % 2,
+                "iterations": args.iterations,
+                "max_turns": args.max_turns,
+                "step_budget": args.step_budget,
+                "verbose": workers == 1,
+                "debug_plot": args.debug_plot,
+                "debug_plot_mcts_only": args.debug_plot_mcts_only,
+            }
+        )
 
     mcts_wins = 0
     random_wins = 0
@@ -244,29 +299,42 @@ def main() -> None:
     games: List[Dict[str, Any]] = []
     overall_t0 = time.perf_counter()
 
-    for game_idx in range(args.num_games):
-        mcts_player = game_idx % 2
-        print(
-            f"=== Game {game_idx + 1}/{args.num_games}  "
-            f"(MCTS plays as player_{mcts_player}, seed={args.seed + game_idx}) ==="
-        )
+    def _flush_summary() -> None:
+        """Write the current cumulative summary to disk.
 
-        env = BattleboatsAEC(map_json_path=MAP_JSON, max_turns=args.max_turns)
-        env.reset(seed=args.seed + game_idx)
-        rng = random.Random(args.seed + game_idx)
+        Called after every game completes so a long benchmark leaves a
+        partial log even if it's killed mid-batch. Games are sorted by
+        `game_idx` for deterministic output ordering — under parallel
+        execution `imap_unordered` delivers them in completion order, not
+        dispatch order.
+        """
+        sorted_games = sorted(games, key=lambda g: g["game_idx"])
+        summary = {
+            "config": {
+                "iterations": args.iterations,
+                "num_games": args.num_games,
+                "max_turns": args.max_turns,
+                "step_budget": args.step_budget,
+                "seed": args.seed,
+                "workers": workers,
+                "map_json": MAP_JSON,
+            },
+            "results": {
+                "mcts_wins": mcts_wins,
+                "random_wins": random_wins,
+                "truncated": truncated,
+                "completed_games": len(games),
+                "total_wall_time_s": time.perf_counter() - overall_t0,
+            },
+            "games": sorted_games,
+        }
+        with open(out_path, "w") as f:
+            json.dump(summary, f, default=str)
 
-        record = _play_one_game(
-            env,
-            mcts_player,
-            rng,
-            args.iterations,
-            args.step_budget,
-            debug_plot=args.debug_plot,
-            debug_plot_mcts_only=args.debug_plot_mcts_only,
-        )
-        record["game_idx"] = game_idx
+    def _process_record(record: Dict[str, Any]) -> None:
+        nonlocal mcts_wins, random_wins, truncated
         games.append(record)
-
+        mcts_player = record["mcts_player_id"]
         winner = record["winner"]
         if winner == mcts_player:
             mcts_wins += 1
@@ -277,33 +345,34 @@ def main() -> None:
         else:
             truncated += 1
             outcome = "truncated"
+        print(
+            f"  [{len(games):3d}/{args.num_games}] game_idx={record['game_idx']:3d}  "
+            f"player_{mcts_player}  seed={record['seed']}  "
+            f"-> {outcome:10s}  "
+            f"({record['steps']} steps, turn {record['final_turn']}, {record['wall_time_s']:.1f}s)",
+            flush=True,
+        )
+        _flush_summary()
 
-        print(f"  -> {outcome}  ({record['steps']} steps, " f"turn {record['final_turn']}, {record['wall_time_s']:.1f}s)")
-        print()
+    if workers == 1:
+        for kwargs in work_items:
+            print(
+                f"=== Game {kwargs['game_idx'] + 1}/{args.num_games}  "
+                f"(MCTS plays as player_{kwargs['mcts_player_id']}, seed={kwargs['seed']}) ==="
+            )
+            _process_record(_play_one_game(**kwargs))
+            print()
+    else:
+        # imap_unordered yields records as workers finish, so progress prints
+        # and the on-disk summary update in completion order. The pool context
+        # manager handles join/terminate on exception.
+        with mp.Pool(processes=workers) as pool:
+            for record in pool.imap_unordered(_worker_run_game, work_items):
+                _process_record(record)
 
     overall_elapsed = time.perf_counter() - overall_t0
 
-    summary = {
-        "config": {
-            "iterations": args.iterations,
-            "num_games": args.num_games,
-            "max_turns": args.max_turns,
-            "step_budget": args.step_budget,
-            "seed": args.seed,
-            "map_json": MAP_JSON,
-        },
-        "results": {
-            "mcts_wins": mcts_wins,
-            "random_wins": random_wins,
-            "truncated": truncated,
-            "total_wall_time_s": overall_elapsed,
-        },
-        "games": games,
-    }
-
-    with open(out_path, "w") as f:
-        json.dump(summary, f, default=str)
-
+    print()
     print("=" * 60)
     print(f"Summary: mcts={mcts_wins}  random={random_wins}  truncated={truncated}")
     print(f"Total wall time: {overall_elapsed:.1f}s")

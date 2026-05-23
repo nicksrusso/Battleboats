@@ -32,7 +32,7 @@ from battleboats.agents.random_agent import random_action
 
 DEFAULT_C = math.sqrt(2)
 DEFAULT_ITERATIONS = 10000
-ROLLOUT_STEP_BUDGET = 100  # engine steps; random play rarely terminates in battleboats
+ROLLOUT_STEP_BUDGET = 0  # engine steps; random play rarely terminates in battleboats
 
 
 @dataclass
@@ -84,7 +84,29 @@ def godmode_mcts_action(
             leaf = _expand(leaf, sim, rng)
         value = _evaluate(sim, leaf.side_to_move, rng)
         _backprop(leaf, value)
+
+    # _debug_print_root(root)
     return _best_child_by_visits(root, rng).action_in
+
+
+def _debug_print_root(root: Node) -> None:
+    """Print top-10 root children by visit count, with Q from root's POV.
+
+    Used to diagnose MCTS-vs-heuristic disagreement at the root — shows
+    both which actions are getting search budget AND their mean value
+    estimates. If a class of actions (e.g., all BuildLanding spawn
+    variants) gets fragmented across many children, the per-child visit
+    count will be low even when the class collectively dominates.
+    """
+    if not root.children:
+        return
+    sorted_children = sorted(root.children, key=lambda c: -c.visits)
+    print(f"    [mcts root] {len(root.children)} children, {sum(c.visits for c in root.children)} total visits")
+    for child in sorted_children[:10]:
+        q_child_pov = child.total_value / child.visits
+        sign = 1 if child.side_to_move == root.side_to_move else -1
+        q_root_pov = sign * q_child_pov
+        print(f"    [mcts root]   visits={child.visits:4d}  Q={q_root_pov:+.3f}  {child.action_in}")
 
 
 def _select(node: Node, engine: "gameEngine", c: float) -> Node:
@@ -177,13 +199,24 @@ def _ucb1(child: Node, parent_visits: int, c: float) -> float:
 
 
 def _best_child_by_visits(node: Node, rng: random.Random) -> Node:
-    """Return the most-visited child of `node`, breaking ties with `rng`.
+    """Return the most-visited child of `node`; break visit ties on mean Q.
 
     Visit count is more stable than mean value for final move selection —
-    the most-visited child is the one UCT kept committing to.
+    the most-visited child is the one UCT kept committing to. But when the
+    action space is large enough that vanilla UCT can't break ties via
+    exploration (i.e. branching factor ≥ iteration budget so every child
+    gets the same number of visits), falling back to mean Q lets the
+    heuristic's leaf signal decide instead of a coin flip.
     """
-    visit_count = [child.visits for child in node.children]
-
-    max_visits = max(visit_count)
+    max_visits = max(child.visits for child in node.children)
     top = [child for child in node.children if child.visits == max_visits]
-    return rng.choice(top)
+    if len(top) == 1:
+        return top[0]
+
+    def q_from_root_pov(child: Node) -> float:
+        q = child.total_value / child.visits
+        return q if child.side_to_move == node.side_to_move else -q
+
+    max_q = max(q_from_root_pov(child) for child in top)
+    best = [child for child in top if q_from_root_pov(child) >= max_q - 1e-12]
+    return rng.choice(best)
