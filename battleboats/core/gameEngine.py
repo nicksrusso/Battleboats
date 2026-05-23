@@ -253,15 +253,17 @@ class gameEngine:
         if self.map.manhattan(merchant.position, a.port) != 1:
             return
         player = self.players[self.current_player]
-        if a.port == player.home_port:
-            player.cash += merchant.cargo * CASH_PER_MATERIAL
-        else:
-            self.ports[a.port].stockpile += merchant.cargo
+        # Unload restricted to home port — non-home unload would just push
+        # cargo back to stockpile, which creates sterile load↔unload loops.
+        if a.port != player.home_port:
+            return
+        player.cash += merchant.cargo * CASH_PER_MATERIAL
         merchant.cargo = 0
 
     def _tick_port_income(self, player_id: int) -> None:
-        """Apply per-turn production for one player. Home port converts directly
-        to cash; other owned ports accumulate raw materials needing a merchant."""
+        """Apply production for one player at the start of their turn. Home port
+        converts directly to cash; other owned ports accumulate raw materials
+        needing a merchant to monetize."""
         player = self.players[player_id]
         for pos in player.owned_port_positions:
             if pos == player.home_port:
@@ -270,13 +272,18 @@ class gameEngine:
                 self.ports[pos].stockpile += PORT_PRODUCTION
 
     def _do_end_turn(self, a: EndTurnAction) -> None:
+        # Outgoing player's per-turn ship bookkeeping.
         for sid in self.players[self.current_player].owned_ship_ids:
             self.ships[sid].reset_turn_flags()
-        self._tick_port_income(self.current_player)
         # self.turn counts rounds; increments after player 1 finishes their turn.
         if self.current_player == 1:
             self.turn += 1
+        # Hand control over, then apply the new player's start-of-turn income.
+        # Income lives at start-of-turn (not end-of-turn) so EndTurn carries
+        # no economic delta from the actor's perspective — income arrives
+        # "automatically" and is not a reward MCTS should chase by ending early.
         self.current_player = 1 - self.current_player
+        self._tick_port_income(self.current_player)
 
     # ------------------------------------------------------------------ internal helpers
     def _new_ship_id(self) -> int:
@@ -424,13 +431,14 @@ class gameEngine:
         """Concrete legal actions for `player_id` right now.
 
         Mirrors the validation in each `_do_*` handler so step() will accept
-        every returned action. AttackAction is omitted until visibility lands
-        in Phase 2. EndTurnAction is always included for the current player.
+        every returned action. EndTurnAction is always included for the
+        current player.
         """
         actions: List[Action] = []
         if self.winner is not None or player_id != self.current_player:
             return actions
         player = self.players[player_id]
+        opp_ship_ids = self.players[1 - player_id].owned_ship_ids
 
         for sid in player.owned_ship_ids:
             ship = self.ships[sid]
@@ -452,7 +460,11 @@ class gameEngine:
                     if is_landing and neighbor_owner != player_id:
                         actions.append(CapturePortAction(sid, neighbor))
                     if is_merchant and neighbor_owner == player_id:
-                        if ship.cargo > 0:
+                        # Unload is restricted to home port — non-home unload
+                        # drops cargo back into stockpile, creating sterile
+                        # load↔unload loops that the logistics shaping bonus
+                        # in T_ECON would otherwise reward.
+                        if ship.cargo > 0 and neighbor == player.home_port:
                             actions.append(MerchantUnloadAction(sid, neighbor))
                         if (
                             ship.cargo < MERCHANT_CAPACITY
@@ -462,6 +474,17 @@ class gameEngine:
                             actions.append(MerchantLoadAction(sid, neighbor))
                 elif is_builder:
                     actions.append(BuildPortAction(sid, neighbor))
+
+            # AttackAction enumeration — mirrors _do_attack's preconditions.
+            if not ship.has_attacked and ship.stats.attack_range > 0:
+                for opp_sid in opp_ship_ids:
+                    target = self.ships[opp_sid]
+                    distance = self.map.manhattan(ship.position, target.position)
+                    if distance > ship.stats.attack_range:
+                        continue
+                    if distance > self._detection_distance(ship, target):
+                        continue
+                    actions.append(AttackAction(sid, opp_sid))
 
         affordable_types = [t for t, s in BASE_STATS.items() if player.cash >= s.cost]
         if affordable_types:
@@ -476,6 +499,8 @@ class gameEngine:
                     if self.map.is_occupied(spawn):
                         continue
                     for t in affordable_types:
+                        if t != ShipType.MERCHANT:
+                            continue
                         actions.append(BuildShipAction(port, spawn, t))
 
         actions.append(EndTurnAction())

@@ -31,7 +31,7 @@ from battleboats.agents.heuristics import heuristic_eval
 from battleboats.agents.random_agent import random_action
 
 DEFAULT_C = math.sqrt(2)
-DEFAULT_ITERATIONS = 1000
+DEFAULT_ITERATIONS = 10000
 ROLLOUT_STEP_BUDGET = 100  # engine steps; random play rarely terminates in battleboats
 
 

@@ -1,0 +1,314 @@
+"""Run god-mode MCTS vs random agent, with per-step telemetry.
+
+Mirrors the shape of tests/test_godmode_mcts.py::test_mcts_beats_random but
+runs as a plain script (no pytest plumbing), so it can be invoked directly
+and its stdout / log files are clean.
+
+Per-game telemetry is collected in memory and dumped to a timestamped JSON
+file under runs/benchmarks/. Live stdout prints one line per MCTS move
+showing turn, wall time, heuristic value, and the action type.
+
+Usage:
+    poetry run python scripts/benchmark_godmode_mcts.py
+    poetry run python scripts/benchmark_godmode_mcts.py --iterations 250 \\
+        --num-games 1 --max-turns 250 --step-budget 500000
+"""
+
+from __future__ import annotations
+
+import argparse
+import json
+import random
+import time
+from datetime import datetime
+from pathlib import Path
+from typing import Any, Dict, List
+
+from battleboats.agents.debug_plot import plot_state
+from battleboats.agents.godmode_mcts import godmode_mcts_action
+from battleboats.agents.heuristics import heuristic_eval
+from battleboats.agents.random_agent import random_action
+from battleboats.core.actions import MoveAction
+from battleboats.core.shipyard.ship_type import ShipType
+from battleboats.envs.battleboats_aec import BattleboatsAEC
+
+MAP_JSON = "/home/nick/Desktop/repos/Battleboats/battleboats/core/config/map.json"
+OUTPUT_DIR = Path("/home/nick/Desktop/repos/Battleboats/runs/benchmarks")
+
+
+def _describe_action(action, engine) -> str:
+    """Return a short, human-readable label for an action.
+
+    For MoveActions, includes the ship type so we can spot when MCTS is
+    bouncing Merchants / Builders around (which produce zero heuristic
+    signal). For other action types, just returns the class name.
+    """
+    if action is None:
+        return "None"
+    if isinstance(action, MoveAction):
+        ship = engine.ships.get(action.ship_id)
+        if ship is None:
+            return "Move(?)"
+        return f"Move({ship.type.value})"
+    return type(action).__name__
+
+
+def _format_inventory(engine, player_id: int) -> str:
+    """Format the player's ship inventory as 'Type:count - Type:count - ...'.
+
+    Iterates ShipType in declaration order so columns are stable across
+    turns. Types with zero count are omitted to keep the line compact.
+    """
+    counts: Dict[ShipType, int] = {}
+    for sid in engine.players[player_id].owned_ship_ids:
+        t = engine.ships[sid].type
+        counts[t] = counts.get(t, 0) + 1
+    return " - ".join(f"{st.value}:{counts[st]}" for st in ShipType if counts.get(st))
+
+
+def _format_sightings(engine, player_id: int) -> str:
+    """Format `player_id`'s fresh enemy ship sightings as 'Type:count - ...'.
+
+    Only counts sightings marked `fresh` (currently in view per fog rules).
+    Stale sightings (last-known but currently out of view) are not included
+    — this is the "what's actively spotted" view. Same column ordering as
+    _format_inventory for visual consistency.
+    """
+    counts: Dict[ShipType, int] = {}
+    for sighting in engine.players[player_id].sightings.values():
+        if not sighting.fresh:
+            continue
+        counts[sighting.type] = counts.get(sighting.type, 0) + 1
+    return " - ".join(f"{st.value}:{counts[st]}" for st in ShipType if counts.get(st))
+
+
+def _min_distance_to_enemy_home(engine, player_id: int) -> str:
+    """Min Manhattan distance from any of player's ships to the enemy home port.
+
+    Returns '--' if the player has no ships. Uses god-mode access to the
+    enemy's home_port directly (legitimate here: benchmark, not the agent).
+    """
+    opp_home = engine.players[1 - player_id].home_port
+    my_ships = engine.players[player_id].owned_ship_ids
+    if not my_ships:
+        return "--"
+    return str(min(engine.map.manhattan(engine.ships[sid].position, opp_home) for sid in my_ships))
+
+
+def _min_distance_to_enemy_ship(engine, player_id: int) -> str:
+    """Min Manhattan distance from any of player's ships to any enemy ship.
+
+    Returns '--' if either side has no ships. God-mode access — used to
+    track whether MCTS is closing the gap to the opponent's fleet.
+    """
+    my_ships = engine.players[player_id].owned_ship_ids
+    opp_ships = engine.players[1 - player_id].owned_ship_ids
+    if not my_ships or not opp_ships:
+        return "--"
+    return str(
+        min(engine.map.manhattan(engine.ships[s].position, engine.ships[o].position) for s in my_ships for o in opp_ships)
+    )
+
+
+def _play_one_game(
+    env: BattleboatsAEC,
+    mcts_player_id: int,
+    rng: random.Random,
+    iterations: int,
+    step_budget: int,
+    debug_plot: bool = False,
+    debug_plot_mcts_only: bool = False,
+) -> Dict[str, Any]:
+    """Play one game; return a record with trajectory + outcome + timing."""
+    trajectory: List[Dict[str, Any]] = []
+    game_t0 = time.perf_counter()
+    steps = 0
+
+    for agent in env.agent_iter():
+        if env.terminations[agent] or env.truncations[agent]:
+            action = None
+            actor = "dead"
+            elapsed = 0.0
+            action_name = "None"
+        elif env._player_id(agent) == mcts_player_id:
+            t0 = time.perf_counter()
+            action = godmode_mcts_action(env.engine, mcts_player_id, rng, iterations=iterations)
+            elapsed = time.perf_counter() - t0
+            actor = "mcts"
+            action_name = _describe_action(action, env.engine)
+            value = heuristic_eval(env.engine, mcts_player_id)
+            inventory = _format_inventory(env.engine, mcts_player_id)
+            opp_inventory = _format_inventory(env.engine, 1 - mcts_player_id)
+            spotted = _format_sightings(env.engine, mcts_player_id)
+            cash = env.engine.players[mcts_player_id].cash
+            opp_cash = env.engine.players[1 - mcts_player_id].cash
+            d_home = _min_distance_to_enemy_home(env.engine, mcts_player_id)
+            d_enemy = _min_distance_to_enemy_ship(env.engine, mcts_player_id)
+            print(
+                f"  step={steps:6d} turn={env.engine.turn:4d}  mcts {elapsed:6.2f}s  "
+                f"value={value:+.6f}  $me={cash:5d}  $opp={opp_cash:5d}  "
+                f"d_home={d_home:>3}  d_enemy={d_enemy:>3}  "
+                f"{action_name:<20}  "
+                f"mine=[{inventory}]  opp=[{opp_inventory}]  spot=[{spotted}]",
+                flush=True,
+            )
+        else:
+            action = random_action(env.engine, env._player_id(agent), rng)
+            actor = "random"
+            elapsed = 0.0
+            action_name = _describe_action(action, env.engine)
+
+        # --- DEBUG PLOT HOOK -------------------------------------------------
+        # Renders the full game state (no fog) with the just-chosen action
+        # highlighted. The breakpoint() below is the place to set an IDE
+        # breakpoint — execution pauses here with the figure visible so you
+        # can inspect state, then continue (pdb 'c') to advance one action.
+        debug_plot_mcts_only = True
+        debug_plot = False
+        if debug_plot and (not debug_plot_mcts_only or actor == "mcts"):
+            heur_val = heuristic_eval(env.engine, mcts_player_id)
+            plot_state(
+                env.engine,
+                action,
+                actor,
+                mcts_player_id,
+                step=steps,
+                value=heur_val,
+            )
+            breakpoint()  # <-- inspect the plot here; 'c' to continue.
+        # ---------------------------------------------------------------------
+
+        # Telemetry entry — record state from MCTS's perspective before stepping.
+        value = heuristic_eval(env.engine, mcts_player_id)
+        trajectory.append(
+            {
+                "step": steps,
+                "turn": env.engine.turn,
+                "actor": actor,
+                "value": value,
+                "elapsed_s": elapsed,
+                "action_type": action_name,
+            }
+        )
+
+        env.step(action)
+        steps += 1
+        if steps > step_budget:
+            print(f"  [step budget {step_budget} hit; aborting game]", flush=True)
+            break
+
+    return {
+        "mcts_player_id": mcts_player_id,
+        "winner": env.engine.winner,  # 0 / 1 / None
+        "steps": steps,
+        "final_turn": env.engine.turn,
+        "wall_time_s": time.perf_counter() - game_t0,
+        "trajectory": trajectory,
+    }
+
+
+def main() -> None:
+    parser = argparse.ArgumentParser(description="MCTS vs random benchmark with telemetry.")
+    parser.add_argument("--iterations", type=int, default=30, help="MCTS iterations per move.")
+    parser.add_argument("--num-games", type=int, default=4, help="Total games (sides alternate).")
+    parser.add_argument("--max-turns", type=int, default=50, help="Env truncation turn cap.")
+    parser.add_argument("--step-budget", type=int, default=50_000, help="Per-game step cap.")
+    parser.add_argument("--seed", type=int, default=0, help="Base seed; per-game seed = base + i.")
+    parser.add_argument(
+        "--debug-plot",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="After each action selection, render full-state plot and hit a "
+        "breakpoint() so you can inspect the game state. Pass --no-debug-plot "
+        "to disable.",
+    )
+    parser.add_argument(
+        "--debug-plot-mcts-only",
+        action="store_true",
+        help="With --debug-plot, only pause for MCTS-chosen actions (skip random).",
+    )
+    args = parser.parse_args()
+
+    OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    out_path = OUTPUT_DIR / f"mcts_vs_random_{timestamp}.json"
+
+    print(f"Running {args.num_games} games at {args.iterations} iters/move.")
+    print(f"max_turns={args.max_turns}, step_budget={args.step_budget}")
+    print(f"Output: {out_path}")
+    print()
+
+    mcts_wins = 0
+    random_wins = 0
+    truncated = 0
+    games: List[Dict[str, Any]] = []
+    overall_t0 = time.perf_counter()
+
+    for game_idx in range(args.num_games):
+        mcts_player = game_idx % 2
+        print(
+            f"=== Game {game_idx + 1}/{args.num_games}  "
+            f"(MCTS plays as player_{mcts_player}, seed={args.seed + game_idx}) ==="
+        )
+
+        env = BattleboatsAEC(map_json_path=MAP_JSON, max_turns=args.max_turns)
+        env.reset(seed=args.seed + game_idx)
+        rng = random.Random(args.seed + game_idx)
+
+        record = _play_one_game(
+            env,
+            mcts_player,
+            rng,
+            args.iterations,
+            args.step_budget,
+            debug_plot=args.debug_plot,
+            debug_plot_mcts_only=args.debug_plot_mcts_only,
+        )
+        record["game_idx"] = game_idx
+        games.append(record)
+
+        winner = record["winner"]
+        if winner == mcts_player:
+            mcts_wins += 1
+            outcome = "MCTS won"
+        elif winner == (1 - mcts_player):
+            random_wins += 1
+            outcome = "random won"
+        else:
+            truncated += 1
+            outcome = "truncated"
+
+        print(f"  -> {outcome}  ({record['steps']} steps, " f"turn {record['final_turn']}, {record['wall_time_s']:.1f}s)")
+        print()
+
+    overall_elapsed = time.perf_counter() - overall_t0
+
+    summary = {
+        "config": {
+            "iterations": args.iterations,
+            "num_games": args.num_games,
+            "max_turns": args.max_turns,
+            "step_budget": args.step_budget,
+            "seed": args.seed,
+            "map_json": MAP_JSON,
+        },
+        "results": {
+            "mcts_wins": mcts_wins,
+            "random_wins": random_wins,
+            "truncated": truncated,
+            "total_wall_time_s": overall_elapsed,
+        },
+        "games": games,
+    }
+
+    with open(out_path, "w") as f:
+        json.dump(summary, f, default=str)
+
+    print("=" * 60)
+    print(f"Summary: mcts={mcts_wins}  random={random_wins}  truncated={truncated}")
+    print(f"Total wall time: {overall_elapsed:.1f}s")
+    print(f"Log: {out_path}")
+
+
+if __name__ == "__main__":
+    main()

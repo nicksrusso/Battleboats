@@ -57,8 +57,26 @@ are closing on mine*. The single most important term.
 
 For a given home position `H` and a set of enemy ships `E`:
 ```
-threat(H, E) = Σ_{e ∈ E}  w_type(e) / (1 + manhattan(e.position, H))
+threat(H, E) = Σ_{e ∈ E}  w_type(e) · 0.5 ^ (manhattan(e.position, H) / HOME_CHARACTERISTIC_DIST)
 ```
+
+The geometric decay (replacing earlier `1 / (1 + d)`) gives per-step moves
+strong gradient signal across the map. `HOME_CHARACTERISTIC_DIST` is
+**computed at eval time from map dimensions**:
+
+```
+char_dist = (map.width + map.height) / HALVINGS_PER_DIAGONAL
+```
+
+with `HALVINGS_PER_DIAGONAL = 4`. Proximity halves 4 times across the
+full Manhattan diagonal — `0.5^4 = 0.0625` at the farthest possible pair
+of points. This makes the kernel scale-invariant: the same heuristic
+produces meaningful gradient on any map size without manual retuning.
+
+Originally calibrated as a hardcoded constant of 3 tiles for "halves
+every 3 tiles." This was tuned to small-tactical-radius reasoning; it
+collapsed to ~zero at typical mid-map distances (60-200 tiles on the
+160×80 production map). Replaced with the map-adaptive rule.
 Where `w_type(e)`:
 - `Landing`: `250`  — the only ship type that can actually *capture* the port;
   worth ~2× the strongest combat ship since it represents the win condition.
@@ -90,11 +108,20 @@ contribute the net expected exchange value, distance-weighted.
 
 ```
 combat_pair(i, j) = [pk(i, j) · i.strength − pk(j, i) · j.strength]
-                    / (1 + manhattan(i.pos, j.pos))
+                    · 0.5 ^ (manhattan(i.pos, j.pos) / COMBAT_CHARACTERISTIC_DIST)
 
 T_COMBAT_raw = Σ_{i ∈ my_combat, j ∈ opp_combat}  combat_pair(i, j)
 T_COMBAT     = tanh(T_COMBAT_raw / SCALE_COMBAT)
 ```
+
+`COMBAT_CHARACTERISTIC_DIST` uses the same map-adaptive rule as the home
+term — `(map.width + map.height) / HALVINGS_PER_DIAGONAL`. Closer pairs
+dominate the sum; far pairs contribute non-zero but small amounts.
+Geometric decay was chosen over the original `1 / (1 + d)` because the
+harmonic kernel decayed too slowly to give MCTS gradient on positional
+moves at the scale of a real map. Combat could be tightened later
+(e.g., scaled to max attack range rather than diagonal) if engagement
+dynamics demand it.
 
 `my_combat` = ships with `type ∉ {Merchant, Landing, Builder}`. (Optional:
 include Landing as defenders only.) `SCALE_COMBAT ≈ 500` — calibrated for

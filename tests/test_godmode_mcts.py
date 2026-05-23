@@ -27,10 +27,10 @@ MAP_JSON = "/home/nick/Desktop/repos/Battleboats/battleboats/core/config/map.jso
 SMOKE_ITERATIONS = 20
 
 # Benchmark budget: modest, balances signal vs wall-time.
-BENCH_ITERATIONS = 15
-BENCH_NUM_GAMES = 4  # alternating sides → 3 as player 0, 3 as player 1
-BENCH_MAX_TURNS = 15
-BENCH_STEP_BUDGET = 5_000
+BENCH_ITERATIONS = 250
+BENCH_NUM_GAMES = 1  # alternating sides → 3 as player 0, 3 as player 1
+BENCH_MAX_TURNS = 250
+BENCH_STEP_BUDGET = 500_000
 
 
 @pytest.fixture
