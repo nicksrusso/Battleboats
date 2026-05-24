@@ -1,4 +1,10 @@
 **.json
+
+# Generated artifacts from benchmarks, trade studies, and self-play harvests.
+# These are large (hundreds of MB of JSONL trajectory data per harvest) and
+# easily reproducible from the scripts — no value in versioning them.
+runs/
+
 # Byte-compiled / optimized / DLL files
 __pycache__/
 *.py[codz]
