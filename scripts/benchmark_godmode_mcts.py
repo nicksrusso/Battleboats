@@ -28,7 +28,7 @@ from typing import Any, Dict, List
 
 from battleboats.agents.debug_plot import plot_state
 from battleboats.agents.godmode_mcts import godmode_mcts_action
-from battleboats.agents.heuristics import heuristic_eval
+from battleboats.agents.heuristics import decompose, heuristic_eval
 from battleboats.agents.random_agent import random_action
 from battleboats.core.actions import MoveAction
 from battleboats.core.shipyard.ship_type import ShipType
@@ -190,14 +190,29 @@ def _play_one_game(
             breakpoint()  # <-- inspect the plot here; 'c' to continue.
         # ---------------------------------------------------------------------
 
-        # Telemetry entry — record state from MCTS's perspective before stepping.
-        value = heuristic_eval(env.engine, mcts_player_id)
+        # Telemetry entry — record state from BOTH players' perspectives so
+        # the harvest can emit per-perspective training rows with opposite
+        # MC targets (winner's POV = +1, loser's POV = -1). Without this
+        # symmetry the dataset has no contrast — every kept-game row would
+        # share the same target and regression learns nothing.
+        #
+        # `value` stays MCTS-side for diagnostic prints. `phi_p0` / `phi_p1`
+        # are always indexed by absolute player id (not by MCTS-or-not) so
+        # downstream code doesn't need to know which seat MCTS occupied.
+        # On terminal states both phi dicts are {} by design (decompose
+        # short-circuits); the harvest filters those out.
+        value, phi_mcts, _ = decompose(env.engine, mcts_player_id)
+        _, phi_opp, _ = decompose(env.engine, 1 - mcts_player_id)
+        phi_p0 = phi_mcts if mcts_player_id == 0 else phi_opp
+        phi_p1 = phi_opp if mcts_player_id == 0 else phi_mcts
         trajectory.append(
             {
                 "step": steps,
                 "turn": env.engine.turn,
                 "actor": actor,
                 "value": value,
+                "phi_p0": phi_p0,
+                "phi_p1": phi_p1,
                 "elapsed_s": elapsed,
                 "action_type": action_name,
             }
