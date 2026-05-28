@@ -120,6 +120,7 @@ def _play_one_game(
     iterations: int,
     max_turns: int,
     step_budget: int,
+    self_play: bool = False,
     verbose: bool = True,
     debug_plot: bool = False,
     debug_plot_mcts_only: bool = False,
@@ -131,6 +132,11 @@ def _play_one_game(
     flag gates per-step stdout — useful to keep on for serial single-game
     debugging, off in parallel benchmark runs where 8 workers interleaving
     step prints is unreadable.
+
+    When `self_play=True`, BOTH players use `godmode_mcts_action` (with the
+    current `DEFAULT_WEIGHTS` baked into `heuristic_eval`). `mcts_player_id`
+    in that mode just selects whose POV the diagnostic `value` field is
+    computed from — gameplay is symmetric.
     """
     env = BattleboatsAEC(map_json_path=map_json_path, max_turns=max_turns)
     env.reset(seed=seed)
@@ -146,34 +152,41 @@ def _play_one_game(
             actor = "dead"
             elapsed = 0.0
             action_name = "None"
-        elif env._player_id(agent) == mcts_player_id:
-            t0 = time.perf_counter()
-            action = godmode_mcts_action(env.engine, mcts_player_id, rng, iterations=iterations)
-            elapsed = time.perf_counter() - t0
-            actor = "mcts"
-            action_name = _describe_action(action, env.engine)
-            if verbose:
-                value = heuristic_eval(env.engine, mcts_player_id)
-                inventory = _format_inventory(env.engine, mcts_player_id)
-                opp_inventory = _format_inventory(env.engine, 1 - mcts_player_id)
-                spotted = _format_sightings(env.engine, mcts_player_id)
-                cash = env.engine.players[mcts_player_id].cash
-                opp_cash = env.engine.players[1 - mcts_player_id].cash
-                d_home = _min_distance_to_enemy_home(env.engine, mcts_player_id)
-                d_enemy = _min_distance_to_enemy_ship(env.engine, mcts_player_id)
-                print(
-                    f"  step={steps:6d} turn={env.engine.turn:4d}  mcts {elapsed:6.2f}s  "
-                    f"value={value:+.6f}  $me={cash:5d}  $opp={opp_cash:5d}  "
-                    f"d_home={d_home:>3}  d_enemy={d_enemy:>3}  "
-                    f"{action_name:<20}  "
-                    f"mine=[{inventory}]  opp=[{opp_inventory}]  spot=[{spotted}]",
-                    flush=True,
-                )
         else:
-            action = random_action(env.engine, env._player_id(agent), rng)
-            actor = "random"
-            elapsed = 0.0
-            action_name = _describe_action(action, env.engine)
+            pid = env._player_id(agent)
+            use_mcts = self_play or (pid == mcts_player_id)
+            if use_mcts:
+                t0 = time.perf_counter()
+                action = godmode_mcts_action(env.engine, pid, rng, iterations=iterations)
+                elapsed = time.perf_counter() - t0
+                actor = "mcts"
+                action_name = _describe_action(action, env.engine)
+                if verbose:
+                    # Print is from the *acting* player's POV so self-play
+                    # produces interpretable traces from each side as they
+                    # take their turns.
+                    value = heuristic_eval(env.engine, pid)
+                    inventory = _format_inventory(env.engine, pid)
+                    opp_inventory = _format_inventory(env.engine, 1 - pid)
+                    spotted = _format_sightings(env.engine, pid)
+                    cash = env.engine.players[pid].cash
+                    opp_cash = env.engine.players[1 - pid].cash
+                    d_home = _min_distance_to_enemy_home(env.engine, pid)
+                    d_enemy = _min_distance_to_enemy_ship(env.engine, pid)
+                    label = f"mcts(p{pid})" if self_play else "mcts"
+                    print(
+                        f"  step={steps:6d} turn={env.engine.turn:4d}  {label} {elapsed:6.2f}s  "
+                        f"value={value:+.6f}  $me={cash:5d}  $opp={opp_cash:5d}  "
+                        f"d_home={d_home:>3}  d_enemy={d_enemy:>3}  "
+                        f"{action_name:<20}  "
+                        f"mine=[{inventory}]  opp=[{opp_inventory}]  spot=[{spotted}]",
+                        flush=True,
+                    )
+            else:
+                action = random_action(env.engine, pid, rng)
+                actor = "random"
+                elapsed = 0.0
+                action_name = _describe_action(action, env.engine)
 
         debug_plot_mcts_only = True
         debug_plot = False
@@ -228,6 +241,7 @@ def _play_one_game(
     return {
         "game_idx": game_idx,
         "iterations": iterations,
+        "self_play": self_play,
         "mcts_player_id": mcts_player_id,
         "seed": seed,
         "winner": env.engine.winner,  # 0 / 1 / None

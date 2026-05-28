@@ -113,6 +113,12 @@ def main() -> None:
     parser.add_argument("--step-budget", type=int, default=10_000, help="Per-game step cap.")
     parser.add_argument("--seed", type=int, default=0, help="Base seed; per-game seed = base + game_idx.")
     parser.add_argument("--output-dir", type=Path, default=DEFAULT_OUTPUT_DIR, help="Where to write JSONL + meta.")
+    parser.add_argument(
+        "--self-play",
+        action="store_true",
+        help="Both players use MCTS with the current heuristic weights "
+        "(symmetric self-play). When unset, MCTS plays vs. random_agent.",
+    )
     args = parser.parse_args()
 
     args.output_dir.mkdir(parents=True, exist_ok=True)
@@ -137,13 +143,15 @@ def main() -> None:
                 "iterations": args.iterations,
                 "max_turns": args.max_turns,
                 "step_budget": args.step_budget,
+                "self_play": args.self_play,
                 "verbose": False,
                 "debug_plot": False,
                 "debug_plot_mcts_only": False,
             }
         )
 
-    print(f"Harvest: {args.num_games} games at iter={args.iterations}")
+    mode_label = "self-play (MCTS vs MCTS)" if args.self_play else "vs random_agent"
+    print(f"Harvest: {args.num_games} games at iter={args.iterations}  [{mode_label}]")
     print(f"  max_turns:   {args.max_turns}")
     print(f"  workers:     {workers}")
     print(f"  output:      {jsonl_path}")
@@ -154,6 +162,11 @@ def main() -> None:
     completed = 0
     kept_games = 0
     truncated_games = 0
+    # In self-play, "MCTS won" is always true if anyone wins — so split by
+    # seat (p0 vs p1) instead. In random-opponent mode, split by whether the
+    # MCTS-occupying seat or the random-occupying seat won.
+    p0_wins = 0
+    p1_wins = 0
     mcts_wins = 0
     random_wins = 0
     total_rows = 0
@@ -170,6 +183,12 @@ def main() -> None:
             if winner is None:
                 outcome = "truncated"
                 truncated_games += 1
+            elif args.self_play:
+                outcome = f"p{winner} won"
+                if winner == 0:
+                    p0_wins += 1
+                else:
+                    p1_wins += 1
             elif winner == mp_id:
                 outcome = "MCTS won"
                 mcts_wins += 1
@@ -194,25 +213,32 @@ def main() -> None:
 
     overall_elapsed = time.perf_counter() - overall_t0
 
+    results_block: Dict[str, Any] = {
+        "completed_games": completed,
+        "kept_games": kept_games,
+        "truncated_games": truncated_games,
+        "total_rows": total_rows,
+        "total_wall_time_s": round(overall_elapsed, 1),
+    }
+    if args.self_play:
+        results_block["p0_wins"] = p0_wins
+        results_block["p1_wins"] = p1_wins
+    else:
+        results_block["mcts_wins"] = mcts_wins
+        results_block["random_wins"] = random_wins
+
     metadata = {
         "config": {
             "num_games": args.num_games,
             "iterations": args.iterations,
+            "self_play": args.self_play,
             "max_turns": args.max_turns,
             "step_budget": args.step_budget,
             "seed": args.seed,
             "workers": workers,
             "map_json": MAP_JSON,
         },
-        "results": {
-            "completed_games": completed,
-            "kept_games": kept_games,
-            "mcts_wins": mcts_wins,
-            "random_wins": random_wins,
-            "truncated_games": truncated_games,
-            "total_rows": total_rows,
-            "total_wall_time_s": round(overall_elapsed, 1),
-        },
+        "results": results_block,
         "jsonl_path": str(jsonl_path),
     }
     with open(meta_path, "w") as f:
@@ -220,9 +246,12 @@ def main() -> None:
 
     print()
     print("=" * 70)
-    print(f"Harvest complete in {overall_elapsed:.1f}s")
+    print(f"Harvest complete in {overall_elapsed:.1f}s  [{mode_label}]")
     print(f"  games:     completed={completed}  kept={kept_games}  truncated={truncated_games}")
-    print(f"  outcomes:  mcts_wins={mcts_wins}  random_wins={random_wins}")
+    if args.self_play:
+        print(f"  outcomes:  p0_wins={p0_wins}  p1_wins={p1_wins}")
+    else:
+        print(f"  outcomes:  mcts_wins={mcts_wins}  random_wins={random_wins}")
     print(f"  rows:      {total_rows}")
     print(f"  jsonl:     {jsonl_path}")
     print(f"  meta:      {meta_path}")

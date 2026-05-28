@@ -43,20 +43,63 @@ MAT_PORT_VALUE = 400.0
 MERCHANT_COUNT_VALUE_K = 1000.0
 
 # ------------------------------------------------------------- ship buckets
-COMBAT_TYPES = frozenset({
+COMBAT_TYPES = frozenset(
+    {
+        ShipType.CARRIER,
+        ShipType.BATTLESHIP,
+        ShipType.CRUISER,
+        ShipType.DESTROYER,
+        ShipType.SUBMARINE,
+    }
+)
+
+HOME_THREAT_NON_COMBAT_TYPES = frozenset(
+    {
+        ShipType.MERCHANT,
+        ShipType.BUILDER,
+    }
+)
+
+HOME_THREAT_WEIGHT_LANDING = 250  # Landings are the only win-enabling unit
+
+# ----------------------------------------------------------- per-type schema
+# Stable ordering for per-type features (`own_<name>` / `opp_<name>`).
+# Order is fixed so the column layout in φ stays consistent across runs —
+# regression weights are keyed by name, but downstream tooling that flattens
+# φ dicts to arrays still benefits from a deterministic iteration order.
+SHIP_TYPE_ORDER: Tuple[ShipType, ...] = (
     ShipType.CARRIER,
     ShipType.BATTLESHIP,
     ShipType.CRUISER,
     ShipType.DESTROYER,
     ShipType.SUBMARINE,
-})
-
-HOME_THREAT_NON_COMBAT_TYPES = frozenset({
-    ShipType.MERCHANT,
+    ShipType.LANDING,
     ShipType.BUILDER,
-})
+    ShipType.MERCHANT,
+)
+SHIP_TYPE_FEATURE_NAME: Dict[ShipType, str] = {
+    ShipType.CARRIER:    "carriers",
+    ShipType.BATTLESHIP: "battleships",
+    ShipType.CRUISER:    "cruisers",
+    ShipType.DESTROYER:  "destroyers",
+    ShipType.SUBMARINE:  "submarines",
+    ShipType.LANDING:    "landings",
+    ShipType.BUILDER:    "builders",
+    ShipType.MERCHANT:   "merchants",
+}
 
-HOME_THREAT_WEIGHT_LANDING = 250  # Landings are the only win-enabling unit
+# Generated feature-key tuples for the new (iteration-2) features. Kept
+# separate so DEFAULT_WEIGHTS can compose them without typing all 19 keys.
+_PER_TYPE_KEYS: Tuple[str, ...] = tuple(
+    f"{side}_{SHIP_TYPE_FEATURE_NAME[t]}"
+    for side in ("own", "opp")
+    for t in SHIP_TYPE_ORDER
+)
+_MATCHUP_KEYS: Tuple[str, ...] = (
+    "combat_total_overmatch",
+    "combat_coverage_min",
+    "combat_uncovered_count",
+)
 
 # ----------------------------------------------------------- econ_value_self params
 # `econ_value_self` consolidates cash + stockpile + cargo + loading-capacity
@@ -80,24 +123,23 @@ ECON_BETA = 0.1
 # The learning loop will replace this dict with the output of regression
 # on (features, mcts_root_value) pairs; don't over-tune these defaults.
 DEFAULT_WEIGHTS: Dict[str, float] = {
-    # Uniform 5× scale-down from prior values: keeps the pre-tanh sum
-    # in tanh's linear region (~1.0 in typical mid-game) so the outer
-    # tanh's derivative doesn't kill per-tile gradients. Relative
-    # ordering between features is preserved — only magnitude changes.
-    "material_diff":              1.0 / 10000.0,
-    "home_pressure_diff":         1.0 /  1000.0,
-    # combat_balance bounded by ship strength per pair; weight aligned with
-    # material_diff so realizing a kill (gain in material_diff) outweighs
-    # the loss of forward-looking combat_balance from removing that pair.
-    "combat_balance":             1.0 / 10000.0,
-    "econ_value_self":            1.0 /  5000.0,
-    "merchant_count_value_self":  1.0 / 10000.0,
-    # Binary capability indicator — does the player own ≥1 Landing? Without
-    # one the player literally cannot capture the enemy home, so the
-    # heuristic should not be able to claim victory. Weight is the raw
-    # contribution from a 0 → 1 flip (feature is already in {0, 1}).
-    "has_landing_self":           0.2,
-    "landing_pressure_self":      2.0 /    25.0,
+    # --- original features, weights learned by v1 regression ---
+    "material_diff": 2.6004229366981477e-05,
+    "home_pressure_diff": 3.86802116504202e-05,
+    "combat_balance": 0.0012818663696589042,
+    "econ_value_self": -1.6964783805512504e-06,
+    "merchant_count_value_self": -0.00022550976680690824,
+    "has_landing_self": 0.7945317138048742,
+    "landing_pressure_self": 0.2201772785383086,
+    # --- per-type fleet counts (16) ---
+    # Weight=0 so MCTS behavior stays identical to v1 during this harvest;
+    # the regression in iteration 2 assigns real weights from the data.
+    **{k: 0.0 for k in _PER_TYPE_KEYS},
+    # --- matchup matrix features (3) ---
+    # Also weight=0 for the same reason. These capture combat structure
+    # that the scalar `combat_balance` flattens away (coverage gaps,
+    # bottleneck threats, total overmatch).
+    **{k: 0.0 for k in _MATCHUP_KEYS},
 }
 
 FEATURE_KEYS: Tuple[str, ...] = tuple(DEFAULT_WEIGHTS.keys())
@@ -113,7 +155,7 @@ def pk(attacker: "Ship", defender: "Ship", kill_curve_k: float) -> float:
     if defender.stats.strength <= 0:
         return 1.0
     x = attacker.stats.strength * attack_modifier(attacker=attacker.type, defender=defender.type) / defender.stats.strength
-    return x ** kill_curve_k / (1 + x ** kill_curve_k)
+    return x**kill_curve_k / (1 + x**kill_curve_k)
 
 
 def _ship_value(ship: "Ship") -> float:
@@ -161,6 +203,29 @@ def features(engine: "gameEngine", me: int) -> Dict[str, float]:
                                 capability gate — without a Landing the player
                                 literally cannot capture the enemy home.
         landing_pressure_self   Σ over my Landings of p_to_opp_home (one-sided)
+
+        --- iteration-2 features (added at weight=0; regression assigns real
+        weights from harvest data) ---
+
+        own_<type>              Count of `me`'s ships of each type (8 features:
+        opp_<type>              carriers, battleships, cruisers, destroyers,
+                                submarines, landings, builders, merchants).
+                                Opponent's symmetric counts (8 features).
+                                Together these let the regression learn
+                                fleet-composition preferences that `material_diff`
+                                aggregates away.
+
+        combat_total_overmatch  Σ max(0, M[i,j]) over my×opp combat-ship pairs,
+                                where M[i,j] = pk(i→j)*str(i) - pk(j→i)*str(j).
+                                Raw matchup magnitude (no proximity weighting —
+                                combat_balance already provides that).
+        combat_coverage_min     min_j max_i M[i,j] — for each opp combat ship,
+                                my best counter; take min across opp ships.
+                                Negative / small = I'm vulnerable to at least
+                                one opp ship type with no good answer.
+        combat_uncovered_count  Number of opp combat ships for which I have
+                                NO favorable counter (max_i M[i,j] ≤ 0).
+                                Discrete coverage-gap indicator.
     """
     me_player = engine.players[me]
     opp_player = engine.players[1 - me]
@@ -245,10 +310,7 @@ def features(engine: "gameEngine", me: int) -> Dict[str, float]:
     # win the game; reward proximity to opp home independently of their strength
     # contribution (which is zero — Landing has strength=0).
     my_landings = [s for s in my_ships if s.type is ShipType.LANDING]
-    landing_pressure_self = sum(
-        max(0.0, 1.0 - manhattan(s.position, opp_home) / map_diag)
-        for s in my_landings
-    )
+    landing_pressure_self = sum(max(0.0, 1.0 - manhattan(s.position, opp_home) / map_diag) for s in my_landings)
 
     # has_landing_self — discrete capability indicator. Separated from
     # landing_pressure_self because "do I own one" and "how close is it"
@@ -260,7 +322,52 @@ def features(engine: "gameEngine", me: int) -> Dict[str, float]:
     # subsequent merchant contributing less.
     merchant_count_value_self = MERCHANT_COUNT_VALUE_K * math.sqrt(len(my_merchants))
 
-    return {
+    # ----- per-type counts (16 features) ------------------------------------
+    # Tally each side's ship inventory per type. Counts initialized to 0 for
+    # every type in SHIP_TYPE_ORDER so the returned dict always has all keys
+    # even when a side owns zero of a type.
+    own_counts: Dict[ShipType, int] = {t: 0 for t in SHIP_TYPE_ORDER}
+    for ship in my_ships:
+        own_counts[ship.type] += 1
+    opp_counts: Dict[ShipType, int] = {t: 0 for t in SHIP_TYPE_ORDER}
+    for ship in opp_ships:
+        opp_counts[ship.type] += 1
+
+    # ----- matchup matrix features (3 features) -----------------------------
+    # Raw pairwise matchup (no proximity weighting — distinct signal from
+    # combat_balance which is proximity-weighted). M[i,j] is "expected damage
+    # my ship i does to opp j minus expected damage j does back."
+    #
+    # combat_total_overmatch is the sum of positive M[i,j] entries — overall
+    # favorability potential. combat_coverage_min is min over opp ships of my
+    # best counter — flags worst-defended threat. combat_uncovered_count is
+    # the count of opp ships I have no favorable counter for — diversification
+    # gap indicator. All three are zero when either side has no combat ships.
+    combat_total_overmatch = 0.0
+    combat_coverage_min = 0.0
+    combat_uncovered_count = 0.0
+    if my_combat and opp_combat:
+        per_opp_best: list[float] = []
+        for foe in opp_combat:
+            best_against_foe = -math.inf
+            for friend in my_combat:
+                m = (
+                    pk(friend, foe, engine.kill_curve_k) * friend.stats.strength
+                    - pk(foe, friend, engine.kill_curve_k) * foe.stats.strength
+                )
+                if m > 0:
+                    combat_total_overmatch += m
+                if m > best_against_foe:
+                    best_against_foe = m
+            per_opp_best.append(best_against_foe)
+            if best_against_foe <= 0:
+                combat_uncovered_count += 1.0
+        combat_coverage_min = min(per_opp_best)
+    elif opp_combat:
+        # No friendly combat ships but enemy has some — every threat uncovered.
+        combat_uncovered_count = float(len(opp_combat))
+
+    result: Dict[str, float] = {
         "material_diff": float(material_diff),
         "home_pressure_diff": home_pressure_diff,
         "combat_balance": combat_balance,
@@ -269,6 +376,16 @@ def features(engine: "gameEngine", me: int) -> Dict[str, float]:
         "has_landing_self": has_landing_self,
         "landing_pressure_self": landing_pressure_self,
     }
+    # Per-type counts, in canonical order (own first, then opp).
+    for t in SHIP_TYPE_ORDER:
+        result[f"own_{SHIP_TYPE_FEATURE_NAME[t]}"] = float(own_counts[t])
+    for t in SHIP_TYPE_ORDER:
+        result[f"opp_{SHIP_TYPE_FEATURE_NAME[t]}"] = float(opp_counts[t])
+    # Matchup features.
+    result["combat_total_overmatch"] = combat_total_overmatch
+    result["combat_coverage_min"] = combat_coverage_min
+    result["combat_uncovered_count"] = combat_uncovered_count
+    return result
 
 
 def heuristic_eval(engine: "gameEngine", me: int) -> float:
