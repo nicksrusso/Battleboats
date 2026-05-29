@@ -112,6 +112,12 @@ def main() -> None:
     )
     parser.add_argument("--step-budget", type=int, default=10_000, help="Per-game step cap.")
     parser.add_argument("--seed", type=int, default=0, help="Base seed; per-game seed = base + game_idx.")
+    parser.add_argument(
+        "--scenarios-file",
+        type=Path,
+        default=Path("runs/scenarios/scenarios_500.json"),
+        help="JSON of pre-generated scenarios (default: scenarios_500). Cycles through them.",
+    )
     parser.add_argument("--output-dir", type=Path, default=DEFAULT_OUTPUT_DIR, help="Where to write JSONL + meta.")
     parser.add_argument(
         "--self-play",
@@ -129,16 +135,20 @@ def main() -> None:
     # Clamp workers — no point spawning more processes than there are jobs.
     workers = max(1, min(args.workers, args.num_games))
 
+    # Load scenarios (cycles through scenarios_500.json for varied starts)
+    scenarios = json.loads(args.scenarios_file.read_text())
+    print(f"Loaded {len(scenarios)} scenarios for harvest.")
+
     # Build the global work list. All games at the same iteration count
-    # (this is the harvest run, not a trade study) but with distinct seeds
-    # so they sample different opponent trajectories.
+    # but with distinct seeds + cycled scenarios.
     work_items: List[Dict[str, Any]] = []
     for game_idx in range(args.num_games):
         work_items.append(
             {
                 "game_idx": game_idx,
-                "map_json_path": MAP_JSON,
+                "map_json_path": None,  # overridden by scenario
                 "seed": args.seed + game_idx,
+                "scenario": scenarios[game_idx % len(scenarios)],
                 "mcts_player_id": game_idx % 2,
                 "iterations": args.iterations,
                 "max_turns": args.max_turns,
@@ -151,9 +161,10 @@ def main() -> None:
         )
 
     mode_label = "self-play (MCTS vs MCTS)" if args.self_play else "vs random_agent"
-    print(f"Harvest: {args.num_games} games at iter={args.iterations}  [{mode_label}]")
+    print(f"Harvest: {args.num_games} games at iter={args.iterations} using {len(scenarios)} scenarios [{mode_label}]")
     print(f"  max_turns:   {args.max_turns}")
     print(f"  workers:     {workers}")
+    print(f"  scenarios:   {args.scenarios_file}")
     print(f"  output:      {jsonl_path}")
     print(f"  meta:        {meta_path}")
     print()
@@ -236,7 +247,9 @@ def main() -> None:
             "step_budget": args.step_budget,
             "seed": args.seed,
             "workers": workers,
-            "map_json": MAP_JSON,
+            "scenarios_file": str(args.scenarios_file),
+            "scenarios_used": len(scenarios),
+            "map_json": None,  # per-scenario
         },
         "results": results_block,
         "jsonl_path": str(jsonl_path),

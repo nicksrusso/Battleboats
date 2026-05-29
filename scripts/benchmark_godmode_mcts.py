@@ -24,7 +24,7 @@ import random
 import time
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Optional
 
 from battleboats.agents.debug_plot import plot_state
 from battleboats.agents.godmode_mcts import godmode_mcts_action
@@ -114,12 +114,13 @@ def _min_distance_to_enemy_ship(engine, player_id: int) -> str:
 
 def _play_one_game(
     game_idx: int,
-    map_json_path: str,
-    seed: int,
-    mcts_player_id: int,
-    iterations: int,
-    max_turns: int,
-    step_budget: int,
+    map_json_path: Optional[str] = None,
+    seed: int = 0,
+    mcts_player_id: int = 0,
+    iterations: int = 100,
+    max_turns: int = 250,
+    step_budget: int = 50000,
+    scenario: Optional[Dict[str, Any]] = None,
     self_play: bool = False,
     verbose: bool = True,
     debug_plot: bool = False,
@@ -138,8 +139,12 @@ def _play_one_game(
     in that mode just selects whose POV the diagnostic `value` field is
     computed from — gameplay is symmetric.
     """
-    env = BattleboatsAEC(map_json_path=map_json_path, max_turns=max_turns)
-    env.reset(seed=seed)
+    map_path = scenario["map_path"] if scenario else map_json_path
+    env = BattleboatsAEC(map_json_path=map_path, max_turns=max_turns)
+    if scenario:
+        env.reset(seed=seed, options={"scenario": scenario})
+    else:
+        env.reset(seed=seed)
     rng = random.Random(seed)
 
     trajectory: List[Dict[str, Any]] = []

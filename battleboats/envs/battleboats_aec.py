@@ -70,14 +70,21 @@ class BattleboatsAEC(AECEnv):
         raise NotImplementedError
 
     # --------------------------------------------------------------- lifecycle
-    def reset(self, seed: Optional[int] = None, options: Optional[dict] = None) -> None:
-        """Start a new game.
+    def reset(self, seed: Optional[int] = None, options: Optional[Dict[str, Any]] = None) -> None:
+        """Start a new game (standard PettingZoo AEC API).
 
-        Re-instantiates and seeds the engine, repopulates per-agent
-        bookkeeping dicts, and primes legal_actions for the opening seat.
+        Supports `options={"scenario": scenario_dict}` for reset_from_scenario()
+        (loads exact map/seed/budget/ships/positions from scenarios_*.json).
+        Falls back to normal random start otherwise. Primes legal_actions.
         """
-        self.engine = gameEngine(map_json_path=self.map_json_path)
-        self.engine.reset(seed=seed)
+        scenario = (options or {}).get("scenario")
+        if scenario:
+            self.engine = gameEngine(map_json_path=scenario["map_path"])
+            self.engine.reset_from_scenario(scenario)
+        else:
+            self.engine = gameEngine(map_json_path=self.map_json_path)
+            self.engine.reset(seed=seed)
+
         self.agents = list(AGENTS)
         self.agent_selection = self._agent_name(self.engine.current_player)
         self.rewards = {a: 0.0 for a in self.agents}

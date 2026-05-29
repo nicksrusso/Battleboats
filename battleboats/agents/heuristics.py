@@ -23,6 +23,7 @@ from typing import TYPE_CHECKING, Dict, Tuple
 from battleboats.core.gameEngine import MERCHANT_CAPACITY
 from battleboats.core.shipyard.ship_data import attack_modifier
 from battleboats.core.shipyard.ship_type import ShipType
+import json
 
 if TYPE_CHECKING:
     from battleboats.core.gameEngine import gameEngine
@@ -78,28 +79,15 @@ SHIP_TYPE_ORDER: Tuple[ShipType, ...] = (
     ShipType.MERCHANT,
 )
 SHIP_TYPE_FEATURE_NAME: Dict[ShipType, str] = {
-    ShipType.CARRIER:    "carriers",
+    ShipType.CARRIER: "carriers",
     ShipType.BATTLESHIP: "battleships",
-    ShipType.CRUISER:    "cruisers",
-    ShipType.DESTROYER:  "destroyers",
-    ShipType.SUBMARINE:  "submarines",
-    ShipType.LANDING:    "landings",
-    ShipType.BUILDER:    "builders",
-    ShipType.MERCHANT:   "merchants",
+    ShipType.CRUISER: "cruisers",
+    ShipType.DESTROYER: "destroyers",
+    ShipType.SUBMARINE: "submarines",
+    ShipType.LANDING: "landings",
+    ShipType.BUILDER: "builders",
+    ShipType.MERCHANT: "merchants",
 }
-
-# Generated feature-key tuples for the new (iteration-2) features. Kept
-# separate so DEFAULT_WEIGHTS can compose them without typing all 19 keys.
-_PER_TYPE_KEYS: Tuple[str, ...] = tuple(
-    f"{side}_{SHIP_TYPE_FEATURE_NAME[t]}"
-    for side in ("own", "opp")
-    for t in SHIP_TYPE_ORDER
-)
-_MATCHUP_KEYS: Tuple[str, ...] = (
-    "combat_total_overmatch",
-    "combat_coverage_min",
-    "combat_uncovered_count",
-)
 
 # ----------------------------------------------------------- econ_value_self params
 # `econ_value_self` consolidates cash + stockpile + cargo + loading-capacity
@@ -122,25 +110,16 @@ ECON_BETA = 0.1
 # DEFAULT_WEIGHTS[k] * features[k] is a term in the pre-tanh sum directly.
 # The learning loop will replace this dict with the output of regression
 # on (features, mcts_root_value) pairs; don't over-tune these defaults.
-DEFAULT_WEIGHTS: Dict[str, float] = {
-    # --- original features, weights learned by v1 regression ---
-    "material_diff": 2.6004229366981477e-05,
-    "home_pressure_diff": 3.86802116504202e-05,
-    "combat_balance": 0.0012818663696589042,
-    "econ_value_self": -1.6964783805512504e-06,
-    "merchant_count_value_self": -0.00022550976680690824,
-    "has_landing_self": 0.7945317138048742,
-    "landing_pressure_self": 0.2201772785383086,
-    # --- per-type fleet counts (16) ---
-    # Weight=0 so MCTS behavior stays identical to v1 during this harvest;
-    # the regression in iteration 2 assigns real weights from the data.
-    **{k: 0.0 for k in _PER_TYPE_KEYS},
-    # --- matchup matrix features (3) ---
-    # Also weight=0 for the same reason. These capture combat structure
-    # that the scalar `combat_balance` flattens away (coverage gaps,
-    # bottleneck threats, total overmatch).
-    **{k: 0.0 for k in _MATCHUP_KEYS},
-}
+with open("/home/nick/Desktop/repos/Battleboats/runs/weights/v2.json", "r") as f:
+    regression_data = json.load(f)
+DEFAULT_WEIGHTS = regression_data["weights"]
+
+# Per-state bias term learned by v2's intercept. Not currently applied —
+# heuristic_eval computes tanh(Σ w·φ) without an additive constant. If
+# fidelity matters, fold this into the heuristic by adding it inside the
+# tanh; magnitude (~0.24) shifts ~5-15% of states by a meaningful amount.
+# For the bootstrap iteration, dropping it is acceptable.
+DEFAULT_INTERCEPT = regression_data["intercept"]
 
 FEATURE_KEYS: Tuple[str, ...] = tuple(DEFAULT_WEIGHTS.keys())
 
@@ -397,7 +376,7 @@ def heuristic_eval(engine: "gameEngine", me: int) -> float:
     if engine.is_terminal():
         return 1.0 if engine.winner == me else -1.0
     phi = features(engine, me)
-    return math.tanh(sum(DEFAULT_WEIGHTS[k] * phi[k] for k in DEFAULT_WEIGHTS))
+    return math.tanh(sum(DEFAULT_WEIGHTS[k] * phi[k] for k in DEFAULT_WEIGHTS) + DEFAULT_INTERCEPT)
 
 
 def decompose(engine: "gameEngine", me: int) -> Tuple[float, Dict[str, float], Dict[str, float]]:
@@ -414,5 +393,5 @@ def decompose(engine: "gameEngine", me: int) -> Tuple[float, Dict[str, float], D
         return H, {}, {}
     phi = features(engine, me)
     contributions = {k: DEFAULT_WEIGHTS[k] * phi[k] for k in DEFAULT_WEIGHTS}
-    H = math.tanh(sum(contributions.values()))
+    H = math.tanh(sum(contributions.values()) + DEFAULT_INTERCEPT)
     return H, phi, contributions

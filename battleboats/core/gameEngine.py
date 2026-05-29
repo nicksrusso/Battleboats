@@ -1,4 +1,4 @@
-from typing import Dict, List, Optional, Tuple, Union
+from typing import Any, Dict, List, Optional, Tuple, Union
 import numpy as np
 from copy import deepcopy
 
@@ -84,6 +84,33 @@ class gameEngine:
             )
         self.ships = {}
         self._next_ship_id = 0
+        self.current_player = 0
+        self.turn = 0
+        self.winner = None
+        self._refresh_sightings()
+
+    def reset_from_scenario(self, scenario: Dict[str, Any]) -> None:
+        """Reset to a specific scenario (from scenarios_*.json).
+
+        Uses existing reset() for map/ports/players/sightings, then overrides
+        cash, spawns exact ships at recorded positions, and resets turn state.
+        Adheres to PettingZoo options={"scenario": ...} pattern via AEC wrapper.
+        """
+        if not isinstance(scenario, dict) or "seed" not in scenario:
+            raise ValueError("Invalid scenario dict")
+
+        self.map_json_path = scenario["map_path"]
+        self.reset(seed=scenario.get("seed"))
+
+        self.players[0].cash = scenario["player_0"]["cash"]
+        self.players[1].cash = scenario["player_1"]["cash"]
+
+        for ship in scenario["player_0"]["ships"]:
+            self._spawn_ship(0, ShipType[ship["type"]], tuple(ship["position"]))
+
+        for ship in scenario["player_1"]["ships"]:
+            self._spawn_ship(1, ShipType[ship["type"]], tuple(ship["position"]))
+
         self.current_player = 0
         self.turn = 0
         self.winner = None
