@@ -7,6 +7,8 @@ trajectories into per-state training rows.
 
 Each row is a dict with:
     phi:    feature vector (one entry per FEATURE_KEYS), from MCTS-player POV
+    tokens: variable-length (N, TOKEN_DIM) entity-token set for the same
+            POV (the transformer-encoder input that phi aggregates away)
     target: Monte Carlo return from MCTS-player POV
             (+1 if MCTS won, -1 if random won)
     game_idx, seed, iterations, step, turn, actor: provenance / debug fields
@@ -39,7 +41,7 @@ from benchmark_godmode_mcts import MAP_JSON, _worker_run_game
 
 DEFAULT_OUTPUT_DIR = Path("/home/nick/Desktop/repos/Battleboats/runs/harvests")
 DEFAULT_NUM_GAMES = 100
-DEFAULT_ITERATIONS = 50
+DEFAULT_ITERATIONS = 250
 
 
 def _flatten_to_rows(record: Dict[str, Any]) -> List[Dict[str, Any]]:
@@ -86,11 +88,26 @@ def _flatten_to_rows(record: Dict[str, Any]) -> List[Dict[str, Any]]:
             "turn": step["turn"],
             "actor": step["actor"],
         }
+        # MCTS root-value label is attached only to the row whose perspective
+        # matches the acting player — that's the POV the search was run from.
+        # Other rows get None for this field so the schema stays regular.
+        mcts_rv = step.get("mcts_root_value")
+        acting_pid = step.get("acting_pid")
+        rv_p0 = mcts_rv if acting_pid == 0 else None
+        rv_p1 = mcts_rv if acting_pid == 1 else None
+        # Per-perspective entity tokens (None if the harvest was run without
+        # emit_tokens). Attached to the matching perspective row alongside phi.
+        tokens_p0 = step.get("tokens_p0")
+        tokens_p1 = step.get("tokens_p1")
         # One row per perspective. `perspective` field marks which player
         # the phi/target pair refers to so post-hoc analysis can filter
         # (e.g. "only learn from MCTS-perspective rows" if desired).
-        rows.append({**base, "perspective": 0, "phi": phi_p0, "target": target_p0})
-        rows.append({**base, "perspective": 1, "phi": phi_p1, "target": target_p1})
+        rows.append(
+            {**base, "perspective": 0, "phi": phi_p0, "tokens": tokens_p0, "target": target_p0, "mcts_root_value": rv_p0}
+        )
+        rows.append(
+            {**base, "perspective": 1, "phi": phi_p1, "tokens": tokens_p1, "target": target_p1, "mcts_root_value": rv_p1}
+        )
     return rows
 
 
@@ -157,6 +174,7 @@ def main() -> None:
                 "verbose": False,
                 "debug_plot": False,
                 "debug_plot_mcts_only": False,
+                "emit_tokens": True,
             }
         )
 

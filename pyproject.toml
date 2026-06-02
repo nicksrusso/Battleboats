@@ -11,6 +11,14 @@ python = ">=3.11,<3.15"
 numpy = "^2.4.4"
 gymnasium = "^1.2.3"
 matplotlib = "^3.10.8"
+# torch is intentionally installed out-of-band via pip with the ROCm
+# wheel index — see README. Poetry's msgpack cache can't handle the
+# multi-GB ROCm wheel and the dep resolution drags in triton-rocm
+# whose wheel also fails poetry's strict validation. After `poetry
+# install`, run:
+#   poetry run pip install torch \
+#       --index-url https://download.pytorch.org/whl/rocm7.2 \
+#       --force-reinstall
 torch = "^2.11.0"
 pyyaml = "^6.0.3"
 seaborn = "^0.13.2"

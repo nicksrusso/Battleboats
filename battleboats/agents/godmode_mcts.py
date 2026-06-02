@@ -54,6 +54,34 @@ class Node:
     total_value: float = 0.0  # from the perspective of side_to_move (negamax)
 
 
+def _run_search(
+    engine: "gameEngine",
+    player_id: int,
+    rng: random.Random,
+    iterations: int,
+    c: float,
+) -> Node:
+    """Run UCT for `iterations` and return the populated root node.
+
+    Shared core of `godmode_mcts_action` and `godmode_mcts_search`. Returning
+    the root lets callers extract either the best action, the mean root value
+    (negamax-corrected to root's POV), the visit distribution, or all three.
+    """
+    root = Node(
+        parent=None, action_in=None, side_to_move=player_id, untried_actions=list(engine.enumerate_legal(player_id=player_id))
+    )
+
+    for _ in range(iterations):
+        sim = engine.clone()
+        leaf = _select(root, sim, c)
+        if not sim.is_terminal() and leaf.untried_actions:
+            leaf = _expand(leaf, sim, rng)
+        value = _evaluate(sim, leaf.side_to_move, rng)
+        _backprop(leaf, value)
+
+    return root
+
+
 def godmode_mcts_action(
     engine: "gameEngine",
     player_id: int,
@@ -73,20 +101,30 @@ def godmode_mcts_action(
         - Tree is discarded after each call (no subtree reuse in v1).
         - rng is used for rollout action selection and tie-breaking.
     """
-    root = Node(
-        parent=None, action_in=None, side_to_move=player_id, untried_actions=list(engine.enumerate_legal(player_id=player_id))
-    )
-
-    for _ in range(iterations):
-        sim = engine.clone()
-        leaf = _select(root, sim, c)
-        if not sim.is_terminal() and leaf.untried_actions:
-            leaf = _expand(leaf, sim, rng)
-        value = _evaluate(sim, leaf.side_to_move, rng)
-        _backprop(leaf, value)
-
-    # _debug_print_root(root)
+    root = _run_search(engine, player_id, rng, iterations, c)
     return _best_child_by_visits(root, rng).action_in
+
+
+def godmode_mcts_search(
+    engine: "gameEngine",
+    player_id: int,
+    rng: random.Random,
+    *,
+    iterations: int = DEFAULT_ITERATIONS,
+    c: float = DEFAULT_C,
+) -> tuple["Action", float]:
+    """Run UCT and return (best_action, root_value).
+
+    `root_value = root.total_value / root.visits` is the mean backed-up value
+    at the root, in [-1, +1] from `player_id`'s POV (negamax convention —
+    root.total_value is already stored from root.side_to_move's perspective,
+    which equals `player_id`). This is the higher-quality, lower-variance
+    label for value-function regression compared to the terminal MC return,
+    bounded by current MCTS strength.
+    """
+    root = _run_search(engine, player_id, rng, iterations, c)
+    root_value = root.total_value / root.visits if root.visits > 0 else 0.0
+    return _best_child_by_visits(root, rng).action_in, root_value
 
 
 def _debug_print_root(root: Node) -> None:

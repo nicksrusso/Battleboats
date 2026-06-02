@@ -110,15 +110,13 @@ ECON_BETA = 0.1
 # DEFAULT_WEIGHTS[k] * features[k] is a term in the pre-tanh sum directly.
 # The learning loop will replace this dict with the output of regression
 # on (features, mcts_root_value) pairs; don't over-tune these defaults.
-with open("/home/nick/Desktop/repos/Battleboats/runs/weights/v2.json", "r") as f:
+with open("/home/nick/Desktop/repos/Battleboats/runs/weights/v3.json", "r") as f:
     regression_data = json.load(f)
 DEFAULT_WEIGHTS = regression_data["weights"]
 
-# Per-state bias term learned by v2's intercept. Not currently applied —
-# heuristic_eval computes tanh(Σ w·φ) without an additive constant. If
-# fidelity matters, fold this into the heuristic by adding it inside the
-# tanh; magnitude (~0.24) shifts ~5-15% of states by a meaningful amount.
-# For the bootstrap iteration, dropping it is acceptable.
+# Per-state bias term learned by v3's intercept. Not currently applied in
+# heuristic_eval (tanh(Σ w·φ) only). If fidelity matters, add it inside the
+# tanh; magnitude (~0.34) shifts some states meaningfully. Acceptable for now.
 DEFAULT_INTERCEPT = regression_data["intercept"]
 
 FEATURE_KEYS: Tuple[str, ...] = tuple(DEFAULT_WEIGHTS.keys())

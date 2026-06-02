@@ -27,12 +27,13 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 from battleboats.agents.debug_plot import plot_state
-from battleboats.agents.godmode_mcts import godmode_mcts_action
+from battleboats.agents.godmode_mcts import godmode_mcts_action, godmode_mcts_search
 from battleboats.agents.heuristics import decompose, heuristic_eval
 from battleboats.agents.random_agent import random_action
 from battleboats.core.actions import MoveAction
 from battleboats.core.shipyard.ship_type import ShipType
 from battleboats.envs.battleboats_aec import BattleboatsAEC
+from battleboats.envs.observation import build_entity_tokens
 
 MAP_JSON = "/home/nick/Desktop/repos/Battleboats/battleboats/core/config/map.json"
 OUTPUT_DIR = Path("/home/nick/Desktop/repos/Battleboats/runs/benchmarks")
@@ -125,6 +126,7 @@ def _play_one_game(
     verbose: bool = True,
     debug_plot: bool = False,
     debug_plot_mcts_only: bool = False,
+    emit_tokens: bool = False,
 ) -> Dict[str, Any]:
     """Play one game; return a record with trajectory + outcome + timing.
 
@@ -152,6 +154,9 @@ def _play_one_game(
     steps = 0
 
     for agent in env.agent_iter():
+        # Reset per-step MCTS labels; only set in the use_mcts branch below.
+        mcts_root_value_step: Optional[float] = None
+        acting_pid: Optional[int] = None
         if env.terminations[agent] or env.truncations[agent]:
             action = None
             actor = "dead"
@@ -162,9 +167,10 @@ def _play_one_game(
             use_mcts = self_play or (pid == mcts_player_id)
             if use_mcts:
                 t0 = time.perf_counter()
-                action = godmode_mcts_action(env.engine, pid, rng, iterations=iterations)
+                action, mcts_root_value_step = godmode_mcts_search(env.engine, pid, rng, iterations=iterations)
                 elapsed = time.perf_counter() - t0
                 actor = "mcts"
+                acting_pid = pid
                 action_name = _describe_action(action, env.engine)
                 if verbose:
                     # Print is from the *acting* player's POV so self-play
@@ -190,6 +196,7 @@ def _play_one_game(
             else:
                 action = random_action(env.engine, pid, rng)
                 actor = "random"
+                acting_pid = pid
                 elapsed = 0.0
                 action_name = _describe_action(action, env.engine)
 
@@ -223,6 +230,14 @@ def _play_one_game(
         _, phi_opp, _ = decompose(env.engine, 1 - mcts_player_id)
         phi_p0 = phi_mcts if mcts_player_id == 0 else phi_opp
         phi_p1 = phi_opp if mcts_player_id == 0 else phi_mcts
+        # Per-perspective entity tokens for the transformer encoder — the
+        # variable-length (N, TOKEN_DIM) set that `phi` aggregates away.
+        # Indexed by absolute player id, same convention as phi_p*. Built
+        # only when harvesting (emit_tokens); the benchmark/trade-study
+        # callers leave it off to avoid the per-step tokenizer cost.
+        # Stored as nested lists so the row stays JSON-serializable.
+        tokens_p0 = build_entity_tokens(env.engine, 0).tolist() if emit_tokens else None
+        tokens_p1 = build_entity_tokens(env.engine, 1).tolist() if emit_tokens else None
         trajectory.append(
             {
                 "step": steps,
@@ -231,8 +246,17 @@ def _play_one_game(
                 "value": value,
                 "phi_p0": phi_p0,
                 "phi_p1": phi_p1,
+                "tokens_p0": tokens_p0,
+                "tokens_p1": tokens_p1,
                 "elapsed_s": elapsed,
                 "action_type": action_name,
+                # MCTS root-value label: mean backed-up value at the root from
+                # the acting player's POV. Lower-variance complement to the
+                # terminal MC return. None when the actor wasn't MCTS this
+                # step. `acting_pid` lets the harvest attach the label to the
+                # correct per-perspective row.
+                "mcts_root_value": mcts_root_value_step,
+                "acting_pid": acting_pid,
             }
         )
 
