@@ -5,6 +5,9 @@
 # easily reproducible from the scripts — no value in versioning them.
 runs/
 
+# Weights & Biases local run logs / cache.
+wandb/
+
 # Byte-compiled / optimized / DLL files
 __pycache__/
 *.py[codz]
