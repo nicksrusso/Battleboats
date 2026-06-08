@@ -29,6 +29,7 @@ Usage (after filling the stubs):
 from __future__ import annotations
 
 import argparse
+import time
 from pathlib import Path
 
 import numpy as np
@@ -49,16 +50,19 @@ def evaluate(model, loader, loss_fn, device) -> float:
     model.eval() matters here — the transformer has dropout, which must be OFF
     for a clean val number; flip back to model.train() before returning.
     """
-    # TODO: model.eval()
-    # TODO: total_loss, n_batches = 0.0, 0
-    # TODO: for tokens, pad_mask, targets in loader:
-    # TODO:     tokens, pad_mask, targets = tokens.to(device), pad_mask.to(device), targets.to(device)
-    # TODO:     pred = model(tokens, pad_mask)
-    # TODO:     total_loss += loss_fn(pred, targets).item()
-    # TODO:     n_batches += 1
-    # TODO: model.train()
-    # TODO: return total_loss / max(n_batches, 1)
-    raise NotImplementedError("Fill in evaluate — see TODOs.")
+
+    model.eval()
+    total_loss = 0.0
+    n_batches = 0
+    for tokens, pad_mask, targets in loader:
+        tokens = tokens.to(device)
+        pad_mask = pad_mask.to(device)
+        targets = targets.to(device)
+        pred = model(tokens, pad_mask)
+        total_loss += loss_fn(pred, targets).item()
+        n_batches += 1
+    model.train()
+    return total_loss / max(n_batches, 1)
 
 
 @torch.no_grad()
@@ -69,23 +73,78 @@ def evaluate_by_phase(model, ds, loader, device, n_bins: int = 3) -> dict:
     concatenated order matches ds row order, then line each squared error up
     with ds.steps / ds.game_ids for phase bucketing. See [[project-value-target]].
     """
-    # TODO: model.eval()
-    # TODO: preds = []
-    # TODO: for tokens, pad_mask, _ in loader:
-    # TODO:     preds.append(model(tokens.to(device), pad_mask.to(device)).cpu())
-    # TODO: pred = torch.cat(preds).numpy()
-    # TODO: sq_err = (pred - ds.targets) ** 2
-    #
-    # TODO: normalize step -> progress fraction in [0,1] per game:
-    # TODO:   steps = ds.steps.astype(np.float64); max_step = np.zeros_like(steps)
-    # TODO:   for gid in np.unique(ds.game_ids):
-    # TODO:       mask = ds.game_ids == gid; m = steps[mask].max()
-    # TODO:       max_step[mask] = m if m > 0 else 1.0
-    # TODO:   progress = steps / max_step
-    #
-    # TODO: bucket into n_bins, print mse per bucket, return {label: mse}
-    # TODO: model.train()
-    raise NotImplementedError("Fill in evaluate_by_phase — see TODOs.")
+    model.eval()
+    preds = []
+    for tokens, pad_mask, _ in loader:
+        # .cpu() before the cat: model output lives on `device` (cuda), and
+        # .numpy() on a cuda tensor throws. Loader MUST be shuffle=False so this
+        # concatenation lines up row-for-row with ds.targets / ds.steps.
+        preds.append(model(tokens.to(device), pad_mask.to(device)).cpu())
+    pred = torch.cat(preds).numpy()
+    sq_err = (pred - ds.targets) ** 2
+
+    # step -> progress fraction in [0, 1] within each game, so games of
+    # different lengths bucket comparably.
+    steps = ds.steps.astype(np.float64)
+    max_step = np.zeros_like(steps)
+    for gid in np.unique(ds.game_ids):
+        mask = ds.game_ids == gid
+        m = steps[mask].max()
+        max_step[mask] = m if m > 0 else 1.0
+    progress = steps / max_step
+
+    out = {}
+    edges = np.linspace(0.0, 1.0, n_bins + 1)
+    print("phase-stratified val MSE (lower = signal present):")
+    for i in range(n_bins):
+        lo, hi = edges[i], edges[i + 1]
+        # last bin inclusive of 1.0; others half-open so no row is double-counted.
+        in_bin = (progress >= lo) & (progress <= hi) if i == n_bins - 1 else (progress >= lo) & (progress < hi)
+        n = int(in_bin.sum())
+        mse = float(sq_err[in_bin].mean()) if n else float("nan")
+        label = ("early", "mid", "late")[i] if n_bins == 3 else f"bin{i}"
+        out[label] = mse
+        print(f"  {label:5s}  progress[{lo:.2f},{hi:.2f}]  n={n:6d}  mse={mse:.4f}")
+    model.train()
+    return out
+
+
+def save_checkpoint(model, args, metrics: dict, save_dir: Path) -> Path:
+    """Persist the trained net to disk and return the checkpoint path.
+
+    STUB — fill the body. Save ONE self-describing dict via torch.save, so the
+    file alone is enough to rebuild and evaluate the model later:
+      - "model_state":  model.state_dict()   — the actual weights
+      - "model_config": the kwargs needed to re-instantiate TransformerValueModel
+        (token_dim, d_model, nhead, num_layers). state_dict has NO architecture
+        info — without this you can't reload.
+      - "train_args":   vars(args)           — lr, target, split, harvest, ...
+      - "metrics":      metrics              — final val_loss, phase MSE, baselines
+    Name the file by timestamp/run (e.g. f"transformer_{ts}.pt"); derive ts from
+    time.strftime here. Path.mkdir(parents=True, exist_ok=True) on save_dir first.
+    Return the written path so the caller can hand it to log_checkpoint_artifact.
+    """
+    raise NotImplementedError
+
+
+def log_checkpoint_artifact(ckpt_path: Path, metrics: dict, args) -> None:
+    """Upload the checkpoint to W&B as a versioned Artifact (lineage to this run).
+
+    STUB — fill the body. Only reached when --wandb is on (wandb.init already ran).
+    Pattern:
+        art = wandb.Artifact(name="transformer-value", type="model", metadata={...})
+        art.add_file(str(ckpt_path))
+        wandb.log_artifact(art)
+    Use a STABLE name so successive runs become v0, v1, v2... of the SAME artifact
+    rather than unrelated blobs — that versioning + run-lineage is the whole point.
+    Put final val_loss / phase MSE in metadata so the W&B UI shows the best version.
+
+    HuggingFace alternative (final PUBLISH step, not every run): huggingface_hub
+    upload_file / push_to_hub the checkpoint + a short model card. Leave it out
+    until there's a finished agent worth sharing — HF is a registry, W&B Artifacts
+    is the experiment-lineage store. See [[project-value-target]].
+    """
+    raise NotImplementedError
 
 
 def main() -> None:
@@ -108,13 +167,18 @@ def main() -> None:
         default="mcts_root_value",
         help="Regression label. Default mcts_root_value (the learnable one).",
     )
+    parser.add_argument(
+        "--save-dir",
+        type=Path,
+        default=Path("runs/checkpoints"),
+        help="Directory to torch.save the trained checkpoint into (TransformerValueModel weights + config).",
+    )
     parser.add_argument("--wandb", action="store_true", help="Log to Weights & Biases.")
-    parser.add_argument("--wandb-project", default="battleboats-value")
+    parser.add_argument("--wandb-entity", default="nicksrusso", help="W&B entity (user/team).")
+    parser.add_argument("--wandb-project", default="battleboats-data")
     args = parser.parse_args()
 
-    use_wandb = args.wandb and wandb is not None
-    if args.wandb and wandb is None:
-        print("[warn] --wandb passed but wandb not installed; continuing without logging. " "`poetry add wandb` to enable.")
+    use_wandb = args.wandb
 
     # --- Data (token mode) ---
     train_ids, val_ids, meta = load_split(args.split)
@@ -143,7 +207,7 @@ def main() -> None:
     print(f"baseline  val label variance (best constant)   val_mse={val_label_var:.4f}")
 
     if use_wandb:
-        wandb.init(project=args.wandb_project, config=vars(args))
+        wandb.init(entity=args.wandb_entity, project=args.wandb_project, config=vars(args))
         wandb.config.update(
             {
                 "token_dim": train_ds.token_dim,
@@ -162,46 +226,82 @@ def main() -> None:
     # ------------------------------------------------------------------
     # Overfit-a-batch sanity check (run FIRST after any change).
     # ------------------------------------------------------------------
-    # TODO: if args.overfit_batch:
-    # TODO:     tokens, pad_mask, targets = next(iter(loader))
-    # TODO:     tokens, pad_mask, targets = tokens.to(args.device), pad_mask.to(args.device), targets.to(args.device)
-    # TODO:     for step in range(args.steps):
-    # TODO:         pred = model(tokens, pad_mask)
-    # TODO:         loss = loss_fn(pred, targets)
-    # TODO:         optimizer.zero_grad(); loss.backward(); optimizer.step()
-    # TODO:         if step % 20 == 0:
-    # TODO:             print(f"  step={step:4d}  loss={loss.item():.6f}")
-    # TODO:             if use_wandb: wandb.log({"overfit/loss": loss.item(), "overfit/step": step})
-    # TODO:     if use_wandb: wandb.finish()
-    # TODO:     return
+    if args.overfit_batch:
+        tokens, pad_mask, targets = next(iter(loader))
+        tokens = tokens.to(args.device)
+        pad_mask = pad_mask.to(args.device)
+        targets = targets.to(args.device)
+        t0 = time.perf_counter()
+        for step in range(args.steps):
+            pred = model(tokens, pad_mask)
+            loss = loss_fn(pred, targets)
+            optimizer.zero_grad()
+            loss.backward()
+            optimizer.step()
+            if step % 20 == 0:
+                elapsed = time.perf_counter() - t0
+                print(f"    step{step:4d} loss={loss.item():.6f}  t={elapsed:6.1f}s")
+                if use_wandb:
+                    wandb.log({"overfit/loss": loss.item(), "overfit/step": step})
+        if use_wandb:
+            wandb.finish()
+        return
 
     # ------------------------------------------------------------------
     # Normal training: epochs x batches. Same 4-line core as the MLP, but
     # pred = model(tokens, pad_mask). Log train loss every --log-every, eval
     # on val each epoch, run the phase breakdown at the end.
     # ------------------------------------------------------------------
-    # TODO: global_step = 0
-    # TODO: for epoch in range(args.epochs):
-    # TODO:     running_loss, n_batches = 0.0, 0
-    # TODO:     for tokens, pad_mask, targets in loader:
-    # TODO:         tokens, pad_mask, targets = tokens.to(args.device), pad_mask.to(args.device), targets.to(args.device)
-    # TODO:         pred = model(tokens, pad_mask)
-    # TODO:         loss = loss_fn(pred, targets)
-    # TODO:         optimizer.zero_grad(); loss.backward(); optimizer.step()
-    # TODO:         running_loss += loss.item(); n_batches += 1; global_step += 1
-    # TODO:         if global_step % args.log_every == 0:
-    # TODO:             avg = running_loss / n_batches
-    # TODO:             print(f"epoch={epoch}  step={global_step}  train_loss={avg:.4f}")
-    # TODO:             if use_wandb: wandb.log({"train/loss": avg, "epoch": epoch}, step=global_step)
-    # TODO:             running_loss, n_batches = 0.0, 0
-    # TODO:     val_loss = evaluate(model, val_loader, loss_fn, args.device)
-    # TODO:     print(f"epoch={epoch}  VAL  val_loss={val_loss:.4f}")
-    # TODO:     if use_wandb: wandb.log({"val/loss": val_loss, "epoch": epoch}, step=global_step)
-    #
-    # TODO: phase_mse = evaluate_by_phase(model, val_ds, val_loader, args.device)
-    # TODO: if use_wandb:
-    # TODO:     wandb.log({f"val_phase/{k}": v for k, v in phase_mse.items()}, step=global_step)
-    # TODO:     wandb.finish()
+    global_step = 0
+    for epoch in range(args.epochs):
+        running_loss = 0.0
+        n_batches = 0
+        for (
+            tokens,
+            pad_mask,
+            targets,
+        ) in loader:
+            tokens = tokens.to(args.device)
+            pad_mask = pad_mask.to(args.device)
+            targets = targets.to(args.device)
+            pred = model(tokens, pad_mask)
+            loss = loss_fn(pred, targets)
+            optimizer.zero_grad()
+            loss.backward()
+            optimizer.step()
+            running_loss += loss.item()
+            n_batches += 1
+            global_step += 1
+            if global_step % args.log_every == 0:
+                avg = running_loss / n_batches
+                print(f"epoch={epoch}  step={global_step}  train_loss={avg:.4f}")
+                if use_wandb:
+                    wandb.log({"train/loss": avg, "epoch": epoch}, step=global_step)
+                running_loss = 0.0
+                n_batches = 0
+        val_loss = evaluate(model, val_loader, loss_fn, args.device)
+        print(f"epoch={epoch}  VAL  val_loss={val_loss:.4f}")
+        if use_wandb:
+            wandb.log({"val/loss": val_loss, "epoch": epoch}, step=global_step)
+
+    phase_mse = evaluate_by_phase(model, val_ds, val_loader, args.device)
+    if use_wandb:
+        wandb.log({f"val_phase/{k}": v for k, v in phase_mse.items()}, step=global_step)
+
+    # --- Persist weights (fill save_checkpoint / log_checkpoint_artifact above) ---
+    metrics = {
+        "val_loss": val_loss,
+        "baseline_val_mse": baseline_val_mse,
+        "val_label_var": val_label_var,
+        **{f"phase_{k}": v for k, v in phase_mse.items()},
+    }
+    ckpt_path = save_checkpoint(model, args, metrics, args.save_dir)
+    print(f"saved checkpoint -> {ckpt_path}")
+    if use_wandb:
+        log_checkpoint_artifact(ckpt_path, metrics, args)
+
+    if use_wandb:
+        wandb.finish()
 
 
 if __name__ == "__main__":

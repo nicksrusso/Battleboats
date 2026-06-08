@@ -29,10 +29,11 @@ SCRIPT_DIR = Path(os.path.dirname(os.path.abspath(__file__)))
 REPO_ROOT = SCRIPT_DIR.parent
 
 
-def find_large_maps() -> List[Path]:
-    """Return all map_large_*.json files."""
+def find_training_maps() -> List[Path]:
+    """Return all map_training_*.json files (the 64x32 training substrate produced
+    by generate_map.py). Hardcoded to the training maps."""
     maps_dir = REPO_ROOT / "battleboats" / "core" / "config" / "maps"
-    return sorted(maps_dir.glob("map_large_*.json"))
+    return sorted(maps_dir.glob("map_training_*.json"))
 
 
 def get_legal_spawn_positions(map_obj: Map, player_ports: List[Tuple[int, int]]) -> List[Tuple[int, int]]:
@@ -96,39 +97,38 @@ def generate_scenario(map_path: Path, budget: int, scenario_id: int, rng: random
         scenario[player_key]["cash"] = remaining_cash
         scenario[player_key]["ships"] = fleet
 
-    # Place ships
+    # Place ships. On small/dense maps the random fleet can exceed the number of
+    # legal spawn tiles (water adjacent to the player's ports) — so we place what
+    # fits and DROP the overflow. Only ships that actually get a position survive,
+    # otherwise reset_from_scenario hits a ship with no "position" and crashes.
     for p_id in (0, 1):
         player_key = f"player_{p_id}"
         ports = player_ports[p_id]
-        if not ports:
-            continue
+        legal_spawns = get_legal_spawn_positions(map_obj, ports) if ports else []
 
-        legal_spawns = get_legal_spawn_positions(map_obj, ports)
-        if not legal_spawns:
-            continue  # rare edge case
-
-        ships = scenario[player_key]["ships"]
-        for ship in ships:
+        placed = []
+        for ship in scenario[player_key]["ships"]:
             if not legal_spawns:
-                break
+                break  # no room left -> drop remaining ships
             position = rng.choice(legal_spawns)
+            legal_spawns.remove(position)  # don't stack ships
             ship["position"] = list(position)
-            # Remove this position so we don't stack ships
-            legal_spawns.remove(position)
+            placed.append(ship)
+        scenario[player_key]["ships"] = placed  # only deployable ships survive
 
     return scenario
 
 
 def main() -> None:
     parser = argparse.ArgumentParser(
-        description="Generate random starting scenarios using large maps."
+        description="Generate random starting scenarios on the training maps: "
+        "for EACH map, --starts-per-map random starts (so 50 maps x 10 = 500)."
     )
     parser.add_argument(
-        "--num-scenarios",
-        "-n",
+        "--starts-per-map",
         type=int,
-        default=100,
-        help="Number of scenarios to generate (default: 100)",
+        default=10,
+        help="Random game starts to generate per training map (default: 10).",
     )
     parser.add_argument(
         "--min-budget",
@@ -163,33 +163,31 @@ def main() -> None:
     args.output_dir.mkdir(parents=True, exist_ok=True)
     rng = random.Random(args.seed)
 
-    large_maps = find_large_maps()
-    if not large_maps:
-        print("Error: No large maps found!")
+    training_maps = find_training_maps()
+    if not training_maps:
+        print("Error: No training maps found! Run generate_map.py first.")
         return
 
-    print(f"Found {len(large_maps)} large maps.")
-    print(f"Generating {args.num_scenarios} scenarios with budget in "
-          f"[${args.min_budget}, ${args.max_budget}]...")
+    total = len(training_maps) * args.starts_per_map
+    print(f"Found {len(training_maps)} training maps; {args.starts_per_map} starts each -> {total} scenarios.")
+    print(f"Budget in [${args.min_budget}, ${args.max_budget}]...")
 
+    # Structured coverage: every map gets exactly --starts-per-map starts, so the
+    # dataset spans all maps evenly (not a random map per scenario).
     scenarios = []
-    for i in range(args.num_scenarios):
-        # Pick random budget uniformly from range, rounded to nearest 25.
-        # This produces varied remainders (0/25/50/75) after random buying.
-        budget = rng.randint(args.min_budget, args.max_budget)
-        budget = round(budget / 25) * 25
+    sid = 0
+    for map_path in training_maps:
+        rel_map = map_path.relative_to(REPO_ROOT)  # relative path for portability
+        for _ in range(args.starts_per_map):
+            # Random budget, rounded to nearest 25 (varied remainders after buying).
+            budget = round(rng.randint(args.min_budget, args.max_budget) / 25) * 25
+            scenario = generate_scenario(map_path, budget, sid, rng)
+            scenario["map_path"] = str(rel_map)
+            scenarios.append(scenario)
+            sid += 1
+        print(f"  {map_path.name}: {args.starts_per_map} starts")
 
-        map_path = rng.choice(large_maps)
-        # Store relative path for portability (reset_from_scenario handles it)
-        rel_map = map_path.relative_to(REPO_ROOT)
-        scenario = generate_scenario(map_path, budget, i, rng)
-        scenario["map_path"] = str(rel_map)
-        scenarios.append(scenario)
-
-        if (i + 1) % 20 == 0 or (i + 1) == args.num_scenarios:
-            print(f"  Generated {i + 1}/{args.num_scenarios}...")
-
-    output_path = args.output_dir / f"scenarios_{args.num_scenarios}.json"
+    output_path = args.output_dir / f"scenarios_{len(scenarios)}.json"
     with open(output_path, "w") as f:
         json.dump(scenarios, f, indent=2)
 

@@ -32,6 +32,7 @@ from battleboats.agents.heuristics import decompose, heuristic_eval
 from battleboats.agents.random_agent import random_action
 from battleboats.core.actions import MoveAction
 from battleboats.core.shipyard.ship_type import ShipType
+from battleboats.envs.action_masks import ActionMasks
 from battleboats.envs.battleboats_aec import BattleboatsAEC
 from battleboats.envs.observation import build_entity_tokens
 
@@ -127,8 +128,20 @@ def _play_one_game(
     debug_plot: bool = False,
     debug_plot_mcts_only: bool = False,
     emit_tokens: bool = False,
+    shard_path: Optional[str] = None,
 ) -> Dict[str, Any]:
     """Play one game; return a record with trajectory + outcome + timing.
+
+    Streaming mode (shard_path set, used by the harvest): instead of
+    accumulating the whole trajectory in RAM and returning it, write each
+    step's per-perspective rows straight to `shard_path` as they're produced,
+    then a `_type=game_footer` line carrying the winner. Worker memory stays
+    flat regardless of game length — this is what keeps a token harvest from
+    OOM-ing (a full token trajectory is ~1-2 GB; six workers holding one each
+    blows past RAM). The returned record then omits `trajectory` and just
+    carries outcome/tally fields. The terminal ±1 target is NOT written
+    per-row (the winner is only known at game end); the footer's winner lets
+    HarvestDataset derive it at load time.
 
     Self-contained for multiprocessing: takes only picklable primitives and
     constructs its own env + rng inside the function body. The `verbose`
@@ -148,6 +161,18 @@ def _play_one_game(
     else:
         env.reset(seed=seed)
     rng = random.Random(seed)
+
+    # Streaming mode: open this game's own shard file. No shared handle across
+    # workers -> no locking. Closed (and flushed) at game end; a worker killed
+    # mid-game just loses its partial file, completed games are safe on disk.
+    shard_file = open(shard_path, "w") if shard_path is not None else None
+    base_provenance = {
+        "game_idx": game_idx,
+        "seed": seed,
+        "iterations": iterations,
+        "mcts_player_id": mcts_player_id,
+    }
+    kept_rows = 0
 
     trajectory: List[Dict[str, Any]] = []
     game_t0 = time.perf_counter()
@@ -238,27 +263,61 @@ def _play_one_game(
         # Stored as nested lists so the row stays JSON-serializable.
         tokens_p0 = build_entity_tokens(env.engine, 0).tolist() if emit_tokens else None
         tokens_p1 = build_entity_tokens(env.engine, 1).tolist() if emit_tokens else None
-        trajectory.append(
-            {
-                "step": steps,
-                "turn": env.engine.turn,
-                "actor": actor,
-                "value": value,
-                "phi_p0": phi_p0,
-                "phi_p1": phi_p1,
-                "tokens_p0": tokens_p0,
-                "tokens_p1": tokens_p1,
-                "elapsed_s": elapsed,
-                "action_type": action_name,
-                # MCTS root-value label: mean backed-up value at the root from
-                # the acting player's POV. Lower-variance complement to the
-                # terminal MC return. None when the actor wasn't MCTS this
-                # step. `acting_pid` lets the harvest attach the label to the
-                # correct per-perspective row.
-                "mcts_root_value": mcts_root_value_step,
-                "acting_pid": acting_pid,
-            }
-        )
+
+        # Behavior-cloning label: the MCTS-chosen action as factored
+        # (asset_idx, verb_idx, target_idx) indices into the ACTING player's token
+        # order (target_idx -1 = no target). Recorded only for expert (MCTS) moves;
+        # attached below to the acting player's perspective row (it was decided from
+        # that POV, so it aligns with that POV's tokens). Computed pre-step, on the
+        # same engine state the tokens were built from. See action_masks.ActionMasks.
+        action_idx = None
+        if actor == "mcts" and acting_pid is not None and action is not None:
+            action_idx = list(ActionMasks(env.engine, acting_pid).factor(action))
+
+        if shard_file is not None:
+            # Stream the two per-perspective rows immediately, then discard —
+            # never accumulate. mcts_root_value is attached only to the acting
+            # player's perspective (the POV search ran from); the other gets
+            # null, same convention the harvest used. Skip terminal/dead steps
+            # where decompose returned empty phi. No per-row terminal target —
+            # the footer's winner lets the dataset derive it.
+            if phi_p0 and phi_p1:
+                rv_p0 = mcts_root_value_step if acting_pid == 0 else None
+                rv_p1 = mcts_root_value_step if acting_pid == 1 else None
+                # Action label rides the same perspective as mcts_root_value: the
+                # acting player's row gets it, the other gets null.
+                act_p0 = action_idx if acting_pid == 0 else None
+                act_p1 = action_idx if acting_pid == 1 else None
+                step_base = {**base_provenance, "step": steps, "turn": env.engine.turn, "actor": actor}
+                row0 = {**step_base, "perspective": 0, "phi": phi_p0, "tokens": tokens_p0, "mcts_root_value": rv_p0, "action": act_p0}
+                row1 = {**step_base, "perspective": 1, "phi": phi_p1, "tokens": tokens_p1, "mcts_root_value": rv_p1, "action": act_p1}
+                shard_file.write(json.dumps(row0, default=str) + "\n")
+                shard_file.write(json.dumps(row1, default=str) + "\n")
+                kept_rows += 2
+        else:
+            trajectory.append(
+                {
+                    "step": steps,
+                    "turn": env.engine.turn,
+                    "actor": actor,
+                    "value": value,
+                    "phi_p0": phi_p0,
+                    "phi_p1": phi_p1,
+                    "tokens_p0": tokens_p0,
+                    "tokens_p1": tokens_p1,
+                    "elapsed_s": elapsed,
+                    "action_type": action_name,
+                    # MCTS root-value label: mean backed-up value at the root from
+                    # the acting player's POV. Lower-variance complement to the
+                    # terminal MC return. None when the actor wasn't MCTS this
+                    # step. `acting_pid` lets the harvest attach the label to the
+                    # correct per-perspective row.
+                    "mcts_root_value": mcts_root_value_step,
+                    "acting_pid": acting_pid,
+                    # Factored BC label of the MCTS action (None for non-MCTS steps).
+                    "action": action_idx,
+                }
+            )
 
         env.step(action)
         steps += 1
@@ -267,18 +326,32 @@ def _play_one_game(
                 print(f"  [step budget {step_budget} hit; aborting game]", flush=True)
             break
 
-    return {
+    winner = env.engine.winner  # 0 / 1 / None
+    record = {
         "game_idx": game_idx,
         "iterations": iterations,
         "self_play": self_play,
         "mcts_player_id": mcts_player_id,
         "seed": seed,
-        "winner": env.engine.winner,  # 0 / 1 / None
+        "winner": winner,
         "steps": steps,
         "final_turn": env.engine.turn,
         "wall_time_s": time.perf_counter() - game_t0,
-        "trajectory": trajectory,
     }
+
+    if shard_file is not None:
+        # Footer carries the winner so the dataset can derive the ±1 terminal
+        # target at load time (None for truncated games -> no flat target,
+        # but their mcts_root_value rows are still usable).
+        footer = {"_type": "game_footer", **base_provenance, "winner": winner,
+                  "steps": steps, "final_turn": env.engine.turn}
+        shard_file.write(json.dumps(footer, default=str) + "\n")
+        shard_file.close()
+        record["kept_rows"] = kept_rows
+        return record
+
+    record["trajectory"] = trajectory
+    return record
 
 
 def _worker_run_game(kwargs: Dict[str, Any]) -> Dict[str, Any]:

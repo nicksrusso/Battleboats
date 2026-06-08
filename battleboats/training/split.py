@@ -16,22 +16,65 @@ from __future__ import annotations
 
 import json
 import random
+import re
 from pathlib import Path
-from typing import Dict, Iterable, List, Set, Tuple
+from typing import Dict, Iterable, Optional, Set, Tuple
+
+# game_idx is always the FIRST key of a harvest row (harvest.py builds each row
+# from a base dict that starts with it), so a prefix match pulls it out without
+# json.loads-ing the rest of the line. On a token harvest that's the difference
+# between seconds and many minutes — every row carries a ~100 KB token array we
+# don't need just to read one integer.
+_GAME_IDX_PREFIX = re.compile(r'^\s*\{\s*"game_idx"\s*:\s*(-?\d+)')
 
 
-def read_game_ids(jsonl_path: str | Path) -> Set[int]:
-    """Scan a harvest JSONL and return the set of distinct game_idx values.
+def _extract_game_idx(line: str) -> int:
+    """game_idx from a row, cheaply. Falls back to a full parse if the prefix
+    layout ever changes, so correctness never depends on the fast path."""
+    m = _GAME_IDX_PREFIX.match(line)
+    if m:
+        return int(m.group(1))
+    return json.loads(line)["game_idx"]
 
-    Streams line-by-line; cheap even for very large files since we only
-    parse the one field we need.
+
+def read_game_ids(jsonl_path: str | Path, max_games: Optional[int] = None) -> Set[int]:
+    """Return the set of distinct game_idx values in a harvest.
+
+    Accepts either form of harvest output:
+      - a DIRECTORY of per-game shards (`game_<idx>.jsonl`): the game ids ARE
+        the filenames, so this reads ZERO content — instant even on a huge
+        corpus.
+      - a single .jsonl FILE (legacy): streams line-by-line, extracting only
+        game_idx (no full JSON parse of the token arrays — see
+        _extract_game_idx).
+
+    If `max_games` is given, stops once that many distinct games are seen. For a
+    file, games are contiguous so this reads only the FRONT (the lever for not
+    choking on a 25 GB harvest); for a shard dir it just takes that many
+    filenames. Either way the subset is effectively arbitrary (fine for a
+    memory-bounded experiment). Omit it to take everything.
     """
+    path = Path(jsonl_path)
     ids: Set[int] = set()
-    with open(jsonl_path) as f:
+
+    if path.is_dir():
+        for shard in sorted(path.glob("game_*.jsonl")):
+            stem = shard.stem
+            if not stem.startswith("game_"):
+                continue
+            try:
+                ids.add(int(stem[len("game_") :]))
+            except ValueError:
+                continue
+            if max_games is not None and len(ids) >= max_games:
+                break
+        return ids
+
+    with open(path) as f:
         for line in f:
-            # json.loads is the cleanest path; the file is too varied
-            # to safely substring-search.
-            ids.add(json.loads(line)["game_idx"])
+            ids.add(_extract_game_idx(line))
+            if max_games is not None and len(ids) >= max_games:
+                break
     return ids
 
 
@@ -108,13 +151,22 @@ def _cli() -> None:
     parser.add_argument("--out", type=Path, required=True, help="Where to write the split JSON.")
     parser.add_argument("--val-frac", type=float, default=0.2)
     parser.add_argument("--seed", type=int, default=0)
+    parser.add_argument(
+        "--max-games",
+        type=int,
+        default=None,
+        help="Cap total games in the split (train+val). Bounds downstream RAM "
+        "when token mode loads each game's tokens — and lets the scan early-exit "
+        "instead of reading the whole harvest. Omit to use every game.",
+    )
     args = parser.parse_args()
 
-    ids = read_game_ids(args.harvest)
+    ids = read_game_ids(args.harvest, max_games=args.max_games)
     train, val = split_by_game(ids, val_frac=args.val_frac, seed=args.seed)
     save_split(args.out, train, val, args.harvest, args.seed, args.val_frac)
 
     print(f"Harvest:        {args.harvest}")
+    print(f"Max games:      {args.max_games if args.max_games is not None else 'all'}")
     print(f"Total games:    {len(ids)}")
     print(f"Train games:    {len(train)}  ({sorted(train)})")
     print(f"Val games:      {len(val)}    ({sorted(val)})")

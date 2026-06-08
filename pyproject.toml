@@ -16,15 +16,20 @@ matplotlib = "^3.10.8"
 # multi-GB ROCm wheel and the dep resolution drags in triton-rocm
 # whose wheel also fails poetry's strict validation. After `poetry
 # install`, run:
-#   poetry run pip install torch \
-#       --index-url https://download.pytorch.org/whl/rocm7.2 \
-#       --force-reinstall
-torch = "^2.11.0"
+#   poetry run pip install torch==2.10.0 \
+#       --index-url https://download.pytorch.org/whl/rocm7.0 \
+#       --force-reinstall --no-cache-dir
+# Constraint allows 2.10 because the newest cp312 ROCm wheel is
+# 2.10.0+rocm7.0 (no 2.11/2.12 ROCm build exists yet). Keep this <=
+# the installed ROCm torch or `poetry install` will pull a CUDA wheel.
+torch = ">=2.10.0,<3.0.0"
 pyyaml = "^6.0.3"
 seaborn = "^0.13.2"
 pytest = "^9.0.3"
 pettingzoo = "^1.26.1"
 scikit-learn = "^1.8.0"
+wandb = "^0.27.0"
+weave = "^0.52.42"
 
 [tool.poetry.group.dev.dependencies]
 black = "^26.3.1"

@@ -86,7 +86,7 @@ class TransformerValueModel(nn.Module):
 
         m = pad_mask.unsqueeze(-1)
         summed = (x * m).sum(dim=1)
-        counts = pad_mask.sum(dum=1, keepdim=True).clamp(min=1)
+        counts = pad_mask.sum(dim=1, keepdim=True).clamp(min=1)
         pooled = summed / counts
         out = self.value_head(pooled)
 

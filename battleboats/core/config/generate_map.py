@@ -75,10 +75,11 @@ if __name__ == "__main__":
     cfg_dir = Path(__file__).parent
     maps_dir = cfg_dir / "maps"
     # (yaml_filename, size_label, count)
+    # Training substrate: 50 random 64x32 maps (map_training_NN.json) — the maps
+    # scenario_generator.find_training_maps() globs. The old small/medium/large
+    # batches are retired (their YAMLs remain on disk if ever needed again).
     batches = [
-        ("mapConfigSmall.yaml", "small", 10),
-        ("mapConfigMedium.yaml", "medium", 25),
-        ("mapConfigLarge.yaml", "large", 25),
+        ("mapConfigTraining.yaml", "training", 50),
     ]
     for yaml_name, label, count in batches:
         yaml_path = cfg_dir / yaml_name

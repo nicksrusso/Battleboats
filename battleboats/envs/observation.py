@@ -39,7 +39,7 @@ TOKEN_POSITION_DIM: int = 2  # x/y position
 TOKEN_OWNER_DIM: int = 2  # is_friendly, is_enemy (relative to observer)
 TOKEN_STATS_DIM: int = 6  # one for each ship stat
 TOKEN_SHIP_STATE_DIM: int = 3  # cargo carried, has_attacked, tiles moved this turn
-TOKEN_PORT_STATE_DIM: int = 2  # mats in stockpile, is home
+TOKEN_PORT_STATE_DIM: int = 3  # mats in stockpile, is home, home-port cash
 TOKEN_SIGHTING_STATE_DIM: int = 2  # fresh, staleness
 
 TOKEN_DIM: int = (
@@ -146,39 +146,18 @@ def build_entity_tokens(engine: "gameEngine", player_id: int) -> np.ndarray:
     its kind. The per-kind _write_*_token helpers handle the field population.
     """
     tokens: List[np.ndarray] = []
-
-    # Friendly ships
-    for ship in engine.ships.values():
-        if ship.owner != player_id:
-            continue
+    for kind, payload in _ordered_entities(engine, player_id):
         row = np.zeros(TOKEN_DIM, dtype=np.float32)
-        _write_friendly_ship_token(row, ship, engine)
-        tokens.append(row)
-
-    # Friendly ports
-    for port in engine.ports.values():
-        if port.owner != player_id:
-            continue
-        row = np.zeros(TOKEN_DIM, dtype=np.float32)
-        _write_friendly_port_token(row, port, engine)
-        tokens.append(row)
-
-    # Enemy ship sightings (fresh + stale)
-    for sighting in engine.known_enemy_ships(player_id):
-        row = np.zeros(TOKEN_DIM, dtype=np.float32)
-        _write_enemy_ship_sighting_token(row, sighting, engine)
-        tokens.append(row)
-
-    # Enemy port sightings (fresh + stale)
-    for port_sighting in engine.known_enemy_ports(player_id):
-        row = np.zeros(TOKEN_DIM, dtype=np.float32)
-        _write_enemy_port_sighting_token(row, port_sighting, engine)
-        tokens.append(row)
-
-    # Coastline tiles (static map property — buildable land adjacent to water)
-    for pos in _coastline_tiles(engine):
-        row = np.zeros(TOKEN_DIM, dtype=np.float32)
-        _write_coastline_token(row, pos, engine)
+        if kind == "friendly_ship":
+            _write_friendly_ship_token(row, payload, engine)
+        elif kind == "friendly_port":
+            _write_friendly_port_token(row, payload, engine)
+        elif kind == "enemy_ship":
+            _write_enemy_ship_sighting_token(row, payload, engine)
+        elif kind == "enemy_port":
+            _write_enemy_port_sighting_token(row, payload, engine)
+        elif kind == "coastline":
+            _write_coastline_token(row, payload, engine)
         tokens.append(row)
 
     # Stack into (N, TOKEN_DIM); explicit empty case so callers get a valid
@@ -186,6 +165,52 @@ def build_entity_tokens(engine: "gameEngine", player_id: int) -> np.ndarray:
     if tokens:
         return np.stack(tokens)
     return np.zeros((0, TOKEN_DIM), dtype=np.float32)
+
+
+def _ordered_entities(engine: "gameEngine", player_id: int):
+    """Yield (kind, payload) for every token, in the CANONICAL token order.
+
+    Single source of truth for token ordering — both `build_entity_tokens` (which
+    writes each payload's features) and `build_entity_refs` (which records each
+    payload's identity) consume this, so token rows and their identities can never
+    drift out of alignment. Policy heads point at indices into this order, and the
+    action-mask adapter maps those indices back to ship ids / positions.
+    """
+    for ship in engine.ships.values():
+        if ship.owner == player_id:
+            yield ("friendly_ship", ship)
+    for port in engine.ports.values():
+        if port.owner == player_id:
+            yield ("friendly_port", port)
+    for sighting in engine.known_enemy_ships(player_id):
+        yield ("enemy_ship", sighting)
+    for port_sighting in engine.known_enemy_ports(player_id):
+        yield ("enemy_port", port_sighting)
+    for pos in _coastline_tiles(engine):
+        yield ("coastline", pos)
+
+
+def build_entity_refs(engine: "gameEngine", player_id: int) -> List[Tuple[str, Any]]:
+    """Per-token IDENTITY, parallel to `build_entity_tokens` (same order, same length).
+
+    Returns a list of (kind, ident) where ident is the thing token i refers to:
+        friendly_ship -> ship id (int)
+        friendly_port -> port position (x, y)
+        enemy_ship    -> sighted enemy ship id (int)   # == AttackAction.target_id
+        enemy_port    -> sighted enemy port position (x, y)
+        coastline     -> buildable land tile position (x, y)
+    The action-mask adapter uses this to translate between token indices and the
+    engine's Action dataclasses.
+    """
+    refs: List[Tuple[str, Any]] = []
+    for kind, payload in _ordered_entities(engine, player_id):
+        if kind == "friendly_ship" or kind == "enemy_ship":
+            refs.append((kind, payload.ship_id if kind == "enemy_ship" else payload.id))
+        elif kind == "friendly_port" or kind == "enemy_port":
+            refs.append((kind, payload.position))
+        else:  # coastline payload IS the position tuple
+            refs.append((kind, payload))
+    return refs
 
 
 def build_globals(engine: "gameEngine", player_id: int) -> np.ndarray:
@@ -287,6 +312,11 @@ def _write_friendly_port_token(row: np.ndarray, port, engine: "gameEngine") -> N
     # Port state
     row[PORT_STATE_OFFSET + 0] = port.stockpile / STOCKPILE_SCALE
     row[PORT_STATE_OFFSET + 1] = 1.0 if port.is_home else 0.0
+    # Home-port cash: fold the player's cash into the token set so the token-only
+    # policy/value heads can see economic state (they don't ingest build_globals).
+    # Only the home port carries it; other ports leave this 0.
+    if port.is_home:
+        row[PORT_STATE_OFFSET + 2] = engine.players[port.owner].cash / CASH_SCALE
 
 
 def _write_enemy_ship_sighting_token(row: np.ndarray, sighting, engine: "gameEngine") -> None:

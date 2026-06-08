@@ -1,21 +1,27 @@
-"""Self-play data harvester — collects (phi, MC-return) rows for V_θ regression.
+"""Self-play data harvester — collects per-state value-regression rows.
 
 Runs N games at a fixed MCTS iteration count using the same unified-work-queue
-parallel dispatch as `trade_study.py`, filters out truncated games (no clean
-Monte Carlo return is available for those), and flattens the surviving game
-trajectories into per-state training rows.
+parallel dispatch as `trade_study.py`. Each worker STREAMS its game's rows
+directly to its own shard file (`harvest_<ts>/game_<idx>.jsonl`) as the game
+plays — never accumulating the trajectory in RAM — which keeps worker memory
+flat and prevents the OOM that token-heavy trajectories caused.
 
-Each row is a dict with:
-    phi:    feature vector (one entry per FEATURE_KEYS), from MCTS-player POV
-    tokens: variable-length (N, TOKEN_DIM) entity-token set for the same
-            POV (the transformer-encoder input that phi aggregates away)
-    target: Monte Carlo return from MCTS-player POV
-            (+1 if MCTS won, -1 if random won)
-    game_idx, seed, iterations, step, turn, actor: provenance / debug fields
+Output layout: a directory `harvest_<ts>/` of per-game shards. Each shard is
+JSONL with two row types:
+    data rows (2 per kept step, one per perspective):
+        phi:             feature vector (one entry per FEATURE_KEYS), that POV
+        tokens:          variable-length (N, TOKEN_DIM) entity-token set
+        mcts_root_value: search value at that state from the acting POV
+                         (null on the non-acting perspective)
+        game_idx, seed, iterations, mcts_player_id, step, turn, actor, perspective
+    one footer row (`_type=game_footer`) carrying `winner` (0/1/None).
 
-The output JSONL streams to disk as games complete, so a killed run still
-leaves the partial dataset usable. A sidecar `<...>_meta.json` records the
-run config and final tallies.
+NOTE: the flat terminal ±1 target is NOT written per-row (the winner is only
+known at game end). HarvestDataset derives it from the footer's `winner` at
+load time. Truncated games (winner None) are KEPT — their mcts_root_value rows
+are valid regardless of outcome; only the derived flat target is undefined.
+
+A sidecar `<...>_meta.json` records the run config and final tallies.
 
 Usage:
     poetry run python scripts/harvest.py
@@ -44,71 +50,25 @@ DEFAULT_NUM_GAMES = 100
 DEFAULT_ITERATIONS = 250
 
 
-def _flatten_to_rows(record: Dict[str, Any]) -> List[Dict[str, Any]]:
-    """Convert one terminated-game record into a list of training rows.
-
-    Emits TWO rows per trajectory step — one from each player's POV —
-    so the regression sees both winning and losing examples from the
-    same trajectory. Without this symmetry the dataset has no target
-    variance (every kept game has MCTS winning, every row would have
-    target=+1, and the regression collapses to "predict the mean").
-
-    Returns empty list for truncated games (winner is None), since
-    those have no clean MC return for either side. Skips per-step
-    entries where either phi is empty — those are terminal-state or
-    dead-agent entries with no feature signal.
-
-    Targets are anchored to absolute player id:
-        target_p0 = +1 if player 0 won, -1 if player 1 won
-        target_p1 = -target_p0
-
-    The MCTS-player identity is recorded on the row (via
-    `mcts_player_id`) but not used by the regression — it's pure
-    provenance for downstream filtering / debug.
+def _shard_complete(path: Path) -> bool:
+    """True if `path` is a FINISHED game shard — exists and ends with a footer
+    line. A worker killed mid-game leaves a footerless (partial) shard, which
+    reads as incomplete here and gets re-run. Reads only the file tail (the footer
+    is the last, short line) so scanning a dir of large shards stays fast.
     """
-    winner = record["winner"]
-    if winner is None:
-        return []
-
-    target_p0 = 1.0 if winner == 0 else -1.0
-    target_p1 = -target_p0
-
-    rows: List[Dict[str, Any]] = []
-    for step in record["trajectory"]:
-        phi_p0 = step.get("phi_p0")
-        phi_p1 = step.get("phi_p1")
-        if not phi_p0 or not phi_p1:
-            continue
-        base = {
-            "game_idx": record["game_idx"],
-            "seed": record["seed"],
-            "iterations": record["iterations"],
-            "mcts_player_id": record["mcts_player_id"],
-            "step": step["step"],
-            "turn": step["turn"],
-            "actor": step["actor"],
-        }
-        # MCTS root-value label is attached only to the row whose perspective
-        # matches the acting player — that's the POV the search was run from.
-        # Other rows get None for this field so the schema stays regular.
-        mcts_rv = step.get("mcts_root_value")
-        acting_pid = step.get("acting_pid")
-        rv_p0 = mcts_rv if acting_pid == 0 else None
-        rv_p1 = mcts_rv if acting_pid == 1 else None
-        # Per-perspective entity tokens (None if the harvest was run without
-        # emit_tokens). Attached to the matching perspective row alongside phi.
-        tokens_p0 = step.get("tokens_p0")
-        tokens_p1 = step.get("tokens_p1")
-        # One row per perspective. `perspective` field marks which player
-        # the phi/target pair refers to so post-hoc analysis can filter
-        # (e.g. "only learn from MCTS-perspective rows" if desired).
-        rows.append(
-            {**base, "perspective": 0, "phi": phi_p0, "tokens": tokens_p0, "target": target_p0, "mcts_root_value": rv_p0}
-        )
-        rows.append(
-            {**base, "perspective": 1, "phi": phi_p1, "tokens": tokens_p1, "target": target_p1, "mcts_root_value": rv_p1}
-        )
-    return rows
+    if not path.exists() or path.stat().st_size == 0:
+        return False
+    with open(path, "rb") as f:
+        f.seek(0, 2)
+        f.seek(max(0, f.tell() - 4096))  # footer is tiny; last 4 KB always holds it
+        tail = f.read().decode("utf-8", "ignore")
+    lines = [ln for ln in tail.splitlines() if ln.strip()]
+    if not lines:
+        return False
+    try:
+        return json.loads(lines[-1]).get("_type") == "game_footer"
+    except json.JSONDecodeError:
+        return False  # truncated final line -> partial shard
 
 
 def main() -> None:
@@ -137,6 +97,16 @@ def main() -> None:
     )
     parser.add_argument("--output-dir", type=Path, default=DEFAULT_OUTPUT_DIR, help="Where to write JSONL + meta.")
     parser.add_argument(
+        "--resume",
+        type=Path,
+        default=None,
+        help="Resume into an EXISTING shard dir: skip game_idx whose shard already "
+        "finished (has a footer), re-run partial/missing ones. Reuses the run's "
+        "config from <dir>/_run_config.json if present; otherwise the gameplay args "
+        "you pass MUST match the original run (--seed/--num-games/--scenarios-file/"
+        "--iterations/--max-turns/--step-budget) or game_idx maps to different games.",
+    )
+    parser.add_argument(
         "--self-play",
         action="store_true",
         help="Both players use MCTS with the current heuristic weights "
@@ -144,22 +114,76 @@ def main() -> None:
     )
     args = parser.parse_args()
 
-    args.output_dir.mkdir(parents=True, exist_ok=True)
-    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    jsonl_path = args.output_dir / f"harvest_{timestamp}.jsonl"
-    meta_path = args.output_dir / f"harvest_{timestamp}_meta.json"
-
-    # Clamp workers — no point spawning more processes than there are jobs.
-    workers = max(1, min(args.workers, args.num_games))
+    # Output is a DIRECTORY of per-game shards (game_<idx>.jsonl), each written
+    # by its own worker as the game plays. Streaming per-game keeps worker
+    # memory flat (no whole-trajectory accumulation -> no OOM) and lets the
+    # dataset/split later read only the games a split references.
+    resuming = args.resume is not None
+    if resuming:
+        shard_dir = args.resume
+        if not shard_dir.is_dir():
+            parser.error(f"--resume directory not found: {shard_dir}")
+        meta_path = Path(str(shard_dir) + "_meta.json")
+        cfg_path = shard_dir / "_run_config.json"
+        if cfg_path.exists():
+            # Adopt the original run's gameplay args so game_idx maps to the SAME
+            # games. Only --workers may safely differ between original and resume.
+            cfg = json.loads(cfg_path.read_text())
+            args.num_games = cfg["num_games"]
+            args.iterations = cfg["iterations"]
+            args.self_play = cfg["self_play"]
+            args.max_turns = cfg["max_turns"]
+            args.step_budget = cfg["step_budget"]
+            args.seed = cfg["seed"]
+            args.scenarios_file = Path(cfg["scenarios_file"])
+            print(f"Resuming {shard_dir}/ with config from {cfg_path.name}")
+        else:
+            print(
+                f"Resuming {shard_dir}/  (no _run_config.json — older run). Using the "
+                "CLI args as given; they MUST match the original run or game_idx will "
+                "map to different games."
+            )
+    else:
+        args.output_dir.mkdir(parents=True, exist_ok=True)
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        shard_dir = args.output_dir / f"harvest_{timestamp}"
+        shard_dir.mkdir(parents=True, exist_ok=True)
+        meta_path = args.output_dir / f"harvest_{timestamp}_meta.json"
 
     # Load scenarios (cycles through scenarios_500.json for varied starts)
     scenarios = json.loads(args.scenarios_file.read_text())
     print(f"Loaded {len(scenarios)} scenarios for harvest.")
 
-    # Build the global work list. All games at the same iteration count
-    # but with distinct seeds + cycled scenarios.
+    # Persist the gameplay config so a future --resume into this dir maps game_idx
+    # to identical games without the user re-specifying args. (Older dirs lack
+    # this; resume falls back to the CLI args, which must match.)
+    if not resuming:
+        (shard_dir / "_run_config.json").write_text(
+            json.dumps(
+                {
+                    "num_games": args.num_games,
+                    "iterations": args.iterations,
+                    "self_play": args.self_play,
+                    "max_turns": args.max_turns,
+                    "step_budget": args.step_budget,
+                    "seed": args.seed,
+                    "scenarios_file": str(args.scenarios_file),
+                },
+                indent=2,
+            )
+        )
+
+    # Build the global work list. All games at the same iteration count but with
+    # distinct seeds + cycled scenarios. On resume, skip game_idx whose shard is
+    # already finished (footer present) — partial/missing ones get (re)run; a
+    # worker reopening a shard with "w" truncates any partial cleanly.
+    skipped = 0
     work_items: List[Dict[str, Any]] = []
     for game_idx in range(args.num_games):
+        shard_path = shard_dir / f"game_{game_idx}.jsonl"
+        if resuming and _shard_complete(shard_path):
+            skipped += 1
+            continue
         work_items.append(
             {
                 "game_idx": game_idx,
@@ -175,15 +199,22 @@ def main() -> None:
                 "debug_plot": False,
                 "debug_plot_mcts_only": False,
                 "emit_tokens": True,
+                "shard_path": str(shard_path),
             }
         )
+    if resuming:
+        print(f"Resume: {skipped} games already complete, {len(work_items)} to (re)run.")
+
+    # Clamp workers to the jobs actually queued (post resume-skip) — no point
+    # spawning more processes than there are games left to run.
+    workers = max(1, min(args.workers, len(work_items)))
 
     mode_label = "self-play (MCTS vs MCTS)" if args.self_play else "vs random_agent"
     print(f"Harvest: {args.num_games} games at iter={args.iterations} using {len(scenarios)} scenarios [{mode_label}]")
     print(f"  max_turns:   {args.max_turns}")
     print(f"  workers:     {workers}")
     print(f"  scenarios:   {args.scenarios_file}")
-    print(f"  output:      {jsonl_path}")
+    print(f"  shards:      {shard_dir}/")
     print(f"  meta:        {meta_path}")
     print()
 
@@ -200,12 +231,13 @@ def main() -> None:
     random_wins = 0
     total_rows = 0
 
-    # Stream rows to disk as games finish — keeps memory flat regardless of
-    # corpus size, and a killed run still leaves a usable partial JSONL.
-    with open(jsonl_path, "w") as fout, mp.Pool(processes=workers) as pool:
+    # Workers stream each game's rows to its own shard file; the parent never
+    # holds rows — it only tallies the lean records they return. This is what
+    # keeps memory flat regardless of corpus size or worker count.
+    with mp.Pool(processes=workers) as pool:
         for record in pool.imap_unordered(_worker_run_game, work_items):
             completed += 1
-            rows = _flatten_to_rows(record)
+            kept = record.get("kept_rows", 0)
 
             mp_id = record["mcts_player_id"]
             winner = record["winner"]
@@ -225,24 +257,27 @@ def main() -> None:
                 outcome = "random won"
                 random_wins += 1
 
-            if rows:
+            # Truncated games are now KEPT — their mcts_root_value rows are
+            # valid (search value doesn't depend on the final outcome); only
+            # the flat terminal target is undefined for them. So a game can be
+            # both "truncated" (winner None) and "kept" (rows > 0).
+            if kept > 0:
                 kept_games += 1
-                total_rows += len(rows)
-                for row in rows:
-                    fout.write(json.dumps(row, default=str) + "\n")
-                fout.flush()
+                total_rows += kept
 
             print(
-                f"  [{completed:3d}/{args.num_games}] game_idx={record['game_idx']:3d}  "
+                f"  [{skipped + completed:3d}/{args.num_games}] game_idx={record['game_idx']:3d}  "
                 f"seed={record['seed']:3d}  player_{mp_id}  "
                 f"turn={record['final_turn']:3d}  steps={record['steps']:5d}  "
-                f"-> {outcome:10s}  ({record['wall_time_s']:.1f}s, {len(rows):5d} rows)",
+                f"-> {outcome:10s}  ({record['wall_time_s']:.1f}s, {kept:5d} rows)",
                 flush=True,
             )
 
     overall_elapsed = time.perf_counter() - overall_t0
 
     results_block: Dict[str, Any] = {
+        "resumed": resuming,
+        "skipped_already_done": skipped,
         "completed_games": completed,
         "kept_games": kept_games,
         "truncated_games": truncated_games,
@@ -270,7 +305,7 @@ def main() -> None:
             "map_json": None,  # per-scenario
         },
         "results": results_block,
-        "jsonl_path": str(jsonl_path),
+        "shard_dir": str(shard_dir),
     }
     with open(meta_path, "w") as f:
         json.dump(metadata, f, indent=2)
@@ -284,7 +319,7 @@ def main() -> None:
     else:
         print(f"  outcomes:  mcts_wins={mcts_wins}  random_wins={random_wins}")
     print(f"  rows:      {total_rows}")
-    print(f"  jsonl:     {jsonl_path}")
+    print(f"  shards:    {shard_dir}/")
     print(f"  meta:      {meta_path}")
     print("=" * 70)
 
