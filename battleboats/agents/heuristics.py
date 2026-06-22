@@ -63,6 +63,14 @@ HOME_THREAT_NON_COMBAT_TYPES = frozenset(
 
 HOME_THREAT_WEIGHT_LANDING = 250  # Landings are the only win-enabling unit
 
+# Combat ships within this Manhattan distance of a home port add NO home pressure.
+# Bordering a hostile home with combat ships neither captures it (only a Landing
+# can) nor helps — and it can wall off your own Landing's approach. Zeroing the
+# adjacent contribution discourages crowding the doorstep while still rewarding
+# closing in (a ship at distance 2 now scores more pressure than one at distance 1).
+# Landings are exempt: adjacency is exactly where the capture unit wants to be.
+HOME_PRESSURE_ADJ_CUTOFF = 1
+
 # ----------------------------------------------------------- per-type schema
 # Stable ordering for per-type features (`own_<name>` / `opp_<name>`).
 # Order is fixed so the column layout in φ stays consistent across runs —
@@ -110,7 +118,7 @@ ECON_BETA = 0.1
 # DEFAULT_WEIGHTS[k] * features[k] is a term in the pre-tanh sum directly.
 # The learning loop will replace this dict with the output of regression
 # on (features, mcts_root_value) pairs; don't over-tune these defaults.
-with open("/home/nick/Desktop/repos/Battleboats/runs/weights/v3.json", "r") as f:
+with open("/home/nick/Desktop/repos/Battleboats/runs/weights/v6_handfit.json", "r") as f:
     regression_data = json.load(f)
 DEFAULT_WEIGHTS = regression_data["weights"]
 
@@ -226,8 +234,15 @@ def features(engine: "gameEngine", me: int) -> Dict[str, float]:
         for s in attackers:
             if s.type in HOME_THREAT_NON_COMBAT_TYPES:
                 continue
-            w = HOME_THREAT_WEIGHT_LANDING if s.type is ShipType.LANDING else s.stats.strength
-            p = max(0.0, 1.0 - manhattan(s.position, target_pos) / map_diag)
+            is_landing = s.type is ShipType.LANDING
+            d = manhattan(s.position, target_pos)
+            # Combat ships bordering the home add nothing — don't reward crowding
+            # the doorstep (it can't capture and may block the Landing). Landings
+            # are exempt; adjacency is where they need to be.
+            if not is_landing and d <= HOME_PRESSURE_ADJ_CUTOFF:
+                continue
+            w = HOME_THREAT_WEIGHT_LANDING if is_landing else s.stats.strength
+            p = max(0.0, 1.0 - d / map_diag)
             total += w * p
         return total
 
@@ -288,6 +303,24 @@ def features(engine: "gameEngine", me: int) -> Dict[str, float]:
     # contribution (which is zero — Landing has strength=0).
     my_landings = [s for s in my_ships if s.type is ShipType.LANDING]
     landing_pressure_self = sum(max(0.0, 1.0 - manhattan(s.position, opp_home) / map_diag) for s in my_landings)
+
+    # landing_danger_self — penalize my Landings sitting within striking range of
+    # enemy combat ships. Landings are defenseless (strength 0) and get intercepted
+    # en route to the objective; this gives short-horizon MCTS a gradient to route
+    # AROUND threats instead of marching into them. Reach-gated: only enemies that
+    # could actually reach + fire this turn (move speed + attack_range) count, so a
+    # Landing approaches freely until an interceptor is in striking distance — that
+    # discourages suicide runs without making Landings too timid to ever close.
+    # One-sided (positive = more danger to me); pair with a NEGATIVE weight.
+    landing_danger_self = 0.0
+    for L in my_landings:
+        for e in opp_ships:
+            if e.stats.attack_range <= 0:
+                continue  # can't shoot (merchant / builder / landing)
+            reach = e.stats.speed + e.stats.attack_range
+            d = manhattan(e.position, L.position)
+            if d <= reach:
+                landing_danger_self += e.stats.strength * max(0.0, 1.0 - d / map_diag)
 
     # has_landing_self — discrete capability indicator. Separated from
     # landing_pressure_self because "do I own one" and "how close is it"
@@ -352,6 +385,7 @@ def features(engine: "gameEngine", me: int) -> Dict[str, float]:
         "merchant_count_value_self": merchant_count_value_self,
         "has_landing_self": has_landing_self,
         "landing_pressure_self": landing_pressure_self,
+        "landing_danger_self": landing_danger_self,
     }
     # Per-type counts, in canonical order (own first, then opp).
     for t in SHIP_TYPE_ORDER:

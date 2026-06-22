@@ -163,8 +163,11 @@ def main() -> None:
     p.add_argument("--updates", type=int, default=50, help="Number of PPO updates (outer loop).")
     p.add_argument("--rollout-decisions", type=int, default=2048,
                    help="Collect at least this many decisions per update before training.")
+    p.add_argument("--opponent", choices=["snapshot", "random"], default="snapshot",
+                   help="'snapshot' = frozen self-play; 'random' = bootstrap vs a "
+                        "uniform random opponent (decisive games to ground the value head).")
     p.add_argument("--opponent-refresh", type=int, default=5,
-                   help="Refresh the frozen opponent every N updates.")
+                   help="Refresh the frozen opponent every N updates (snapshot mode only).")
     # PPO hyperparameters
     p.add_argument("--epochs", type=int, default=4, help="K epochs per update.")
     p.add_argument("--minibatch-size", type=int, default=256)
@@ -212,7 +215,9 @@ def main() -> None:
         num_layers=args.num_layers, dim_feedforward=args.dim_feedforward,
         dropout=args.dropout,
     )
-    opponent = make_frozen_opponent(policy)
+    # opponent == "random" -> None (collect_trajectory plays a uniform random
+    # opponent). "snapshot" -> a frozen copy refreshed every N updates.
+    opponent = None if args.opponent == "random" else make_frozen_opponent(policy)
     optimizer = torch.optim.Adam(policy.parameters(), lr=args.lr)
     buffer = RolloutBuffer()
     env = BattleboatsAEC(map_json_path=scenarios[0]["map_path"], max_turns=args.max_steps)
@@ -227,7 +232,8 @@ def main() -> None:
 
     print(
         f"[train_ppo] init={'BC ' + str(bc_ckpt) if bc_ckpt else 'random'}  "
-        f"device={device}  scenarios={len(scenarios)}  updates={args.updates}"
+        f"opponent={args.opponent}  device={device}  "
+        f"scenarios={len(scenarios)}  updates={args.updates}"
     )
 
     # ----------------------------------------------------------------- main loop
@@ -250,7 +256,7 @@ def main() -> None:
             max_grad_norm=args.max_grad_norm, device=device, target_kl=args.target_kl,
         )
 
-        if (update + 1) % args.opponent_refresh == 0:
+        if args.opponent == "snapshot" and (update + 1) % args.opponent_refresh == 0:
             opponent = make_frozen_opponent(policy)
 
         log = {**roll_stats, **{f"ppo/{k}": v for k, v in metrics.items()}, "update": update}

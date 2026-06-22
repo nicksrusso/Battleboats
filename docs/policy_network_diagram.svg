@@ -1,0 +1,157 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1280 720" font-family="'Segoe UI','Helvetica Neue',Arial,sans-serif">
+  <defs>
+    <marker id="arrow" markerWidth="10" markerHeight="10" refX="8" refY="3" orient="auto" markerUnits="strokeWidth">
+      <path d="M0,0 L8,3 L0,6 Z" fill="#37474f"/>
+    </marker>
+    <marker id="arrowblue" markerWidth="10" markerHeight="10" refX="8" refY="3" orient="auto" markerUnits="strokeWidth">
+      <path d="M0,0 L8,3 L0,6 Z" fill="#1f6fb2"/>
+    </marker>
+    <marker id="arrowgray" markerWidth="10" markerHeight="10" refX="8" refY="3" orient="auto" markerUnits="strokeWidth">
+      <path d="M0,0 L8,3 L0,6 Z" fill="#78909c"/>
+    </marker>
+    <style>
+      .enc   { fill:#e6f1fb; stroke:#1f6fb2; stroke-width:1.6; }
+      .head  { fill:#e8f5e9; stroke:#2e9e3f; stroke-width:1.6; }
+      .val   { fill:#fdecd2; stroke:#e08a1e; stroke-width:1.6; }
+      .act   { fill:#f1e7fb; stroke:#8e44ad; stroke-width:1.6; }
+      .io    { fill:#eceff1; stroke:#607d8b; stroke-width:1.6; }
+      .t     { fill:#16202a; }
+      .ttl   { font-weight:700; }
+      .sub   { fill:#4d5a66; }
+      .shape { font-family:'SFMono-Regular',Consolas,monospace; fill:#5a6b78; }
+      .flow  { stroke:#37474f; stroke-width:2.4; fill:none; }
+      .cond  { stroke:#1f6fb2; stroke-width:1.4; stroke-dasharray:5 4; fill:none; opacity:.85; }
+      .tok   { stroke:#78909c; stroke-width:1.4; stroke-dasharray:5 4; fill:none; opacity:.85; }
+    </style>
+  </defs>
+
+  <rect x="0" y="0" width="1280" height="720" fill="#ffffff"/>
+
+  <!-- title -->
+  <text x="40" y="36" font-size="25" class="t ttl">Battleboats Policy Network</text>
+  <text x="40" y="60" font-size="14" class="sub">Transformer encoder + autoregressive factored action heads (asset &#8594; verb &#8594; target), with a shared value head</text>
+
+  <!-- ================= ENCODER COLUMN ================= -->
+  <rect class="enc" rx="10" x="45" y="92"  width="255" height="54"/>
+  <text x="172" y="115" font-size="14" text-anchor="middle" class="t ttl">Entity tokens</text>
+  <text x="172" y="135" font-size="12" text-anchor="middle" class="shape">(B, N, 28)  —  ship / port / sighting</text>
+
+  <rect class="enc" rx="10" x="45" y="178" width="255" height="44"/>
+  <text x="172" y="199" font-size="14" text-anchor="middle" class="t ttl">Linear projection</text>
+  <text x="172" y="216" font-size="12" text-anchor="middle" class="shape">28 &#8594; 64</text>
+
+  <rect class="enc" rx="10" x="45" y="254" width="255" height="60"/>
+  <text x="172" y="277" font-size="14" text-anchor="middle" class="t ttl">Transformer Encoder</text>
+  <text x="172" y="296" font-size="12" text-anchor="middle" class="sub">2 layers &#183; 4 heads &#183; FF 128</text>
+  <text x="172" y="310" font-size="11" text-anchor="middle" class="shape">self-attention over tokens</text>
+
+  <rect class="io" rx="10" x="45" y="346" width="255" height="50"/>
+  <text x="172" y="368" font-size="14" text-anchor="middle" class="t ttl">Token embeddings</text>
+  <text x="172" y="386" font-size="12" text-anchor="middle" class="shape">(B, N, 64)</text>
+
+  <rect class="enc" rx="10" x="45" y="428" width="255" height="46"/>
+  <text x="172" y="449" font-size="14" text-anchor="middle" class="t ttl">Masked mean-pool</text>
+  <text x="172" y="466" font-size="11" text-anchor="middle" class="shape">average over real tokens (pad_mask)</text>
+
+  <rect class="io" rx="10" x="45" y="506" width="255" height="50"/>
+  <text x="172" y="528" font-size="14" text-anchor="middle" class="t ttl">Board context</text>
+  <text x="172" y="546" font-size="12" text-anchor="middle" class="shape">(B, 64)</text>
+
+  <!-- value head hangs off context -->
+  <rect class="val" rx="10" x="45" y="592" width="255" height="46"/>
+  <text x="172" y="613" font-size="14" text-anchor="middle" class="t ttl">Value head (critic)</text>
+  <text x="172" y="630" font-size="11" text-anchor="middle" class="shape">64 &#8594; 64 &#8594; ReLU &#8594; 1</text>
+
+  <rect class="io" rx="10" x="90" y="664" width="165" height="40"/>
+  <text x="172" y="689" font-size="14" text-anchor="middle" class="t ttl">V(s)</text>
+
+  <!-- encoder vertical flow arrows -->
+  <path class="flow" marker-end="url(#arrow)" d="M172,146 L172,176"/>
+  <path class="flow" marker-end="url(#arrow)" d="M172,222 L172,252"/>
+  <path class="flow" marker-end="url(#arrow)" d="M172,314 L172,344"/>
+  <path class="flow" marker-end="url(#arrow)" d="M172,396 L172,426"/>
+  <path class="flow" marker-end="url(#arrow)" d="M172,474 L172,504"/>
+  <path class="flow" marker-end="url(#arrow)" d="M172,556 L172,590"/>
+  <path class="flow" marker-end="url(#arrow)" d="M172,638 L172,662"/>
+
+  <!-- ================= POLICY HEADS ================= -->
+  <!-- Head A -->
+  <rect class="head" rx="10" x="390" y="92" width="380" height="120"/>
+  <text x="408" y="116" font-size="15" class="t ttl">Head A &#8212; Asset</text>
+  <text x="408" y="135" font-size="12" class="sub">Pointer head</text>
+  <text x="408" y="156" font-size="12.5" class="t">score  q&#183;e&#7522;  over the N token embeddings</text>
+  <text x="408" y="175" font-size="12.5" class="t">mask: legal assets &#8594; softmax &#8594; sample</text>
+  <text x="408" y="199" font-size="12" class="shape">out: asset_idx &#183; e_asset (B, 64)</text>
+
+  <!-- Head V -->
+  <rect class="head" rx="10" x="390" y="250" width="380" height="112"/>
+  <text x="408" y="274" font-size="15" class="t ttl">Head V &#8212; Verb</text>
+  <text x="408" y="293" font-size="12" class="sub">Categorical MLP</text>
+  <text x="408" y="314" font-size="12.5" class="t">in: [ context &#8853; e_asset ]  (B, 128)</text>
+  <text x="408" y="333" font-size="12.5" class="t">mask: legal verbs &#8594; softmax over 8</text>
+  <text x="408" y="356" font-size="12" class="shape">out: verb_idx &#183; e_verb (B, 64)</text>
+
+  <!-- Head T -->
+  <rect class="head" rx="10" x="390" y="398" width="380" height="186"/>
+  <text x="408" y="422" font-size="15" class="t ttl">Head T &#8212; Target</text>
+  <text x="408" y="441" font-size="12" class="sub">routed by chosen verb</text>
+  <text x="408" y="462" font-size="12.5" class="t">in: [ context &#8853; e_asset &#8853; e_verb ]  (B, 192)</text>
+  <text x="408" y="487" font-size="12.5" class="t">&#8226; attack &#8594; pointer over enemy tokens</text>
+  <text x="408" y="506" font-size="12.5" class="t">&#8226; move / build_port &#8594; 4 directions</text>
+  <text x="408" y="525" font-size="12.5" class="t">&#8226; build_ship &#8594; 8 ship types</text>
+  <text x="408" y="546" font-size="12.5" class="t">mask: legal targets &#8594; softmax</text>
+  <text x="408" y="571" font-size="12" class="shape">out: target_idx</text>
+
+  <!-- autoregressive chain arrows -->
+  <path class="flow" marker-end="url(#arrow)" d="M580,212 L580,250"/>
+  <rect x="588" y="222" width="92" height="18" fill="#ffffff" opacity="0.92"/>
+  <text x="592" y="235" font-size="11" class="shape">pass e_asset</text>
+  <path class="flow" marker-end="url(#arrow)" d="M580,362 L580,398"/>
+  <rect x="588" y="370" width="86" height="18" fill="#ffffff" opacity="0.92"/>
+  <text x="592" y="383" font-size="11" class="shape">pass e_verb</text>
+
+  <!-- context (blue dashed) conditioning into each head -->
+  <path class="cond" marker-end="url(#arrowblue)" d="M300,524 C345,520 350,168 388,160"/>
+  <path class="cond" marker-end="url(#arrowblue)" d="M300,528 C350,520 350,312 388,310"/>
+  <path class="cond" marker-end="url(#arrowblue)" d="M300,531 C360,520 350,470 388,468"/>
+
+  <!-- token embeddings (gray dashed) into pointer heads -->
+  <path class="tok" marker-end="url(#arrowgray)" d="M300,360 C345,345 350,128 388,124"/>
+  <path class="tok" marker-end="url(#arrowgray)" d="M300,372 C360,400 355,500 388,500"/>
+
+  <!-- ================= ACTION OUTPUT ================= -->
+  <rect class="act" rx="10" x="850" y="392" width="395" height="196"/>
+  <text x="870" y="424" font-size="16" class="t ttl">Action</text>
+  <text x="870" y="448" font-size="13.5" class="t">a = ( asset, verb, target )</text>
+  <line x1="870" y1="462" x2="1225" y2="462" stroke="#8e44ad" stroke-width="1" opacity="0.4"/>
+  <text x="870" y="486" font-size="13.5" class="t ttl">log &#960;(a | s) =</text>
+  <text x="888" y="508" font-size="13" class="t">log &#960;(asset | s)</text>
+  <text x="888" y="528" font-size="13" class="t">+ log &#960;(verb | s, asset)</text>
+  <text x="888" y="548" font-size="13" class="t">+ log &#960;(target | s, asset, verb)</text>
+  <text x="870" y="574" font-size="11.5" class="sub">autoregressive: each factor conditions on the previous</text>
+
+  <!-- Head T -> Action -->
+  <path class="flow" marker-end="url(#arrow)" d="M770,490 L848,490"/>
+
+  <!-- ================= LEGEND ================= -->
+  <rect x="850" y="92" width="395" height="250" rx="10" fill="#fbfcfd" stroke="#cfd8dc" stroke-width="1.2"/>
+  <text x="870" y="120" font-size="14" class="t ttl">Legend</text>
+
+  <rect x="870" y="134" width="22" height="15" rx="3" class="enc"/>
+  <text x="902" y="146" font-size="12.5" class="t">Encoder trunk (shared)</text>
+  <rect x="870" y="158" width="22" height="15" rx="3" class="head"/>
+  <text x="902" y="170" font-size="12.5" class="t">Policy heads (autoregressive)</text>
+  <rect x="870" y="182" width="22" height="15" rx="3" class="val"/>
+  <text x="902" y="194" font-size="12.5" class="t">Value head (critic)</text>
+  <rect x="870" y="206" width="22" height="15" rx="3" class="act"/>
+  <text x="902" y="218" font-size="12.5" class="t">Action / output</text>
+
+  <line x1="870" y1="245" x2="912" y2="245" class="flow" marker-end="url(#arrow)"/>
+  <text x="922" y="249" font-size="12.5" class="t">main dataflow</text>
+  <line x1="870" y1="271" x2="912" y2="271" class="cond" marker-end="url(#arrowblue)"/>
+  <text x="922" y="275" font-size="12.5" class="t">conditions on board context (B, 64)</text>
+  <line x1="870" y1="297" x2="912" y2="297" class="tok" marker-end="url(#arrowgray)"/>
+  <text x="922" y="301" font-size="12.5" class="t">token embeddings (pointer keys)</text>
+
+  <text x="870" y="328" font-size="11.5" class="sub">N = variable # entities &#183; B = batch &#183; &#8853; = concat</text>
+</svg>

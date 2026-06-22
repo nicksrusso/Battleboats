@@ -127,24 +127,62 @@ def godmode_mcts_search(
     return _best_child_by_visits(root, rng).action_in, root_value
 
 
+def godmode_mcts_search_debug(
+    engine: "gameEngine",
+    player_id: int,
+    rng: random.Random,
+    *,
+    iterations: int = DEFAULT_ITERATIONS,
+    c: float = DEFAULT_C,
+) -> tuple["Action", float, List[dict]]:
+    """Like `godmode_mcts_search`, but also returns the root child stats.
+
+    The third element is `root_child_stats(root)` — the per-move (N, Q) table
+    for offline inspection. Selection is unchanged (most-visited child), so the
+    chosen action still equals the argmax-visits row. Only call this on the
+    flag-gated debug path; building the table is cheap but logging it is not.
+    """
+    root = _run_search(engine, player_id, rng, iterations, c)
+    root_value = root.total_value / root.visits if root.visits > 0 else 0.0
+    return _best_child_by_visits(root, rng).action_in, root_value, root_child_stats(root)
+
+
+def root_child_stats(root: Node) -> List[dict]:
+    """Per-root-child search summary, visit-sorted (the search's own ranking).
+
+    The standard MCTS-debugging artifact: one row per root move with the
+    visit count N (the policy — argmax-N is the move actually selected) and
+    the mean backed-up value Q from the ROOT's POV (the value — why). Read
+    them together: N is the decision, Q is the justification, and a gap
+    between argmax-N and argmax-Q is itself diagnostic. The raw `Action`
+    object is returned so the caller can label/serialize it however it
+    already does (we don't reach into action formatting here).
+
+    `q_root_pov` negates Q for children whose side-to-move differs from the
+    root's (negamax), so every Q is comparable on one +favours-root scale.
+    """
+    out: List[dict] = []
+    for child in sorted(root.children, key=lambda c: -c.visits):
+        q_child_pov = child.total_value / child.visits if child.visits else 0.0
+        sign = 1 if child.side_to_move == root.side_to_move else -1
+        out.append({"action": child.action_in, "visits": child.visits, "q_root_pov": sign * q_child_pov})
+    return out
+
+
 def _debug_print_root(root: Node) -> None:
     """Print top-10 root children by visit count, with Q from root's POV.
 
-    Used to diagnose MCTS-vs-heuristic disagreement at the root — shows
-    both which actions are getting search budget AND their mean value
-    estimates. If a class of actions (e.g., all BuildLanding spawn
-    variants) gets fragmented across many children, the per-child visit
-    count will be low even when the class collectively dominates.
+    Used to diagnose MCTS-vs-heuristic disagreement at the root. If a class
+    of actions (e.g., all BuildLanding spawn variants) gets fragmented across
+    many children, per-child visits stay low even when the class collectively
+    dominates.
     """
     if not root.children:
         return
-    sorted_children = sorted(root.children, key=lambda c: -c.visits)
+    stats = root_child_stats(root)
     print(f"    [mcts root] {len(root.children)} children, {sum(c.visits for c in root.children)} total visits")
-    for child in sorted_children[:10]:
-        q_child_pov = child.total_value / child.visits
-        sign = 1 if child.side_to_move == root.side_to_move else -1
-        q_root_pov = sign * q_child_pov
-        print(f"    [mcts root]   visits={child.visits:4d}  Q={q_root_pov:+.3f}  {child.action_in}")
+    for s in stats[:10]:
+        print(f"    [mcts root]   visits={s['visits']:4d}  Q={s['q_root_pov']:+.3f}  {s['action']}")
 
 
 def _select(node: Node, engine: "gameEngine", c: float) -> Node:

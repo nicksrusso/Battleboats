@@ -1,5 +1,5 @@
 Map:
-  sizeX: 64
-  sizeY: 32
+  sizeX: 24
+  sizeY: 12
   landFraction: 0.01
   numPorts: 4

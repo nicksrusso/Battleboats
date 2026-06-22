@@ -85,7 +85,7 @@ def heuristic_action(engine, pid: int, rng, eps: float = 1e-9):
 @torch.no_grad()
 def collect_trajectory(
     policy: PolicyNetwork,
-    opponent_policy: PolicyNetwork,
+    opponent_policy: Optional[PolicyNetwork],
     env,
     agent_pid: int,
     rng,
@@ -94,12 +94,13 @@ def collect_trajectory(
     """Play one game and return the learning seat's decisions and outcome.
 
     ``policy`` controls seat ``agent_pid`` and its decisions are recorded as
-    ``Transition``s; ``opponent_policy`` is a frozen snapshot controlling the
-    other seat and is not recorded. Both run under ``no_grad``. Each recorded
-    transition stores the legality masks along the chosen (asset, verb, target)
-    path so the PPO update can reproduce ``log pi_old``. Reward is sparse
-    terminal (+1 win / -1 loss / 0 draw), attached to the last recorded
-    decision.
+    ``Transition``s; ``opponent_policy`` controls the other seat and is not
+    recorded. Pass ``None`` for ``opponent_policy`` to use a uniform random
+    opponent (the bootstrap-vs-random curriculum); otherwise it is a frozen
+    policy snapshot. Both run under ``no_grad``. Each recorded transition stores
+    the legality masks along the chosen (asset, verb, target) path so the PPO
+    update can reproduce ``log pi_old``. Reward is sparse terminal (+1 win /
+    -1 loss / 0 draw), attached to the last recorded decision.
 
     The env must already be reset by the caller (the scenario/seed are the
     caller's choice). ``max_steps`` caps total engine steps, not turns;
@@ -118,11 +119,17 @@ def collect_trajectory(
             continue
         pid = env._player_id(agent)
         engine = env.engine
+
+        # Random opponent: step a uniform legal action without recording it.
+        if pid != agent_pid and opponent_policy is None:
+            env.step(random_action(engine, pid, rng))
+            steps += 1
+            if steps > max_steps:
+                break
+            continue
+
         masks = ActionMasks(engine, pid)
-        if pid == agent_pid:
-            net = policy
-        else:
-            net = opponent_policy
+        net = policy if pid == agent_pid else opponent_policy
 
         # sample an action
         a_idx, v_idx, t_idx, logp, value = net.act(masks.tokens, masks.pad_mask, masks)

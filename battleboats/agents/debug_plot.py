@@ -8,14 +8,16 @@ the call, inspect the figure, then continue.
 A single persistent figure is reused across calls — successive plots update
 in place instead of spawning new windows.
 
-Visual conventions (per-cell fill, gridded):
-    blue   = water
-    green  = land
-    red    = friendly port
-    black  = enemy port
-    white  = friendly ship
-    grey   = enemy ship
-    (ships override ports on the same tile.)
+Visual conventions (color is by absolute owner: blue = player 0, red = player 1):
+    light blue = water        (per-cell fill)
+    green      = land         (per-cell fill)
+    dark blue  = player-0 port,  red = player-1 port   (per-cell fill)
+    gold X     = home port (the capture objective), drawn on top
+    ships   = white round tokens stamped with a 2-letter type code (CV/BB/CA/...);
+              the ring color marks owner (dark blue player 0 / red player 1).
+              A ship-type + owner key is drawn to the right. (Ships sit on
+              top of ports.) Owner coloring is fixed (not POV-relative), so games
+              are visually comparable regardless of which seat the MCTS occupies.
 
 Action overlays:
     magenta ring on origin tile + magenta arrow for Move
@@ -28,6 +30,8 @@ from typing import Optional
 
 import matplotlib.pyplot as plt
 import numpy as np
+from matplotlib.lines import Line2D
+from matplotlib.patches import Circle, Patch
 
 from battleboats.core.actions import (
     AttackAction,
@@ -43,12 +47,33 @@ from battleboats.core.gameEngine import gameEngine
 from battleboats.core.shipyard.ship_type import ShipType
 
 # Cell-fill palette (RGB in 0-1).
-_WATER = (0.20, 0.45, 0.78)
-_LAND = (0.30, 0.69, 0.31)
-_FRIENDLY_PORT = (0.84, 0.15, 0.16)
-_ENEMY_PORT = (0.00, 0.00, 0.00)
-_FRIENDLY_SHIP = (1.00, 1.00, 1.00)
-_ENEMY_SHIP = (0.55, 0.55, 0.55)
+_WATER = (0.69, 0.85, 0.96)  # light blue
+_LAND = (0.30, 0.69, 0.31)   # green
+
+# Owner colors — fixed by absolute player id (NOT POV-relative), used
+# consistently for ports (cell fill) and ship rings.
+_P0 = (0.08, 0.24, 0.55)  # dark blue — player 0
+_P1 = (0.84, 0.15, 0.16)  # red — player 1
+
+
+def _owner_color(owner: int):
+    return _P0 if owner == 0 else _P1
+_SHIP_FILL = (1.00, 1.00, 1.00)  # neutral token fill so the type code stays legible
+_HOME_MARK = "#ffd400"  # gold X marking each home port (the capture objective)
+
+# Two-letter code stamped on each ship token (real naval hull classifications
+# where they exist: CV carrier, BB battleship, CA cruiser, DD destroyer,
+# SS submarine). The on-board glyph; the key spells out the full name.
+_SHIP_CODE = {
+    ShipType.CARRIER: "CV",
+    ShipType.BATTLESHIP: "BB",
+    ShipType.CRUISER: "CA",
+    ShipType.DESTROYER: "DD",
+    ShipType.SUBMARINE: "SS",
+    ShipType.MERCHANT: "AK",
+    ShipType.LANDING: "LC",
+    ShipType.BUILDER: "CB",
+}
 
 # Action highlights — chosen to contrast against every fill color above.
 _HL_ACTION = "#ff00ff"  # magenta: move arrows, target rings
@@ -63,7 +88,57 @@ def _ensure_figure():
     if _FIG is None or not plt.fignum_exists(_FIG.number):
         plt.ion()
         _FIG, _AX = plt.subplots(figsize=(14, 7))
+        _FIG.subplots_adjust(right=0.82)  # reserve room for the ship-type key
     return _FIG, _AX
+
+
+def _draw_ships(ax, engine: gameEngine, mcts_player_id: int) -> None:
+    """Stamp each ship as an owner-colored token bearing its 2-letter type code.
+
+    Radius is in data units so tokens scale with the board. Ring color marks the
+    absolute owner (blue = player 0, red = player 1); type = the code text.
+    """
+    for ship in engine.ships.values():
+        x, y = ship.position
+        ring = _owner_color(ship.owner)
+        ax.add_patch(Circle((x, y), 0.44, facecolor=_SHIP_FILL, edgecolor=ring,
+                            linewidth=2.0, zorder=4))
+        ax.text(x, y, _SHIP_CODE.get(ship.type, "?"), ha="center", va="center",
+                fontsize=6, fontweight="bold", color="black", zorder=4)
+
+
+def _mark_home_ports(ax, engine: gameEngine) -> None:
+    """Stamp a gold X on each home port — the capture objective. Drawn on top of
+    ships so it stays visible even when a ship sits on the home tile."""
+    for pos, port in engine.ports.items():
+        if getattr(port, "is_home", False):
+            x, y = pos
+            ax.scatter([x], [y], s=260, marker="X", c=_HOME_MARK,
+                       edgecolors="black", linewidths=1.2, zorder=7)
+
+
+def _ship_type_key(ax) -> None:
+    """Legend mapping each code to its ship type, plus the owner fill colors."""
+    type_handles = [
+        Line2D([0], [0], marker="o", linestyle="none", markerfacecolor=_SHIP_FILL,
+               markeredgecolor="0.45", markersize=11, label=f"{code} — {st.value}")
+        for st, code in _SHIP_CODE.items()
+    ]
+    allegiance_handles = [
+        Line2D([0], [0], marker="o", linestyle="none", markerfacecolor=_SHIP_FILL,
+               markeredgecolor=_P0, markeredgewidth=2.2, markersize=11,
+               label="player 0 ship (ring)"),
+        Line2D([0], [0], marker="o", linestyle="none", markerfacecolor=_SHIP_FILL,
+               markeredgecolor=_P1, markeredgewidth=2.2, markersize=11,
+               label="player 1 ship (ring)"),
+        Patch(facecolor=_P0, edgecolor="black", label="player 0 port"),
+        Patch(facecolor=_P1, edgecolor="black", label="player 1 port"),
+        Line2D([0], [0], marker="X", linestyle="none", markerfacecolor=_HOME_MARK,
+               markeredgecolor="black", markersize=12, label="home port (objective)"),
+    ]
+    ax.legend(handles=type_handles + allegiance_handles, loc="upper left",
+              bbox_to_anchor=(1.01, 1.0), fontsize=8, framealpha=0.95,
+              title="Ship types  &  owner", borderaxespad=0.0)
 
 
 def _describe_action(action, engine: gameEngine) -> str:
@@ -161,11 +236,7 @@ def plot_state(
 
     for pos, port in engine.ports.items():
         x, y = pos
-        img[y, x] = _FRIENDLY_PORT if port.owner == mcts_player_id else _ENEMY_PORT
-
-    for ship in engine.ships.values():
-        x, y = ship.position
-        img[y, x] = _FRIENDLY_SHIP if ship.owner == mcts_player_id else _ENEMY_SHIP
+        img[y, x] = _owner_color(port.owner)
 
     ax.imshow(
         img, origin="lower",
@@ -182,6 +253,9 @@ def plot_state(
     ax.set_yticks(np.arange(0, H, 10))
     ax.tick_params(which="minor", length=0)
 
+    _draw_ships(ax, engine, mcts_player_id)
+    _mark_home_ports(ax, engine)
+    _ship_type_key(ax)
     _highlight_action(ax, action, engine)
 
     parts = []
@@ -195,7 +269,7 @@ def plot_state(
     if extra:
         parts.append(extra)
     ax.set_title("  ".join(parts), fontsize=10)
-    ax.set_xlabel(f"x  (MCTS=player_{mcts_player_id}; white=friendly ship, grey=enemy ship, red=friendly port, black=enemy port)")
+    ax.set_xlabel(f"x  (MCTS = player_{mcts_player_id}; blue = player 0, red = player 1 — ports filled, ships ringed, gold X = home; type = code, see key)")
     ax.set_ylabel("y")
     ax.set_xlim(-0.5, W - 0.5)
     ax.set_ylim(-0.5, H - 0.5)

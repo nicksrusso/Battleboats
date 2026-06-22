@@ -27,7 +27,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 from battleboats.agents.debug_plot import plot_state
-from battleboats.agents.godmode_mcts import godmode_mcts_action, godmode_mcts_search
+from battleboats.agents.godmode_mcts import godmode_mcts_action, godmode_mcts_search, godmode_mcts_search_debug
 from battleboats.agents.heuristics import decompose, heuristic_eval
 from battleboats.agents.random_agent import random_action
 from battleboats.core.actions import MoveAction
@@ -128,6 +128,7 @@ def _play_one_game(
     debug_plot: bool = False,
     debug_plot_mcts_only: bool = False,
     emit_tokens: bool = False,
+    debug_mcts: bool = False,
     shard_path: Optional[str] = None,
 ) -> Dict[str, Any]:
     """Play one game; return a record with trajectory + outcome + timing.
@@ -181,6 +182,7 @@ def _play_one_game(
     for agent in env.agent_iter():
         # Reset per-step MCTS labels; only set in the use_mcts branch below.
         mcts_root_value_step: Optional[float] = None
+        mcts_root_stats_step: Optional[List[Dict[str, Any]]] = None
         acting_pid: Optional[int] = None
         if env.terminations[agent] or env.truncations[agent]:
             action = None
@@ -192,7 +194,20 @@ def _play_one_game(
             use_mcts = self_play or (pid == mcts_player_id)
             if use_mcts:
                 t0 = time.perf_counter()
-                action, mcts_root_value_step = godmode_mcts_search(env.engine, pid, rng, iterations=iterations)
+                if debug_mcts:
+                    action, mcts_root_value_step, root_stats = godmode_mcts_search_debug(
+                        env.engine, pid, rng, iterations=iterations
+                    )
+                    # Stringify each child's raw Action via the same labeller used
+                    # for the chosen action, so the logged table lines up move-for-move
+                    # with the heuristic move-score panel. Done pre-step (engine still
+                    # at the decision state the search ran from).
+                    mcts_root_stats_step = [
+                        {"action": _describe_action(s["action"], env.engine), "visits": s["visits"], "q": s["q_root_pov"]}
+                        for s in root_stats
+                    ]
+                else:
+                    action, mcts_root_value_step = godmode_mcts_search(env.engine, pid, rng, iterations=iterations)
                 elapsed = time.perf_counter() - t0
                 actor = "mcts"
                 acting_pid = pid
@@ -284,13 +299,23 @@ def _play_one_game(
             if phi_p0 and phi_p1:
                 rv_p0 = mcts_root_value_step if acting_pid == 0 else None
                 rv_p1 = mcts_root_value_step if acting_pid == 1 else None
+                # Root (N, Q) table rides the same acting-player perspective as
+                # mcts_root_value. None unless --debug-mcts was set (flag-gated;
+                # full tables would bloat a normal harvest).
+                mr_p0 = mcts_root_stats_step if acting_pid == 0 else None
+                mr_p1 = mcts_root_stats_step if acting_pid == 1 else None
                 # Action label rides the same perspective as mcts_root_value: the
                 # acting player's row gets it, the other gets null.
                 act_p0 = action_idx if acting_pid == 0 else None
                 act_p1 = action_idx if acting_pid == 1 else None
-                step_base = {**base_provenance, "step": steps, "turn": env.engine.turn, "actor": actor}
-                row0 = {**step_base, "perspective": 0, "phi": phi_p0, "tokens": tokens_p0, "mcts_root_value": rv_p0, "action": act_p0}
-                row1 = {**step_base, "perspective": 1, "phi": phi_p1, "tokens": tokens_p1, "mcts_root_value": rv_p1, "action": act_p1}
+                # Per-player cash (a global, not in the entity tokens). Logged so
+                # a state can be reconstructed steppably from a row — notably to
+                # know which build_ship moves are affordable. Indexed by absolute
+                # player id [p0, p1], same convention as phi_p*/tokens_p*.
+                cash = [env.engine.players[0].cash, env.engine.players[1].cash]
+                step_base = {**base_provenance, "step": steps, "turn": env.engine.turn, "actor": actor, "cash": cash}
+                row0 = {**step_base, "perspective": 0, "phi": phi_p0, "tokens": tokens_p0, "mcts_root_value": rv_p0, "action": act_p0, "mcts_root": mr_p0}
+                row1 = {**step_base, "perspective": 1, "phi": phi_p1, "tokens": tokens_p1, "mcts_root_value": rv_p1, "action": act_p1, "mcts_root": mr_p1}
                 shard_file.write(json.dumps(row0, default=str) + "\n")
                 shard_file.write(json.dumps(row1, default=str) + "\n")
                 kept_rows += 2

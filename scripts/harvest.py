@@ -112,6 +112,14 @@ def main() -> None:
         help="Both players use MCTS with the current heuristic weights "
         "(symmetric self-play). When unset, MCTS plays vs. random_agent.",
     )
+    parser.add_argument(
+        "--debug-mcts",
+        action="store_true",
+        help="Log the per-decision MCTS root (N, Q) table to each row's "
+        "`mcts_root` field, for offline search inspection. Off by default — the "
+        "full table per step would bloat a normal harvest. Re-run the specific "
+        "game/seed you want to inspect with this flag set.",
+    )
     args = parser.parse_args()
 
     # Output is a DIRECTORY of per-game shards (game_<idx>.jsonl), each written
@@ -199,6 +207,7 @@ def main() -> None:
                 "debug_plot": False,
                 "debug_plot_mcts_only": False,
                 "emit_tokens": True,
+                "debug_mcts": args.debug_mcts,
                 "shard_path": str(shard_path),
             }
         )

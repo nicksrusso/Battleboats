@@ -38,23 +38,94 @@ import numpy as np
 from sklearn.linear_model import LinearRegression
 from sklearn.metrics import mean_absolute_error, mean_squared_error, r2_score
 
+# Default regression feature set: the 7 hand-designed heuristic features plus
+# combat_coverage_min. These are the features that carry independent signal —
+# the 16 per-type ship counts are perfectly collinear with material_diff (it's
+# their weighted sum), and combat_total_overmatch / combat_uncovered_count are
+# redundant with combat_balance + coverage_min. See VIF analysis. Override with
+# --features if you want to refit a different set.
+DEFAULT_FEATURES: List[str] = [
+    "material_diff",
+    "home_pressure_diff",
+    "combat_balance",
+    "econ_value_self",
+    "merchant_count_value_self",
+    "has_landing_self",
+    "landing_pressure_self",
+    "landing_danger_self",
+    "combat_coverage_min",
+]
+
 
 # --------------------------------------------------------------------- loading
-def load_rows(jsonl_paths: List[Path]) -> List[Dict[str, Any]]:
-    """Concatenate one or more harvest JSONL files into a flat row list.
+def load_rows(jsonl_paths: List[Path], decisive_only: bool = True) -> List[Dict[str, Any]]:
+    """Load harvest rows into a flat list, normalizing the regression target.
 
-    Each row is expected to have at least `phi` (feature dict), `target`
-    (scalar MC return), `seed`, and `game_idx` — the format emitted by
-    scripts/harvest.py.
+    Accepts JSONL files and/or directories (a directory is expanded to its
+    ``*.jsonl`` shards — pass a harvest run dir directly).
+
+    Handles both harvest formats:
+      - sharded self-play: each shard ends with a ``_type=game_footer`` line
+        carrying ``winner``; data rows carry ``mcts_root_value`` (null on the
+        non-acting perspective) and ``phi``.
+      - legacy single-file: every data row carries its own scalar ``target``.
+
+    Each kept row gets a normalized ``target`` = ``mcts_root_value`` (preferred,
+    the search's value estimate at that state) falling back to legacy ``target``.
+    Rows with no usable value (e.g. the non-acting perspective) are dropped.
+
+    decisive_only (default True): drop every row belonging to a TRUNCATED game
+    (footer ``winner is None``). Tuning the guidance heuristic on stalemate-heavy
+    data biases the fit toward states that never resolve; decisive games give a
+    value signal anchored to actual wins. No-op (with a warning) on legacy files
+    that have no footers.
     """
-    rows: List[Dict[str, Any]] = []
-    for path in jsonl_paths:
+    files: List[Path] = []
+    for p in jsonl_paths:
+        p = Path(p)
+        files.extend(sorted(p.glob("*.jsonl")) if p.is_dir() else [p])
+
+    raw: List[Dict[str, Any]] = []
+    decisive_games: set = set()        # (seed, game_idx) with a real winner
+    has_footer = False
+    for path in files:
         with open(path) as f:
             for line in f:
                 line = line.strip()
                 if not line:
                     continue
-                rows.append(json.loads(line))
+                r = json.loads(line)
+                if r.get("_type") == "game_footer":
+                    has_footer = True
+                    if r.get("winner") is not None:
+                        decisive_games.add((r.get("seed"), r.get("game_idx")))
+                    continue
+                raw.append(r)
+
+    rows: List[Dict[str, Any]] = []
+    all_games: set = set()
+    for r in raw:
+        if "phi" not in r:
+            continue
+        val = r.get("mcts_root_value")
+        if val is None:
+            val = r.get("target")
+        if val is None:
+            continue  # non-acting perspective / unlabeled row
+        key = (r.get("seed"), r.get("game_idx"))
+        all_games.add(key)
+        if decisive_only and has_footer and key not in decisive_games:
+            continue  # truncated game
+        rows.append({**r, "target": val})
+
+    if decisive_only and not has_footer:
+        print("  WARNING: --decisive-only requested but no game_footer lines found "
+              "(legacy format?) — keeping all rows.")
+    elif decisive_only and has_footer:
+        kept = all_games & decisive_games
+        print(f"  decisive-only: kept {len(kept)} decisive games, "
+              f"dropped {len(all_games) - len(kept)} truncated "
+              f"(of {len(all_games)} labeled games).")
     return rows
 
 
@@ -179,7 +250,19 @@ def main() -> None:
         "jsonl_paths",
         type=Path,
         nargs="+",
-        help="One or more harvest JSONL files. Multiple files are concatenated before split.",
+        help="Harvest JSONL file(s) and/or run director(ies). Concatenated before split.",
+    )
+    parser.add_argument(
+        "--include-truncated",
+        action="store_true",
+        help="Include truncated games (winner=None). Default: train on decisive games only.",
+    )
+    parser.add_argument(
+        "--features",
+        nargs="+",
+        default=None,
+        help=f"Feature keys to fit on. Default: the 8 non-collinear features {DEFAULT_FEATURES}. "
+             "Pass 'all' to use every key in phi (collinear; not recommended).",
     )
     parser.add_argument(
         "--test-frac",
@@ -201,12 +284,19 @@ def main() -> None:
     )
     args = parser.parse_args()
 
-    rows = load_rows(args.jsonl_paths)
+    rows = load_rows(args.jsonl_paths, decisive_only=not args.include_truncated)
     if not rows:
         raise SystemExit("No rows loaded — check your JSONL paths.")
-    print(f"Loaded {len(rows)} rows from {len(args.jsonl_paths)} file(s).")
+    print(f"Loaded {len(rows)} rows from {len(args.jsonl_paths)} path(s).")
 
-    fkeys = feature_keys_from(rows)
+    available = feature_keys_from(rows)
+    if args.features == ["all"]:
+        fkeys = available
+    else:
+        fkeys = args.features or DEFAULT_FEATURES
+        missing = [k for k in fkeys if k not in available]
+        if missing:
+            raise SystemExit(f"Requested features not present in phi: {missing}\nAvailable: {available}")
     print(f"Features ({len(fkeys)}): {fkeys}")
 
     train_rows, test_rows = game_level_split(rows, test_frac=args.test_frac, seed=args.seed)
