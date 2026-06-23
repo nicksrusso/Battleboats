@@ -118,7 +118,7 @@ ECON_BETA = 0.1
 # DEFAULT_WEIGHTS[k] * features[k] is a term in the pre-tanh sum directly.
 # The learning loop will replace this dict with the output of regression
 # on (features, mcts_root_value) pairs; don't over-tune these defaults.
-with open("/home/nick/Desktop/repos/Battleboats/runs/weights/v6_handfit.json", "r") as f:
+with open("/home/nick/Desktop/repos/Battleboats/runs/weights/v5.json", "r") as f:
     regression_data = json.load(f)
 DEFAULT_WEIGHTS = regression_data["weights"]
 

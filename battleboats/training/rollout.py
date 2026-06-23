@@ -113,6 +113,9 @@ def collect_trajectory(
     """
     transitions = []
     steps = 0
+    # Build masks on the policy's device so net.act() (which pulls masks mid-
+    # forward) stays single-device. Opponent snapshot is on the same device.
+    device = next(policy.parameters()).device
     for agent in env.agent_iter():
         if env.terminations[agent] or env.truncations[agent]:
             env.step(None)
@@ -128,7 +131,7 @@ def collect_trajectory(
                 break
             continue
 
-        masks = ActionMasks(engine, pid)
+        masks = ActionMasks(engine, pid, device=device)
         net = policy if pid == agent_pid else opponent_policy
 
         # sample an action
@@ -137,12 +140,17 @@ def collect_trajectory(
         if pid == agent_pid:
             verb_name = VERB_NAMES[int(v_idx)]
             has_target = verb_name in VERBS_WITH_TARGET
-            target_mask = masks.target_for(verb_name, a_idx).squeeze(0).clone() if has_target else None
+            # Store on CPU regardless of compute device — the buffer holds the
+            # whole rollout and iter_minibatches() re-moves to device at update
+            # time, so keeping GPU tensors here would just waste VRAM. .cpu()
+            # copies off-device (and is a no-op + view on cpu, which is safe:
+            # each mask property returns a fresh tensor, nothing aliases it).
+            target_mask = masks.target_for(verb_name, a_idx).squeeze(0).cpu() if has_target else None
             transitions.append(
                 Transition(
-                    tokens=masks.tokens.squeeze(0).clone(),  # (N, TOKEN_DIM), drop batch axis
-                    asset_mask=masks.asset.squeeze(0).clone(),  # (N,)
-                    verb_mask=masks.verbs_for(a_idx).squeeze(0).clone(),  # (NUM_VERBS,)
+                    tokens=masks.tokens.squeeze(0).cpu(),  # (N, TOKEN_DIM), drop batch axis
+                    asset_mask=masks.asset.squeeze(0).cpu(),  # (N,)
+                    verb_mask=masks.verbs_for(a_idx).squeeze(0).cpu(),  # (NUM_VERBS,)
                     target_mask=target_mask,  # (K,) or None
                     asset_idx=int(a_idx),
                     verb_idx=int(v_idx),

@@ -63,8 +63,13 @@ _NO_TARGET = -1  # sentinel target_idx for verbs with no sub-head
 class ActionMasks:
     """Legality masks + Action↔index translation for one engine state / player."""
 
-    def __init__(self, engine, player_id: int):
+    def __init__(self, engine, player_id: int, device="cpu"):
         self.player_id = player_id
+        # All tensors this object produces (eager `asset`/`pad_mask` AND the lazy
+        # `tokens`/`verbs_for`/`target_for`) are built on this device, so the
+        # rollout's net.act() — which pulls masks mid-forward — never mixes
+        # cpu/cuda. Defaults to cpu so the harvest factor() hot path is unchanged.
+        self.device = torch.device(device)
         self.refs = build_entity_refs(engine, player_id)
         self.n = len(self.refs)
 
@@ -115,12 +120,12 @@ class ActionMasks:
     def tokens(self) -> "torch.Tensor":
         """(1, N, TOKEN_DIM) — entity tokens for this state (lazy; rollout only)."""
         toks = build_entity_tokens(self._engine, self.player_id)
-        return torch.from_numpy(toks).unsqueeze(0)
+        return torch.from_numpy(toks).unsqueeze(0).to(self.device)
 
     @property
     def pad_mask(self) -> "torch.Tensor":
         """(1, N) bool — all real (a single live state never pads)."""
-        return torch.ones(1, self.n, dtype=torch.bool)
+        return torch.ones(1, self.n, dtype=torch.bool, device=self.device)
 
     # -------------------------------------------------------------- translate
     def factor(self, action) -> Tuple[int, int, int]:
@@ -163,7 +168,7 @@ class ActionMasks:
     def asset(self) -> torch.Tensor:
         """(1, N) bool — token indices that may be selected as the acting asset."""
         self._ensure_built()
-        m = torch.zeros(1, self.n, dtype=torch.bool)
+        m = torch.zeros(1, self.n, dtype=torch.bool, device=self.device)
         for a in self._assets:
             m[0, a] = True
         return m
@@ -172,7 +177,7 @@ class ActionMasks:
         """(1, NUM_VERBS) bool — legal verbs given the chosen asset."""
         self._ensure_built()
         a = int(asset_idx)
-        m = torch.zeros(1, NUM_VERBS, dtype=torch.bool)
+        m = torch.zeros(1, NUM_VERBS, dtype=torch.bool, device=self.device)
         for v in self._verbs.get(a, ()):
             m[0, v] = True
         return m
@@ -184,7 +189,7 @@ class ActionMasks:
         a = int(asset_idx)
         v = VERB_TO_IDX[verb_name]
         k = self.n if verb_name == "attack" else (NUM_SHIP_TYPES if verb_name == "build_ship" else NUM_DIRECTIONS)
-        m = torch.zeros(1, k, dtype=torch.bool)
+        m = torch.zeros(1, k, dtype=torch.bool, device=self.device)
         for t in self._targets.get((a, v), ()):
             m[0, t] = True
         return m

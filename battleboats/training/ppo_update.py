@@ -74,7 +74,13 @@ def ppo_update(
                 batch["tokens"], batch["pad_mask"], batch["asset_idx"], batch["verb_idx"], batch["target_idx"], masks
             )
             adv = batch["advantage"]
-            adv = (adv - adv.mean()) / (adv.std() + 1e-8)
+            # Population std (unbiased=False): a size-1 minibatch — which happens
+            # when the rollout overflows `rollout_decisions` by a partial game and
+            # the tail chunk is 1 — gives std=0 here, not NaN. Default (unbiased,
+            # dof=1) std of one element is NaN, which propagates to the loss and
+            # writes NaN into every weight on optimizer.step(), surfacing as a
+            # bogus "row with no legal option" assert on the next minibatch.
+            adv = (adv - adv.mean()) / (adv.std(unbiased=False) + 1e-8)
             ratio = torch.exp(logp_new - batch["logp_old"])
             surr1 = ratio * adv
             surr2 = torch.clamp(ratio, 1 - clip_eps, 1 + clip_eps) * adv

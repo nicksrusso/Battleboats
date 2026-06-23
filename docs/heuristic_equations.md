@@ -177,10 +177,13 @@ coverage floor if one enemy ship type goes uncountered.
 - **One spatial primitive.** Every "how close is X to Y" term reuses $\rho$,
   normalized by the map diagonal $D = W + H$, so the heuristic is scale-free
   across board sizes.
-- **Sign convention.** Positive favors `me` throughout. $\phi_{\text{mat}}$,
-  $\phi_{\text{home}}$, and $\phi_{\text{cb}}$ are zero-sum (me $-$ opponent);
-  $\phi_{\text{econ}}$, $\phi_{\text{hasLanding}}$, and $\phi_{\text{landPress}}$
-  are one-sided.
+- **Sign convention.** Positive favors `me` throughout. Only $\phi_{\text{mat}}$
+  and $\phi_{\text{home}}$ are zero-sum (literally me $-$ opponent). The rest —
+  $\phi_{\text{cb}}$, $\phi_{\text{econ}}$, $\phi_{\text{hasLanding}}$, and
+  $\phi_{\text{landPress}}$ — are one-sided ($\ge 0$). $\phi_{\text{cb}}$ *looks*
+  two-sided because its per-matchup margin $m(i,j)$ subtracts the enemy's return
+  damage, but the win-only filter $A_j$ keeps only my favorable matchups, so
+  being out-matched contributes $0$, never a penalty — it is one-sided.
 - **Weights.** The original $w_k$ were hand-picked first-cut values (home threat
   weighted $\approx 6\times$ economy); a later linear regression on harvest data
   replaced them.

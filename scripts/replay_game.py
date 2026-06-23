@@ -26,6 +26,7 @@ Two modes:
 
 Run from the repo root (scenario map paths are repo-relative).
 """
+
 from __future__ import annotations
 
 import argparse
@@ -37,10 +38,10 @@ from pathlib import Path
 REPO_ROOT = Path(__file__).resolve().parents[1]
 
 # Token field offsets (see battleboats/envs/observation.py).
-TYPE_SLICE = slice(0, 10)       # one-hot: 0-7 ship types, 8 port, 9 coastline
-POS_X, POS_Y = 10, 11           # x/width, y/height
-IS_FRIENDLY = 12                # owner one-hot (relative to the perspective)
-IS_HOME = 24                    # port_state[1]
+TYPE_SLICE = slice(0, 10)  # one-hot: 0-7 ship types, 8 port, 9 coastline
+POS_X, POS_Y = 10, 11  # x/width, y/height
+IS_FRIENDLY = 12  # owner one-hot (relative to the perspective)
+IS_HOME = 24  # port_state[1]
 
 
 def _load_rows(game_file: Path):
@@ -97,14 +98,18 @@ def main() -> None:
     parser.add_argument("--scenarios-file", type=Path, default=None, help="Override scenarios file (else from run config).")
     parser.add_argument("--run-config", type=Path, default=None, help="Override path to _run_config.json.")
     parser.add_argument("--stride", type=int, default=1, help="Render every Nth move (handy for long truncated games).")
-    parser.add_argument("--moves", action="store_true",
-                        help="Also show a stacked-bar panel of the to-move player's top-10 legal moves by "
-                             "1-ply heuristic value (needs a cash-logged harvest).")
+    parser.add_argument(
+        "--moves",
+        action="store_true",
+        help="Also show a stacked-bar panel of the to-move player's top-10 legal moves by "
+        "1-ply heuristic value (needs a cash-logged harvest).",
+    )
     args = parser.parse_args()
 
     if args.mode == "gif":
         os.environ["MPLBACKEND"] = "Agg"
         import warnings
+
         warnings.filterwarnings("ignore", message="FigureCanvasAgg is non-interactive")
 
     import numpy as np
@@ -143,8 +148,10 @@ def main() -> None:
     W, H = game_map.width, game_map.height
 
     steps = _steps_by_index(rows)
-    print(f"Replaying game_idx={game_idx} mcts_player={mcts_player_id} | "
-          f"{len(steps)} moves | {outcome} | map={Path(map_path).name}")
+    print(
+        f"Replaying game_idx={game_idx} mcts_player={mcts_player_id} | "
+        f"{len(steps)} moves | {outcome} | map={Path(map_path).name}"
+    )
 
     def decode_pos(tok):
         return (int(round(tok[POS_X] * W)), int(round(tok[POS_Y] * H)))
@@ -158,13 +165,13 @@ def main() -> None:
                 continue
             for tok in row["tokens"]:
                 ti = int(np.argmax(tok[TYPE_SLICE]))
-                if tok[IS_FRIENDLY] < 0.5:      # only this perspective's own entities
+                if tok[IS_FRIENDLY] < 0.5:  # only this perspective's own entities
                     continue
                 pos = decode_pos(tok)
-                if ti < 8:                      # ship
+                if ti < 8:  # ship
                     ships[sid] = SimpleNamespace(position=pos, type=SHIP_TYPES[ti], owner=pid)
                     sid += 1
-                elif ti == 8:                   # port
+                elif ti == 8:  # port
                     ports[pos] = SimpleNamespace(position=pos, owner=pid, is_home=tok[IS_HOME] > 0.5)
         return ships, ports
 
@@ -220,6 +227,7 @@ def main() -> None:
     if moves_on:
         import matplotlib.pyplot as plt
         from move_scores import engine_from_tokens, score_moves, plot_move_scores
+
         sample = next(iter(steps[0]["persp"].values()))
         if "cash" not in sample:
             print("  --moves: shard has no `cash` field (pre-edit harvest) — disabling move panel.")
@@ -278,10 +286,10 @@ def main() -> None:
             move_ax.clear()
             cash = rec["persp"][pid].get("cash")
             try:
-                eng = engine_from_tokens(map_path, scenario.get("seed"),
-                                         rec["persp"][0]["tokens"], rec["persp"][1]["tokens"],
-                                         cash, turn, pid)
-                scored = score_moves(eng, pid, top_n=10)
+                eng = engine_from_tokens(
+                    map_path, scenario.get("seed"), rec["persp"][0]["tokens"], rec["persp"][1]["tokens"], cash, turn, pid
+                )
+                scored = score_moves(eng, pid, top_n=25)
                 plot_move_scores(move_ax, eng, scored, title=f"top legal moves — player_{pid}, turn {turn}")
             except Exception as e:  # noqa: BLE001 — keep stepping if one state fails to reconstruct
                 move_ax.text(0.5, 0.5, f"move-score unavailable:\n{e}", ha="center", va="center", transform=move_ax.transAxes)
@@ -295,6 +303,7 @@ def main() -> None:
                 frames.append(board_img)
         else:
             import matplotlib.pyplot as plt
+
             plt.pause(0.001)
             if input(f"[{i + 1}/{len(selected)}] player_{pid}: {desc}  — [enter] next / q quit ").strip().lower() == "q":
                 break
