@@ -99,21 +99,15 @@ def main() -> None:
     M_dec = _grid(results, "decisive_rate", boards, iters)
     _heatmap(ax_d, M_dec, boards, iters, density,
              "Decisive Rate (1 − draw rate)", cmap="RdYlGn", fmt="{:.2f}", vmin=0.0, vmax=1.0)
-    bc_handles, bc_labels = _mark_bc(ax_d, boards, iters)
 
     M_atk = _grid(results, "attack_rate", boards, iters)
     amax = float(np.nanmax(M_atk)) if np.isfinite(np.nanmax(M_atk)) else 1.0
     _heatmap(ax_a, M_atk, boards, iters, density,
              "Attack Rate (attacks / MCTS decision)", cmap="viridis", fmt="{:.3f}", vmin=0.0, vmax=max(amax, 1e-3))
-    _mark_bc(ax_a, boards, iters)
 
-    if bc_handles:
-        fig.legend(bc_handles, bc_labels, loc="lower center", ncol=len(bc_handles),
-                   fontsize=9, title="BC harvest source", frameon=False, bbox_to_anchor=(0.5, 0.045))
     fig.suptitle("Decisiveness & Aggression Across Board Size × Search Depth", fontsize=15, fontweight="bold")
     fig.text(0.5, 0.005,
-             "Self-play MCTS · v5 heuristic · cash=500 · max_turns=100 · 30 games/cell.  "
-             "Outlined = where BC data was harvested (different cash/turns; region, not identical setting).",
+             "Self-play MCTS · v5 heuristic · cash=500 · max_turns=100 · 30 games/cell.",
              ha="center", fontsize=8, color="0.4")
     fig.tight_layout(rect=(0, 0.03, 1, 0.95))
     args.out.parent.mkdir(parents=True, exist_ok=True)

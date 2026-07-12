@@ -89,6 +89,66 @@ def _resolve(path_str: str) -> str:
     return str(p if p.exists() else REPO_ROOT / path_str)
 
 
+def plot_mcts_root(ax, root_stats, title, top_n: int = 12) -> None:
+    """Horizontal bar chart of the MCTS root's children = the search's policy.
+
+    `root_stats` is a harvest row's `mcts_root`: a list of
+    {"action": <label>, "visits": int, "q": float}. Children sharing an action
+    LABEL are aggregated (e.g. the 8 move directions of one ship, which
+    `_describe_action` collapses to 'Move(Cruiser)'): visits summed, Q
+    visit-weighted-averaged. Bar length = visits = how search apportioned its
+    budget — and the argmax IS the chosen move. Combat actions (Attack/Capture)
+    are drawn in red so their (typically near-zero) visit share is unmissable.
+    """
+
+    def is_combat(a: str) -> bool:
+        return ("Attack" in a) or ("Capture" in a)
+
+    agg: dict = {}
+    for s in root_stats:
+        e = agg.setdefault(s["action"], {"visits": 0, "qw": 0.0})
+        e["visits"] += s["visits"]
+        e["qw"] += s["q"] * s["visits"]
+    items = sorted(
+        ({"action": a, "visits": e["visits"], "q": (e["qw"] / e["visits"] if e["visits"] else 0.0)} for a, e in agg.items()),
+        key=lambda d: d["visits"],
+    )
+    total = sum(e["visits"] for e in agg.values())
+    combat = sum(e["visits"] for a, e in agg.items() if is_combat(a))
+    # The CHOSEN move is the single highest-visit child (NOT the largest
+    # aggregated bar — moves fragment across directions, so a summed bar can top
+    # the chart without any one child being the pick). Mark it so the two don't
+    # get conflated.
+    chosen = max(root_stats, key=lambda s: s["visits"])["action"] if root_stats else None
+    items = items[-top_n:]  # largest-visit children land at the top of a barh
+
+    y = list(range(len(items)))
+    visits = [d["visits"] for d in items]
+    colors = ["#d62728" if is_combat(d["action"]) else "#4c72b0" for d in items]
+    edges = ["black" if d["action"] == chosen else "none" for d in items]
+    lws = [2.0 if d["action"] == chosen else 0.0 for d in items]
+    ax.barh(y, visits, color=colors, edgecolor=edges, linewidth=lws)
+    ax.set_yticks(y)
+    ax.set_yticklabels([f"{d['action']} ←chosen" if d["action"] == chosen else d["action"] for d in items], fontsize=9)
+    for yi, d in zip(y, items):
+        ax.text(d["visits"], yi, f"  N={d['visits']}  Q={d['q']:+.2f}", va="center", ha="left", fontsize=8)
+    ax.set_xlim(0, (max(visits) * 1.28) if visits else 1)
+    ax.set_xlabel("root visits per action  (summed over directions/targets)")
+    ax.set_title(title, fontsize=11, fontweight="bold")
+    share = (100 * combat / total) if total else 0.0
+    ax.text(
+        0.98,
+        0.02,
+        f"combat visits: {combat}/{total}  ({share:.1f}%)",
+        transform=ax.transAxes,
+        ha="right",
+        va="bottom",
+        fontsize=8,
+        color="#d62728" if combat == 0 else "0.3",
+        bbox=dict(boxstyle="round", facecolor="white", edgecolor="0.7", alpha=0.85),
+    )
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("game_file", type=Path, help="Path to a harvest shard, e.g. runs/harvests/<run>/game_5.jsonl")
@@ -103,6 +163,13 @@ def main() -> None:
         action="store_true",
         help="Also show a stacked-bar panel of the to-move player's top-10 legal moves by "
         "1-ply heuristic value (needs a cash-logged harvest).",
+    )
+    parser.add_argument(
+        "--mcts",
+        action="store_true",
+        help="Also show a horizontal-bar panel of the MCTS root's children = the search's "
+        "policy (visits + Q per action, combat actions in red). Needs a harvest run with "
+        "--debug-mcts (the `mcts_root` field).",
     )
     args = parser.parse_args()
 
@@ -244,11 +311,35 @@ def main() -> None:
                     pass
                 move_fig.show()
 
-    def _vstack(top, bottom):
-        w = max(top.width, bottom.width)
-        canvas = Image.new("RGB", (w, top.height + bottom.height), "white")
-        canvas.paste(top, ((w - top.width) // 2, 0))
-        canvas.paste(bottom, ((w - bottom.width) // 2, top.height))
+    # Optional MCTS-root panel — its own figure, same lifecycle as the move panel.
+    # Needs a --debug-mcts harvest (the `mcts_root` field on each acting row).
+    mcts_on = args.mcts
+    if mcts_on:
+        import matplotlib.pyplot as plt
+
+        has_root = any(st["acting_pid"] is not None and st["persp"].get(st["acting_pid"], {}).get("mcts_root") for st in steps)
+        if not has_root:
+            print("  --mcts: shard has no `mcts_root` field (harvest without --debug-mcts) — disabling MCTS panel.")
+            mcts_on = False
+        else:
+            if args.mode == "step":
+                plt.ion()
+            mcts_fig, mcts_ax = plt.subplots(figsize=(8.5, 5.2))
+            mcts_fig.subplots_adjust(left=0.30, right=0.95, bottom=0.12, top=0.9)
+            if args.mode == "step":
+                try:
+                    mcts_fig.canvas.manager.set_window_title("Battleboats — MCTS root")
+                except Exception:  # noqa: BLE001 — window-title support is backend-specific
+                    pass
+                mcts_fig.show()
+
+    def _vstack_many(images):
+        w = max(im.width for im in images)
+        canvas = Image.new("RGB", (w, sum(im.height for im in images)), "white")
+        y = 0
+        for im in images:
+            canvas.paste(im, ((w - im.width) // 2, y))
+            y += im.height
         return canvas
 
     frames = []
@@ -289,18 +380,28 @@ def main() -> None:
                 eng = engine_from_tokens(
                     map_path, scenario.get("seed"), rec["persp"][0]["tokens"], rec["persp"][1]["tokens"], cash, turn, pid
                 )
-                scored = score_moves(eng, pid, top_n=25)
+                scored = score_moves(eng, pid, top_n=12)
                 plot_move_scores(move_ax, eng, scored, title=f"top legal moves — player_{pid}, turn {turn}")
             except Exception as e:  # noqa: BLE001 — keep stepping if one state fails to reconstruct
                 move_ax.text(0.5, 0.5, f"move-score unavailable:\n{e}", ha="center", va="center", transform=move_ax.transAxes)
             move_fig.canvas.draw()
 
-        if args.mode == "gif":
-            if moves_on and pid is not None:
-                moves_img = Image.fromarray(np.asarray(move_fig.canvas.buffer_rgba())).convert("RGB")
-                frames.append(_vstack(board_img, moves_img))
+        if mcts_on and pid is not None:
+            mcts_ax.clear()
+            root_stats = rec["persp"][pid].get("mcts_root")
+            if root_stats:
+                plot_mcts_root(mcts_ax, root_stats, title=f"MCTS root — player_{pid}, turn {turn}")
             else:
-                frames.append(board_img)
+                mcts_ax.text(0.5, 0.5, "no mcts_root for this step", ha="center", va="center", transform=mcts_ax.transAxes)
+            mcts_fig.canvas.draw()
+
+        if args.mode == "gif":
+            panels = []
+            if moves_on and pid is not None:
+                panels.append(Image.fromarray(np.asarray(move_fig.canvas.buffer_rgba())).convert("RGB"))
+            if mcts_on and pid is not None:
+                panels.append(Image.fromarray(np.asarray(mcts_fig.canvas.buffer_rgba())).convert("RGB"))
+            frames.append(board_img if not panels else _vstack_many([board_img] + panels))
         else:
             import matplotlib.pyplot as plt
 

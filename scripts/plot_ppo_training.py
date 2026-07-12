@@ -91,10 +91,15 @@ def main() -> None:
     ax_stab.grid(True, alpha=0.25)
 
     ax2 = ax_stab.twinx()
-    for key, label, ci in [("ppo/approx_kl", "approx KL", 4), ("ppo/clip_frac", "clip frac", 5)]:
+    # Distinct color + linestyle + marker per series so KL and clip-frac don't
+    # read as the same dashed line.
+    for key, label, color, ls, marker in [
+        ("ppo/approx_kl", "approx KL", "#d62728", "--", "s"),    # red, dashed, square
+        ("ppo/clip_frac", "clip frac", "#17becf", ":", "^"),     # cyan, dotted, triangle
+    ]:
         xs, ys = _col(rows, key)
         if ys:
-            ax2.plot(xs, ys, color=cmap(ci), lw=1.6, ls="--", label=label)
+            ax2.plot(xs, ys, color=color, lw=1.8, ls=ls, marker=marker, ms=3, label=label)
     ax2.set_ylabel("approx KL / clip fraction")
     h1, l1 = ax_stab.get_legend_handles_labels()
     h2, l2 = ax2.get_legend_handles_labels()
@@ -104,7 +109,7 @@ def main() -> None:
     cfg = run.config
     scen = str(cfg.get("scenarios", "?")).split("/")[-1]
     warm = Path(str(cfg.get("bc_checkpoint", ""))).name or "random-init"
-    fig.suptitle(f"PPO Self-Play from BC Warm-Start — {run.name}", fontsize=16, fontweight="bold")
+    fig.suptitle("PPO Self-Play from BC Warm-Start", fontsize=16, fontweight="bold")
     fig.text(0.5, 0.005,
              f"{n_up} updates · scenarios={scen} · opponent={cfg.get('opponent', '?')} · warm-start={warm}",
              ha="center", fontsize=8, color="0.4")

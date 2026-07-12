@@ -5,10 +5,10 @@ evaluator and as the linear-regression baseline. It scores a non-terminal state
 in $[-1, +1]$ from player `me`'s perspective as a **bounded linear model over
 features**: a weighted sum of interpretable features squashed through $\tanh$.
 
-> These are the **original six features** (iteration 1), plus the
-> worst-case-matchup term (§7) that the regression pass later added. The
-> remaining regression-tuned additions — per-type ship counts and the other
-> matchup-matrix terms — are omitted here.
+> These are the **original six features** (iteration 1), plus two
+> regression-added terms — the worst-case-matchup term (§7) and the
+> merchant-count bonus (§8). The remaining regression-tuned additions —
+> per-type ship counts and the other matchup-matrix terms — are omitted here.
 
 ---
 
@@ -167,6 +167,22 @@ $\phi_{\text{cov}}$ is the **min of best counters** (defensive worst case,
 position-independent). A fleet can have strong aggregate balance yet a negative
 coverage floor if one enemy ship type goes uncountered.
 
+## 8. Merchant count (one-sided, concave)
+
+A diminishing-returns bonus for *owning* merchants. Concave by construction, so
+the heuristic prefers acquiring the first few merchants strongly and values each
+additional one less — rewarding "1–3 merchants" over unbounded merchant spam.
+
+$$
+\phi_{\text{merchN}} = K_{\text{merch}}\,\sqrt{|M|}
+\qquad K_{\text{merch}} = \texttt{MERCHANT\_COUNT\_VALUE\_K}
+$$
+
+The marginal value of the $n$-th merchant is $K_{\text{merch}}(\sqrt{n} - \sqrt{n-1})$,
+which decays with $n$. This is distinct from the economic term (§4): $\phi_{\text{econ}}$
+values what merchants *carry* (cash, cargo, capacity), whereas $\phi_{\text{merchN}}$
+values *having* them as economic capacity at all — the two stack.
+
 ---
 
 ## Notes
@@ -179,8 +195,9 @@ coverage floor if one enemy ship type goes uncountered.
   across board sizes.
 - **Sign convention.** Positive favors `me` throughout. Only $\phi_{\text{mat}}$
   and $\phi_{\text{home}}$ are zero-sum (literally me $-$ opponent). The rest —
-  $\phi_{\text{cb}}$, $\phi_{\text{econ}}$, $\phi_{\text{hasLanding}}$, and
-  $\phi_{\text{landPress}}$ — are one-sided ($\ge 0$). $\phi_{\text{cb}}$ *looks*
+  $\phi_{\text{cb}}$, $\phi_{\text{econ}}$, $\phi_{\text{hasLanding}}$,
+  $\phi_{\text{landPress}}$, and $\phi_{\text{merchN}}$ — are one-sided ($\ge 0$);
+  $\phi_{\text{cov}}$ (§7) is signed and can go negative. $\phi_{\text{cb}}$ *looks*
   two-sided because its per-matchup margin $m(i,j)$ subtracts the enemy's return
   damage, but the win-only filter $A_j$ keeps only my favorable matchups, so
   being out-matched contributes $0$, never a penalty — it is one-sided.

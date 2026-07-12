@@ -90,6 +90,7 @@ def collect_trajectory(
     agent_pid: int,
     rng,
     max_steps: int = 400,
+    use_env_reward: bool = False,
 ) -> Tuple[List[Transition], Dict[str, Any]]:
     """Play one game and return the learning seat's decisions and outcome.
 
@@ -107,9 +108,17 @@ def collect_trajectory(
     ``agent_pid`` lets the caller alternate the learning seat across games so
     the policy learns both sides of the first-player advantage.
 
+    ``use_env_reward`` switches the reward source. Default (False) is the sparse
+    terminal ±1 from ``engine.winner`` — correct for the full game and the landing
+    sandbox (capture→winner→+1 coincides). Set True for dense-reward skills (e.g.
+    merchant throughput) that have no winner: each recorded decision takes
+    ``env.rewards[agent]`` from the step it drove and the terminal overwrite is
+    skipped. It is equivalent to the default on landing (per-step reward is nonzero
+    only on the capturing step), so it also unifies both sandboxes.
+
     Returns:
         ``(transitions, info)`` where ``info`` carries "winner", "outcome",
-        "steps", "n_decisions", and "truncated".
+        "steps", "n_decisions", "truncated", and "reward_sum" (episode return).
     """
     transitions = []
     steps = 0
@@ -163,12 +172,16 @@ def collect_trajectory(
         # apply action to env
         env.step(masks.to_action(asset_idx=a_idx, verb_idx=v_idx, target_idx=t_idx))
         steps += 1
+        # Dense-reward skills: the reward for this decision is what the env
+        # settled after the step (env.rewards is per-step in the AEC).
+        if use_env_reward and pid == agent_pid and transitions:
+            transitions[-1].reward = float(env.rewards[agent])
         if steps > max_steps:
             break
 
     winner = env.engine.winner
     outcome = 1.0 if winner == agent_pid else (-1.0 if winner is not None else 0.0)
-    if transitions:
+    if transitions and not use_env_reward:
         transitions[-1].reward = outcome  # sparse terminal reward on the last decision
     return transitions, {
         "winner": winner,
@@ -176,6 +189,7 @@ def collect_trajectory(
         "steps": steps,
         "n_decisions": len(transitions),
         "truncated": winner is None,
+        "reward_sum": sum(t.reward for t in transitions),
     }
 
 
