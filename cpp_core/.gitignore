@@ -1,0 +1,5 @@
+# CMake build tree — always regenerable, never committed.
+build/
+# Editor / tooling
+compile_commands.json
+.cache/
