@@ -1,0 +1,84 @@
+# Skill curriculum for the RX 7700 XT / 7800 XT box.
+# Device "auto" uses the ROCm GPU when torch.cuda.is_available(), else CPU.
+# If the GPU stays hidden: export HSA_OVERRIDE_GFX_VERSION=11.0.0
+#
+# Order: each skill on 2x3, then 3x3, then 4x4, then the full game.
+# A stage promotes when its eval metric clears the threshold and the next
+# stage warm-starts from that checkpoint. Full-game eval is vs random, so
+# the gate is not "beat yourself".
+#
+# poetry run python scripts/train_curriculum.py --config configs/curriculum.yaml
+
+run_dir: runs/curriculum
+device: auto
+seed: 0
+allow_unmet: false
+opponent_refresh: 5
+save_every: 10
+wandb: false
+
+arch:
+  d_model: 64
+  nhead: 4
+  num_layers: 2
+  dim_feedforward: 128
+  dropout: 0.1
+
+ppo:
+  lr: 0.0003
+  gamma: 0.99
+  lam: 0.95
+  clip_eps: 0.2
+  vf_coef: 0.5
+  ent_coef: 0.01
+  epochs: 4
+  minibatch_size: 256
+  max_grad_norm: 0.5
+
+stages:
+  - {skill: merchant, width: 2, height: 3, success_threshold: 0.60, max_updates: 30,
+     metric: success_rate, eval_every: 5, eval_episodes: 12, max_turns: 25, max_steps: 80,
+     rollout_decisions: 512, randomize: false, approach_coef: 0.0}
+  - {skill: merchant, width: 3, height: 3, success_threshold: 0.60, max_updates: 50,
+     metric: success_rate, eval_every: 5, eval_episodes: 12, max_turns: 40, max_steps: 160,
+     rollout_decisions: 768, randomize: true, approach_coef: 0.0}
+  - {skill: merchant, width: 4, height: 4, success_threshold: 0.60, max_updates: 80,
+     metric: success_rate, eval_every: 5, eval_episodes: 12, max_turns: 50, max_steps: 220,
+     rollout_decisions: 1024, randomize: true, approach_coef: 0.0}
+
+  - {skill: landing, width: 2, height: 3, success_threshold: 0.70, max_updates: 30,
+     metric: success_rate, eval_every: 5, eval_episodes: 12, max_turns: 25, max_steps: 80,
+     rollout_decisions: 512, randomize: false, approach_coef: 0.0}
+  - {skill: landing, width: 3, height: 3, success_threshold: 0.70, max_updates: 50,
+     metric: success_rate, eval_every: 5, eval_episodes: 12, max_turns: 40, max_steps: 160,
+     rollout_decisions: 768, randomize: true, approach_coef: 0.02}
+  - {skill: landing, width: 4, height: 4, success_threshold: 0.70, max_updates: 80,
+     metric: success_rate, eval_every: 5, eval_episodes: 12, max_turns: 50, max_steps: 220,
+     rollout_decisions: 1024, randomize: true, approach_coef: 0.02}
+
+  - {skill: combat, width: 2, height: 3, success_threshold: 0.70, max_updates: 30,
+     metric: success_rate, eval_every: 5, eval_episodes: 12, max_turns: 25, max_steps: 80,
+     rollout_decisions: 512, randomize: false, approach_coef: 0.0}
+  - {skill: combat, width: 3, height: 3, success_threshold: 0.70, max_updates: 50,
+     metric: success_rate, eval_every: 5, eval_episodes: 12, max_turns: 40, max_steps: 160,
+     rollout_decisions: 768, randomize: true, approach_coef: 0.02}
+  - {skill: combat, width: 4, height: 4, success_threshold: 0.70, max_updates: 80,
+     metric: success_rate, eval_every: 5, eval_episodes: 12, max_turns: 50, max_steps: 220,
+     rollout_decisions: 1024, randomize: true, approach_coef: 0.02}
+
+  - {skill: builder, width: 2, height: 3, success_threshold: 0.60, max_updates: 30,
+     metric: success_rate, eval_every: 5, eval_episodes: 12, max_turns: 25, max_steps: 80,
+     rollout_decisions: 512, randomize: false, approach_coef: 0.0}
+  - {skill: builder, width: 3, height: 3, success_threshold: 0.60, max_updates: 50,
+     metric: success_rate, eval_every: 5, eval_episodes: 12, max_turns: 40, max_steps: 160,
+     rollout_decisions: 768, randomize: false, approach_coef: 0.02}
+  - {skill: builder, width: 4, height: 4, success_threshold: 0.60, max_updates: 80,
+     metric: success_rate, eval_every: 5, eval_episodes: 12, max_turns: 50, max_steps: 220,
+     rollout_decisions: 1024, randomize: false, approach_coef: 0.02}
+
+  - {skill: full, width: 6, height: 6, success_threshold: 0.55, max_updates: 100,
+     metric: win_rate, eval_every: 5, eval_episodes: 16, max_turns: 60, max_steps: 300,
+     rollout_decisions: 1536, train_opponent: random, map_count: 2}
+  - {skill: full, width: 8, height: 8, success_threshold: 0.55, max_updates: 150,
+     metric: win_rate, eval_every: 5, eval_episodes: 16, max_turns: 80, max_steps: 400,
+     rollout_decisions: 2048, train_opponent: snapshot, map_count: 3}

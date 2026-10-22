@@ -21,6 +21,7 @@ from pathlib import Path
 
 import torch
 
+from battleboats.training.device import resolve_device
 from battleboats.training.policy import PolicyNetwork
 from battleboats.training.rollout import collect_trajectory
 
@@ -66,9 +67,14 @@ def main() -> None:
     ap.add_argument("--episodes", type=int, default=300)
     ap.add_argument("--max-turns", type=int, default=60)
     ap.add_argument("--max-steps", type=int, default=300)
-    ap.add_argument("--device", default="cpu")
+    ap.add_argument(
+        "--device",
+        default="cpu",
+        help="cpu, cuda, cuda:N, or auto. ROCm reports the AMD GPU as cuda.",
+    )
     ap.add_argument("--tmpdir", type=Path, default=Path("runs/_probe_maps"))
     args = ap.parse_args()
+    args.device = str(resolve_device(args.device))
 
     device = torch.device(args.device)
     rng = random.Random(0)

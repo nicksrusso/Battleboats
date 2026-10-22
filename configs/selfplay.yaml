@@ -1,0 +1,41 @@
+# Full-game PPO. The learner plays the latest weights. The opponent is a
+# uniform draw from the last snapshot_pool checkpoints, except
+# random_opponent_frac of games, which are vs a random agent.
+# Warm-start from the curriculum when that file exists; otherwise random init.
+#
+# poetry run python scripts/train_selfplay.py --config configs/selfplay.yaml
+
+run_dir: runs/selfplay
+device: auto
+seed: 0
+init_checkpoint: runs/curriculum/latest.pt
+width: 8
+height: 8
+map_count: 4
+updates: 200
+rollout_decisions: 2048
+max_turns: 80
+max_steps: 400
+snapshot_every: 5
+snapshot_pool: 4
+random_opponent_frac: 0.15
+save_every: 10
+wandb: false
+
+arch:
+  d_model: 64
+  nhead: 4
+  num_layers: 2
+  dim_feedforward: 128
+  dropout: 0.1
+
+ppo:
+  lr: 0.0003
+  gamma: 0.99
+  lam: 0.95
+  clip_eps: 0.2
+  vf_coef: 0.5
+  ent_coef: 0.01
+  epochs: 4
+  minibatch_size: 256
+  max_grad_norm: 0.5
