@@ -11,6 +11,7 @@ Run with: poetry run pytest tests/test_heuristics.py -v
 """
 
 import random
+from pathlib import Path
 
 import pytest
 
@@ -18,9 +19,11 @@ from battleboats.agents.heuristics import (
     HOME_THREAT_WEIGHT_LANDING,
     MAT_BUILDER_BONUS,
     MAT_LANDING_BONUS,
+    MAT_MERCHANT_BONUS,
     MAT_PORT_VALUE,
     _home_threat,
     _ship_value,
+    features,
     heuristic_eval,
     pk,
 )
@@ -30,7 +33,13 @@ from battleboats.core.shipyard.ship import Ship
 from battleboats.core.shipyard.ship_stats import ShipStats
 from battleboats.core.shipyard.ship_type import ShipType
 
-MAP_JSON = "/home/nick/Desktop/repos/Battleboats/battleboats/core/config/map.json"
+MAP_JSON = str(
+    Path(__file__).resolve().parents[1]
+    / "battleboats"
+    / "core"
+    / "config"
+    / "map.json"
+)
 
 
 # --------------------------------------------------------------- helpers
@@ -134,9 +143,9 @@ def test_ship_value_builder_adds_bonus() -> None:
     assert _ship_value(s) == MAT_BUILDER_BONUS
 
 
-def test_ship_value_merchant_no_bonus() -> None:
+def test_ship_value_merchant_adds_bonus() -> None:
     s = _make_ship(ShipType.MERCHANT, strength=0, attack_range=0)
-    assert _ship_value(s) == 0
+    assert _ship_value(s) == MAT_MERCHANT_BONUS
 
 
 # -------------------------------------------------------- _home_threat tests
@@ -217,14 +226,25 @@ def test_heuristic_survives_random_play(fresh_engine: gameEngine) -> None:
     assert -1.0 <= h1 <= 1.0
 
 
-def test_heuristic_zero_sum_after_random_play(fresh_engine: gameEngine) -> None:
-    """After arbitrary play, h(state, 0) + h(state, 1) must remain ~0."""
+def test_antisymmetric_features_after_random_play(fresh_engine: gameEngine) -> None:
+    """Diff features negate across seats. One-sided features do not.
+
+    econ, merchant count, and landing pressure are intentionally one-sided, and
+    combat_balance is win-only, so h(0)+h(1) is not zero once the fleets differ.
+    The opening position is checked separately.
+    """
     rng = random.Random(42)
     for _ in range(100):
         if fresh_engine.is_terminal():
             break
         action = random_action(fresh_engine, fresh_engine.current_player, rng)
         fresh_engine.step(action)
-    h0 = heuristic_eval(fresh_engine, 0)
-    h1 = heuristic_eval(fresh_engine, 1)
-    assert h0 + h1 == pytest.approx(0.0, abs=1e-9)
+    if fresh_engine.is_terminal():
+        h0 = heuristic_eval(fresh_engine, 0)
+        h1 = heuristic_eval(fresh_engine, 1)
+        assert h0 + h1 == pytest.approx(0.0, abs=1e-9)
+        return
+    phi0 = features(fresh_engine, 0)
+    phi1 = features(fresh_engine, 1)
+    for key in ("material_diff", "home_pressure_diff"):
+        assert phi0[key] == pytest.approx(-phi1[key], abs=1e-6)

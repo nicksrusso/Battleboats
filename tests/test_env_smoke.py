@@ -10,13 +10,20 @@ Run with: poetry run pytest tests/test_env_smoke.py -v
 """
 
 import random
+from pathlib import Path
 
 import pytest
 
 from battleboats.agents.random_agent import random_action
 from battleboats.envs.battleboats_aec import BattleboatsAEC
 
-MAP_JSON = "/home/nick/Desktop/repos/Battleboats/battleboats/core/config/map.json"
+MAP_JSON = str(
+    Path(__file__).resolve().parents[1]
+    / "battleboats"
+    / "core"
+    / "config"
+    / "map.json"
+)
 NUM_GAMES = 5
 MAX_TURNS = 50  # smoke test only needs to exercise the lifecycle, not play out full games
 STEP_BUDGET = 200_000  # safety net so a runaway loop fails fast

@@ -60,6 +60,7 @@ class LandingSkillAEC(BattleboatsBaseAEC):
         restrict_verbs: bool = True,
         reveal_enemy_home: bool = True,
         randomize_target: bool = False,
+        approach_coef: float = 0.0,
     ) -> None:
         """
         Args:
@@ -81,6 +82,10 @@ class LandingSkillAEC(BattleboatsBaseAEC):
                 tile every reset (learner home fixed, so the spawn is stable).
                 Forces the policy to READ the enemy-home token instead of
                 memorizing a fixed route — the fix for the fixed-target overfit.
+            approach_coef: potential-style bonus per Manhattan step closer to the
+                enemy home. 0 (default) leaves the sparse capture reward unchanged.
+                Larger boards set a small coef so the ship is not waiting on a
+                single +1 at the end of a long walk.
         """
         self.learner_id = learner_id
         self.capture_reward = capture_reward
@@ -88,6 +93,7 @@ class LandingSkillAEC(BattleboatsBaseAEC):
         self.restrict_verbs = restrict_verbs
         self.reveal_enemy_home = reveal_enemy_home
         self.randomize_target = randomize_target
+        self.approach_coef = float(approach_coef)
         self._captured = False
         self._tmp_map_path: Optional[str] = None
         super().__init__(map_json_path=map_json_path, max_turns=max_turns)
@@ -233,6 +239,21 @@ class LandingSkillAEC(BattleboatsBaseAEC):
 
         self.engine.enumerate_legal = enumerate_legal
 
+    def _capture_reward_state(self) -> Dict[str, Any]:
+        return {"dist": self._landing_dist()}
+
+    def _landing_dist(self) -> Optional[int]:
+        assert self.engine is not None
+        opp = self.engine.players[self._enemy_id].home_port
+        best: Optional[int] = None
+        for sid in self.engine.players[self.learner_id].owned_ship_ids:
+            ship = self.engine.ships.get(sid)
+            if ship is None or ship.type is not ShipType.LANDING:
+                continue
+            d = self.engine.map.manhattan(ship.position, opp)
+            best = d if best is None else min(best, d)
+        return best
+
     def _reward_after_step(
         self,
         agent: str,
@@ -240,10 +261,17 @@ class LandingSkillAEC(BattleboatsBaseAEC):
         pre: Dict[str, Any],
     ) -> Dict[str, float]:
         rewards = {a: 0.0 for a in self.agents}
+        learner = self._agent_name(self.learner_id)
         if not self._captured and self.engine is not None:
             if self.engine.winner == self.learner_id:
                 self._captured = True
-                rewards[self._agent_name(self.learner_id)] = float(self.capture_reward)
+                rewards[learner] = float(self.capture_reward)
+        if self.approach_coef and pre.get("dist") is not None:
+            post = self._landing_dist()
+            if post is not None:
+                rewards[learner] = rewards.get(learner, 0.0) + self.approach_coef * (
+                    pre["dist"] - post
+                )
         return rewards
 
     def _is_terminated(self) -> bool:

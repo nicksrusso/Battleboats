@@ -28,6 +28,7 @@ from typing import Any, Dict, List, Optional, Tuple
 import torch
 
 from battleboats.envs.battleboats_aec import BattleboatsAEC
+from battleboats.training.device import resolve_device
 from battleboats.training.policy import PolicyNetwork
 from battleboats.training.ppo_buffer import RolloutBuffer
 from battleboats.training.ppo_update import ppo_update
@@ -186,12 +187,17 @@ def main() -> None:
     p.add_argument("--dim-feedforward", type=int, default=128)
     p.add_argument("--dropout", type=float, default=0.1)
     # Infra
-    p.add_argument("--device", default="cpu", help="cpu or cuda.")
+    p.add_argument(
+        "--device",
+        default="cpu",
+        help="cpu, cuda, cuda:N, or auto. ROCm reports the AMD GPU as cuda.",
+    )
     p.add_argument("--seed", type=int, default=0)
     p.add_argument("--save-dir", type=Path, default=Path("runs/ppo_checkpoints"))
     p.add_argument("--save-every", type=int, default=10, help="Checkpoint every N updates.")
     p.add_argument("--wandb", action="store_true")
     args = p.parse_args()
+    args.device = str(resolve_device(args.device))
 
     # ----------------------------------------------------------------- setup
     torch.manual_seed(args.seed)
