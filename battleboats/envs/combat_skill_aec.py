@@ -122,9 +122,8 @@ class CombatSkillAEC(BattleboatsBaseAEC):
         assert self.engine is not None
         learner = self.engine.players[self.learner_id]
         enemy = self.engine.players[self._enemy_id]
-        own = self._find_adjacent_water(learner.home_port)
-        tgt = self._find_adjacent_water(enemy.home_port)
-        if own is None or tgt is None or own == tgt:
+        own, tgt = self._distinct_spawns(learner.home_port, enemy.home_port)
+        if own is None or tgt is None:
             raise RuntimeError(
                 "CombatSkillAEC: need distinct water tiles next to both homes."
             )
@@ -222,9 +221,10 @@ class CombatSkillAEC(BattleboatsBaseAEC):
             guard += 1
         self._reveal_target()
 
-    def _find_adjacent_water(self, port: Tuple[int, int]) -> Optional[Tuple[int, int]]:
+    def _adjacent_water(self, port: Tuple[int, int]) -> List[Tuple[int, int]]:
         assert self.engine is not None
         m = self.engine.map
+        out = []
         for dx, dy in _CARDINALS:
             pos = (port[0] + dx, port[1] + dy)
             if not m.in_bounds(pos):
@@ -233,5 +233,15 @@ class CombatSkillAEC(BattleboatsBaseAEC):
                 continue
             if m.is_occupied(pos):
                 continue
-            return pos
-        return None
+            out.append(pos)
+        return out
+
+    def _distinct_spawns(
+        self, home: Tuple[int, int], enemy_home: Tuple[int, int]
+    ) -> Tuple[Optional[Tuple[int, int]], Optional[Tuple[int, int]]]:
+        """Water next to each home. On a 3×3 the obvious tiles can be the same one."""
+        for own in self._adjacent_water(home):
+            for tgt in self._adjacent_water(enemy_home):
+                if own != tgt:
+                    return own, tgt
+        return None, None

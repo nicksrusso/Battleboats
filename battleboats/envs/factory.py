@@ -7,6 +7,9 @@ from battleboats.envs.builder_skill_aec import BuilderSkillAEC
 from battleboats.envs.combat_skill_aec import CombatSkillAEC
 from battleboats.envs.landing_skill_aec import LandingSkillAEC
 from battleboats.envs.merchant_skill_aec import MerchantSkillAEC
+from battleboats.envs.move_skill_aec import MoveSkillAEC
+from battleboats.envs.opening_skill_aec import OpeningSkillAEC
+from battleboats.envs.shipyard_skill_aec import ShipyardSkillAEC
 
 
 def make_env(
@@ -23,6 +26,7 @@ def make_env(
             map_path,
             max_turns=max_turns,
             randomize_ports=randomize,
+            approach_coef=approach_coef,
         )
     if skill == "landing":
         return LandingSkillAEC(
@@ -42,6 +46,26 @@ def make_env(
         return BuilderSkillAEC(
             map_path,
             max_turns=max_turns,
+            approach_coef=approach_coef,
+        )
+    if skill == "move":
+        return MoveSkillAEC(
+            map_path,
+            max_turns=max_turns,
+            randomize_waypoint=randomize,
+            approach_coef=approach_coef,
+        )
+    if skill == "shipyard":
+        return ShipyardSkillAEC(
+            map_path,
+            max_turns=max_turns,
+            randomize_layout=randomize,
+        )
+    if skill == "opening":
+        return OpeningSkillAEC(
+            map_path,
+            max_turns=max_turns,
+            randomize_target=randomize,
             approach_coef=approach_coef,
         )
     if skill == "full":

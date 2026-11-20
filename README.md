@@ -99,17 +99,31 @@ poetry run python scripts/play_vs_agent.py --checkpoint-dir runs --port 8765
 
 Open the printed URL (`http://127.0.0.1:8765` by default). Fog of war applies to the human. The scripted opponent is labeled as full information. A checkpoint uses the same masked policy as training. `--device auto` picks the ROCm GPU when the wheel can see it.
 
-# Skill curriculum
+# Skill pipeline
 
-Each skill trains on 2×3, then 3×3, then 4×4. The promoted checkpoint is the next stage's warm start. Skills, in order: merchant (throughput), landing (capture), combat (destroyer vs a strength-0 merchant), builder (build the marked land tile). The last stages are the full game on 6×6 (vs random) and 8×8 (vs a refreshed snapshot of the learner). Full-game promotion is win rate against a random opponent. Reward shaping stays inside the minigames; the full game stays sparse ±1.
+One policy, the same observation and action heads as the full game. Sandboxes cover move, merchant haul, buying a ship, combat, landing/capture, building a port, and an opening that buys a landing ship and captures the enemy home from an empty fleet. An update interleaves all of them (equal decisions, advantages normalized per task) so a later skill cannot erase an earlier one. The full-game stages keep mixing those episodes in and score wins against a random opponent and the scripted baseline. A stage promotes only when its measured rates clear the config thresholds.
+
+The policy to load is `runs/skill_pipeline/final.pt`. `runs/skill_pipeline/latest.pt` is the resume point.
+
+```bash
+poetry install
+poetry run python scripts/train_skill_pipeline.py --config configs/skill_pipeline.yaml
+```
+
+Smoke (one interleaved update, one full-game mix update, CPU, missed gates still hand off):
+
+```bash
+poetry run python scripts/train_skill_pipeline.py --config configs/skill_pipeline_smoke.yaml
+```
+
+Weights & Biases is off unless `wandb: true` is set in the config or `BATTLEBOATS_WANDB=1`. If wandb is not installed or not logged in, training continues and prints a warning. `device: auto` uses the GPU when `torch.cuda.is_available()` (ROCm reports the AMD card as cuda). Rollouts are single-process Python, so a GPU only shortens the PPO step; CPU is the expected desktop path. A skill or full-game update is about 5–8 seconds on a 4-core CPU (the rollout is single-process Python; a GPU only shortens the PPO step). `configs/skill_pipeline.yaml` early-stops when a gate clears. On that VM the skill stage cleared in 15 updates, opening in 25, 6×6 in 15, and 8×8 in 35, which is roughly 15 minutes all together. If a stage runs out its budget (80 / 40 / 80 / 40 updates) expect under an hour on CPU.
+
+The pipeline resumes from `runs/skill_pipeline/state.json`. `--no-resume` starts over. `--allow-unmet` continues after a missed gate; otherwise the process exits 2. `--init-checkpoint` warm-starts the first stage. `--device` overrides the yaml.
+
+The older sequential curriculum is still there (`scripts/train_curriculum.py`, `configs/curriculum.yaml`). It trains one skill to completion before the next, which is the forgetting mode the pipeline is meant to replace.
 
 ```bash
 poetry run python scripts/train_curriculum.py --config configs/curriculum.yaml
-```
-
-Smoke (one update per stage, CPU, missed gates still hand off):
-
-```bash
 poetry run python scripts/train_curriculum.py --config configs/curriculum_smoke.yaml
 ```
 

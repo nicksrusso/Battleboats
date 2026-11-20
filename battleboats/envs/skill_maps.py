@@ -200,10 +200,30 @@ def write_dev_map(path: Path | str, width: int = 48, height: int = 24) -> str:
     )
 
 
+def write_move_map(path: Path | str, width: int, height: int) -> str:
+    """Home, a friendly waypoint port, and the enemy home. Same geometry as merchant.
+
+    The waypoint is a port so it is always in the observation. The move sandbox
+    leaves its stockpile at 0; the task is to sail next to it.
+    """
+    return write_merchant_map(path, width, height)
+
+
+def write_shipyard_map(path: Path | str, width: int, height: int) -> str:
+    """Two homes. The shipyard env rewrites this file's size into a task layout."""
+    return write_two_home_map(path, width, height)
+
+
 def write_skill_map(path: Path | str, skill: str, width: int, height: int, *, seed: int = 0) -> str:
-    """Dispatch on the curriculum skill name."""
+    """Dispatch on the curriculum / pipeline skill name."""
     if skill == "merchant":
         return write_merchant_map(path, width, height)
+    if skill == "move":
+        return write_move_map(path, width, height)
+    if skill == "shipyard":
+        return write_shipyard_map(path, width, height)
+    if skill == "opening":
+        return write_two_home_map(path, width, height)
     if skill in ("landing", "combat"):
         return write_two_home_map(path, width, height)
     if skill == "builder":

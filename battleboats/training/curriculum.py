@@ -31,7 +31,16 @@ from battleboats.training.device import resolve_device
 from battleboats.training.loop import PPOHyper, apply_ppo, collect_episodes
 from battleboats.training.policy import PolicyNetwork
 
-SKILLS = ("merchant", "landing", "combat", "builder", "full")
+SKILLS = (
+    "move",
+    "merchant",
+    "shipyard",
+    "combat",
+    "landing",
+    "builder",
+    "opening",
+    "full",
+)
 
 
 @dataclass
@@ -119,13 +128,21 @@ def load_curriculum_config(path: Path) -> CurriculumConfig:
 def episode_success(skill: str, info: Dict[str, Any], env) -> bool:
     """Did this episode demonstrate the skill (or a win, for the full game)?"""
     if skill == "merchant":
+        if hasattr(env, "delivered_any"):
+            return bool(env.delivered_any)
         return float(info.get("reward_sum", 0.0)) > 0.0
+    if skill == "move":
+        return bool(getattr(env, "reached", False))
+    if skill == "shipyard":
+        return bool(getattr(env, "built_correct", False))
     if skill == "landing":
         return info.get("winner") == 0 or bool(getattr(env, "_captured", False))
     if skill == "combat":
         return bool(getattr(env, "killed", False))
     if skill == "builder":
         return bool(getattr(env, "built", False))
+    if skill == "opening":
+        return bool(getattr(env, "captured", False))
     if skill == "full":
         return float(info.get("outcome", 0.0)) > 0.0
     raise ValueError(skill)
