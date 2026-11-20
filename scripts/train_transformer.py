@@ -37,6 +37,7 @@ import torch
 from torch.utils.data import DataLoader
 
 from battleboats.training.dataset import HarvestDataset, collate_token_batch
+from battleboats.training.device import resolve_device
 from battleboats.training.split import load_split
 from battleboats.training.transformer import TransformerValueModel
 
@@ -160,7 +161,11 @@ def main() -> None:
     parser.add_argument("--log-every", type=int, default=50)
     parser.add_argument("--overfit-batch", action="store_true", help="Sanity check on one batch.")
     parser.add_argument("--steps", type=int, default=300, help="Steps in --overfit-batch mode.")
-    parser.add_argument("--device", default="cpu", help="cpu or cuda (ROCm exposes the 7800 XT as cuda).")
+    parser.add_argument(
+        "--device",
+        default="cpu",
+        help="cpu, cuda, cuda:N, or auto. ROCm reports the AMD GPU as cuda.",
+    )
     parser.add_argument(
         "--target",
         choices=["target", "mcts_root_value"],
@@ -177,6 +182,7 @@ def main() -> None:
     parser.add_argument("--wandb-entity", default="nicksrusso", help="W&B entity (user/team).")
     parser.add_argument("--wandb-project", default="battleboats-data")
     args = parser.parse_args()
+    args.device = str(resolve_device(args.device))
 
     use_wandb = args.wandb
 

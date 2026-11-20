@@ -33,6 +33,7 @@ import torch
 from torch.utils.data import DataLoader
 
 from battleboats.training.dataset import HarvestDataset
+from battleboats.training.device import resolve_device
 from battleboats.training.model import SimpleMLP, compute_normalization_stats
 from battleboats.training.split import load_split
 
@@ -119,7 +120,11 @@ def main() -> None:
         "Loss should drop to near zero. If it doesn't, something is broken.",
     )
     parser.add_argument("--steps", type=int, default=300, help="Steps to run in --overfit-batch mode.")
-    parser.add_argument("--device", default="cpu", help="cpu or cuda (or cuda:0 etc).")
+    parser.add_argument(
+        "--device",
+        default="cpu",
+        help="cpu, cuda, cuda:N, or auto. ROCm reports the AMD GPU as cuda.",
+    )
     parser.add_argument(
         "--target",
         choices=["target", "mcts_root_value"],
@@ -128,6 +133,7 @@ def main() -> None:
         "'mcts_root_value' = search's per-state value estimate (varies within a game).",
     )
     args = parser.parse_args()
+    args.device = str(resolve_device(args.device))
 
     train_ids, val_ids, meta = load_split(args.split)
     train_ds = HarvestDataset(args.harvest, game_idxs=train_ids, target_key=args.target)

@@ -66,3 +66,93 @@ At the start of every match:
 core - core game logic and full game state is held in a class. 
 env - gymnasium wrapper around class, handles masking for partial information fed to agents
 agents - agents to play the game
+
+# Setup
+
+Python 3.11+. Poetry installs everything except the torch wheel. On the RX 7700 XT / 7800 XT, install the ROCm wheel after `poetry install` (ROCm reports the GPU as `torch.cuda`):
+
+```bash
+poetry install
+poetry run pip install torch==2.10.0 \
+    --index-url https://download.pytorch.org/whl/rocm7.0 \
+    --force-reinstall --no-cache-dir
+```
+
+If `torch.cuda.is_available()` stays false on gfx1101, export `HSA_OVERRIDE_GFX_VERSION=11.0.0` before training. A CPU-only wheel is fine for tests and smoke runs; pass `--device cpu` or set `device: cpu` in the smoke configs.
+
+`runs/` and `**.json` are gitignored. Maps used by training and by the engine tests are generated at runtime. `pytest` writes `battleboats/core/config/map.json` only when that file is missing, so a local map is left in place.
+
+```bash
+poetry run pytest
+poetry run pytest -o addopts= -m slow   # god-mode MCTS benchmark
+```
+
+The C++ port under `cpp_core/` is a skeleton (`game_engine.cpp` and `map.cpp` are empty). The Python engine is the source of truth.
+
+# Play against an agent
+
+Local page, one game at a time. Pick a side and an opponent: random, the full-information scripted baseline, or any `.pt` checkpoint under `--checkpoint-dir`.
+
+```bash
+poetry run python scripts/play_vs_agent.py --checkpoint-dir runs --port 8765
+```
+
+Open the printed URL (`http://127.0.0.1:8765` by default). Fog of war applies to the human. The scripted opponent is labeled as full information. A checkpoint uses the same masked policy as training. `--device auto` picks the ROCm GPU when the wheel can see it.
+
+# Skill pipeline
+
+One policy, the same observation and action heads as the full game. Sandboxes cover move, merchant haul, buying a ship, combat, landing/capture, building a port, and an opening that buys a landing ship and captures the enemy home from an empty fleet. An update interleaves all of them (equal decisions, advantages normalized per task) so a later skill cannot erase an earlier one. The full-game stages keep mixing those episodes in and score wins against a random opponent and the scripted baseline. A stage promotes only when its measured rates clear the config thresholds.
+
+The policy to load is `runs/skill_pipeline/final.pt`. `runs/skill_pipeline/latest.pt` is the resume point.
+
+```bash
+poetry install
+poetry run python scripts/train_skill_pipeline.py --config configs/skill_pipeline.yaml
+```
+
+Smoke (one interleaved update, one full-game mix update, CPU, missed gates still hand off):
+
+```bash
+poetry run python scripts/train_skill_pipeline.py --config configs/skill_pipeline_smoke.yaml
+```
+
+Weights & Biases is off unless `wandb: true` is set in the config or `BATTLEBOATS_WANDB=1`. If wandb is not installed or not logged in, training continues and prints a warning. `device: auto` uses the GPU when `torch.cuda.is_available()` (ROCm reports the AMD card as cuda). Rollouts are single-process Python, so a GPU only shortens the PPO step; CPU is the expected desktop path. A skill or full-game update is about 5–8 seconds on a 4-core CPU (the rollout is single-process Python; a GPU only shortens the PPO step). `configs/skill_pipeline.yaml` early-stops when a gate clears. On that VM the skill stage cleared in 15 updates, opening in 25, 6×6 in 15, and 8×8 in 35, which is roughly 15 minutes all together. If a stage runs out its budget (80 / 40 / 80 / 40 updates) expect under an hour on CPU.
+
+The pipeline resumes from `runs/skill_pipeline/state.json`. `--no-resume` starts over. `--allow-unmet` continues after a missed gate; otherwise the process exits 2. `--init-checkpoint` warm-starts the first stage. `--device` overrides the yaml.
+
+The older sequential curriculum is still there (`scripts/train_curriculum.py`, `configs/curriculum.yaml`). It trains one skill to completion before the next, which is the forgetting mode the pipeline is meant to replace.
+
+```bash
+poetry run python scripts/train_curriculum.py --config configs/curriculum.yaml
+poetry run python scripts/train_curriculum.py --config configs/curriculum_smoke.yaml
+```
+
+Resume is on by default (`runs/curriculum/state.json`). `--no-resume` starts over. `--allow-unmet` hands a checkpoint on even if the gate is missed; otherwise the process exits 2. `--init-checkpoint` warm-starts stage 0. `--device auto` overrides the yaml.
+
+Checkpoints are `{model_state, model_config}` only. They do not store an opponent id or a rating, so a later quality-diversity run can load `runs/curriculum/latest.pt` directly.
+
+# Self-play
+
+After the curriculum, train the full game against the last few snapshots. Most games sample that ring uniformly. A fraction (`random_opponent_frac`) are vs a random agent so the value head still sees decisive games. This is not a league: no Elo, no PFSP, no exploiters. `RecentSnapshots.sample` is the function a quality-diversity archive would replace.
+
+```bash
+poetry run python scripts/train_selfplay.py --config configs/selfplay.yaml
+poetry run python scripts/train_selfplay.py \
+    --config configs/selfplay_smoke.yaml \
+    --init-checkpoint runs/curriculum_smoke/latest.pt
+```
+
+The real config looks for `runs/curriculum/latest.pt` and falls back to a random policy if that file is missing.
+
+Rollouts are single-process Python, so the RX 7700 XT / 7800 XT spends most of a run idle: the network is a small transformer (`d_model` 64) and `enumerate_legal` is the cost. On a CPU-only VM, one merchant update of 256 decisions on a 4×4 board took about 1.1 seconds, and one full-game update of 128 decisions on 6×6 took about 0.4 seconds, both while fleets were still tiny. `configs/curriculum.yaml` is about 1.0 million decisions and `configs/selfplay.yaml` about 0.4 million. At that early-game rate the curriculum is on the order of an hour; games that grow real fleets on 8×8 will be slower, so expect a few hours of wall clock on the 16-thread box rather than a GPU-bound run. The 16 CPU threads are unused by these scripts.
+
+```bash
+poetry run python scripts/eval_agent.py \
+    --checkpoint runs/selfplay/latest.pt --opponent scripted --games 40
+```
+
+# Heuristic weights
+
+`battleboats/agents/heuristics.py` loads `runs/weights/v5.json` when that file exists (also the old absolute path on Nick's machine). After `runs/` was deleted, import falls back to a seven-key hand prior with intercept 0 and `econ_value_self` weight 0, which keeps the symmetric-start zero-sum check and the columns in `scripts/play_human_vs_random.py`. Put `v5.json` back at `runs/weights/v5.json` to restore the fitted weights.
+
+Older trainers (`scripts/train_ppo.py`, `train_landing.py`, `train_bc.py`, and the rest) still default to `--device cpu`. They accept `auto` and `cuda` as well. ROCm is `cuda`, not a separate device name.

@@ -65,15 +65,19 @@ def engine():
 # ---------------- income tick ----------------
 
 def test_home_port_income_converts_to_cash_directly(engine):
-    """At end of P0's turn, home port produces PORT_PRODUCTION * CASH_PER_MATERIAL cash."""
-    # Start with only home port for clarity: zero out non-home ports.
+    """Home production converts to cash at the start of that player's turn.
+
+    Income is applied when the opponent ends, so the actor's own EndTurn
+    carries no economic delta.
+    """
     home = engine.players[0].home_port
     engine.players[0].owned_port_positions = {home}
     starting_cash = engine.players[0].cash
-    engine.step(EndTurnAction())
+    engine.step(EndTurnAction())  # P1's turn starts; P0 is not paid yet
+    assert engine.players[0].cash == starting_cash
+    engine.step(EndTurnAction())  # P0's next turn starts
     expected = starting_cash + PORT_PRODUCTION * CASH_PER_MATERIAL
     assert engine.players[0].cash == expected
-    # Home port stockpile remains 0 (direct-to-cash).
     assert engine.ports[home].stockpile == 0
 
 
@@ -81,17 +85,22 @@ def test_non_home_port_accumulates_materials(engine):
     non_home = _first_non_home_port(engine, 0)
     assert non_home is not None
     before = engine.ports[non_home].stockpile
-    engine.step(EndTurnAction())
+    engine.step(EndTurnAction())  # P1 starts; P0's stockpile is unchanged
+    assert engine.ports[non_home].stockpile == before
+    engine.step(EndTurnAction())  # P0 starts
     assert engine.ports[non_home].stockpile == before + PORT_PRODUCTION
 
 
-def test_income_only_for_ending_player(engine):
-    """End-of-turn tick applies to the ending player, not their opponent."""
+def test_income_applies_to_the_player_about_to_move(engine):
+    """Start-of-turn tick pays the player who just received the turn."""
+    p0_non_home = _first_non_home_port(engine, 0)
     p1_non_home = _first_non_home_port(engine, 1)
-    assert p1_non_home is not None
-    before = engine.ports[p1_non_home].stockpile
-    engine.step(EndTurnAction())  # P0 ends → P1's materials untouched
-    assert engine.ports[p1_non_home].stockpile == before
+    assert p0_non_home is not None and p1_non_home is not None
+    p0_before = engine.ports[p0_non_home].stockpile
+    p1_before = engine.ports[p1_non_home].stockpile
+    engine.step(EndTurnAction())  # P0 ends → P1's income ticks
+    assert engine.ports[p0_non_home].stockpile == p0_before
+    assert engine.ports[p1_non_home].stockpile == p1_before + PORT_PRODUCTION
 
 
 def test_income_accumulates_across_multiple_turns(engine):
@@ -164,8 +173,8 @@ def test_merchant_unloads_at_home_converts_to_cash(engine):
     assert engine.ports[home].stockpile == 0
 
 
-def test_merchant_unloads_at_non_home_deposits_materials(engine):
-    """Ferry behavior: drop cargo at another owned port for later pickup."""
+def test_merchant_unload_at_non_home_is_a_noop(engine):
+    """Non-home unload is rejected so cargo cannot bounce back into stockpile."""
     non_home = _first_non_home_port(engine, 0)
     engine.ports[non_home].stockpile = 10
     spawn = _adjacent_water(engine, non_home)
@@ -173,9 +182,9 @@ def test_merchant_unloads_at_non_home_deposits_materials(engine):
     merchant.cargo = 40
     starting_cash = engine.players[0].cash
     engine.step(MerchantUnloadAction(merchant.id, non_home))
-    assert merchant.cargo == 0
-    assert engine.ports[non_home].stockpile == 50
-    assert engine.players[0].cash == starting_cash  # no conversion away from home
+    assert merchant.cargo == 40
+    assert engine.ports[non_home].stockpile == 10
+    assert engine.players[0].cash == starting_cash
 
 
 def test_merchant_unload_with_zero_cargo_noop(engine):
@@ -241,8 +250,14 @@ def test_enumerate_legal_emits_load_and_unload(engine):
     # After loading, unload becomes legal
     engine.step(MerchantLoadAction(merchant.id, non_home))
     legal = engine.enumerate_legal(0)
+    assert not any(
+        isinstance(a, MerchantUnloadAction) and a.port == non_home for a in legal
+    )
+    home = engine.players[0].home_port
+    merchant.position = _adjacent_water(engine, home)
+    legal = engine.enumerate_legal(0)
     assert any(
-        isinstance(a, MerchantUnloadAction) and a.merchant_id == merchant.id and a.port == non_home
+        isinstance(a, MerchantUnloadAction) and a.merchant_id == merchant.id and a.port == home
         for a in legal
     )
 

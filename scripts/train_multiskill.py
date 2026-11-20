@@ -34,6 +34,7 @@ import torch
 
 from battleboats.envs.landing_skill_aec import LandingSkillAEC
 from battleboats.envs.merchant_skill_aec import MerchantSkillAEC
+from battleboats.training.device import resolve_device
 from battleboats.training.policy import PolicyNetwork
 from battleboats.training.ppo_buffer import RolloutBuffer
 from battleboats.training.ppo_update import ppo_update
@@ -118,7 +119,11 @@ def build_arg_parser() -> argparse.ArgumentParser:
                    help="Moderate: enough to explore merchant verbs, not wreck landing.")
     p.add_argument("--max-grad-norm", type=float, default=0.5)
     p.add_argument("--target-kl", type=float, default=None)
-    p.add_argument("--device", default="cpu")
+    p.add_argument(
+        "--device",
+        default="cpu",
+        help="cpu, cuda, cuda:N, or auto. ROCm reports the AMD GPU as cuda.",
+    )
     p.add_argument("--seed", type=int, default=0)
     p.add_argument("--save-dir", type=Path, default=Path("runs/multiskill_checkpoints"))
     p.add_argument("--save-every", type=int, default=10)
@@ -130,6 +135,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
 
 def main() -> None:
     args = build_arg_parser().parse_args()
+    args.device = str(resolve_device(args.device))
     device = torch.device(args.device)
     rng = random.Random(args.seed)
     torch.manual_seed(args.seed)

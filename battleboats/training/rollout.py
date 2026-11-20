@@ -91,6 +91,7 @@ def collect_trajectory(
     rng,
     max_steps: int = 400,
     use_env_reward: bool = False,
+    opponent_action=None,
 ) -> Tuple[List[Transition], Dict[str, Any]]:
     """Play one game and return the learning seat's decisions and outcome.
 
@@ -132,9 +133,15 @@ def collect_trajectory(
         pid = env._player_id(agent)
         engine = env.engine
 
-        # Random opponent: step a uniform legal action without recording it.
+        # Unrecorded opponent. ``opponent_action`` is an optional callable
+        # (engine, pid, rng) -> Action used for a scripted baseline. With neither
+        # a policy nor a callable, the opponent is uniform random.
         if pid != agent_pid and opponent_policy is None:
-            env.step(random_action(engine, pid, rng))
+            if opponent_action is not None:
+                action = opponent_action(engine, pid, rng)
+            else:
+                action = random_action(engine, pid, rng)
+            env.step(action)
             steps += 1
             if steps > max_steps:
                 break

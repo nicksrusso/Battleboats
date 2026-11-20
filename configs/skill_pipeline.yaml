@@ -1,0 +1,160 @@
+# One shared policy. Skills are interleaved in one update so a later mechanic
+# cannot erase an earlier one. The full-game stages keep mixing those
+# episodes in.
+#
+# Boards are 6×6 (shipyard is 4×4, it is a one-step purchase). On 2×3 / 3×3 a
+# random walk already finishes inside a long horizon, so the gate would not
+# mean anything. Budgets below are tight enough that a greedy policy succeeds
+# and a uniform random policy does not:
+#   move 6×6 / 12 steps     greedy 1.00   random ~0.20
+#   merchant 6×6 / 48 steps greedy 1.00   random ~0.12
+#   shipyard 24×24 / 3 steps greedy 1.00  random ~0.33
+#     (large board so the builder task cannot see the enemy home; on 6×6
+#     that home is in port vision and the full-game opening looks like
+#     "buy a builder")
+#   combat 6×6 / 10 steps   greedy 1.00   random ~0.38
+#   landing 6×6 / 16 steps  greedy 1.00   random ~0.17
+#   builder 6×6 / 16 steps  greedy 1.00   random ~0.08
+#   opening 6×6 / 20 steps  buy a landing ship, then capture (random does not)
+# A stage promotes only when every measured rate clears its threshold.
+#
+# Final policy: runs/skill_pipeline/final.pt
+# Resume point: runs/skill_pipeline/latest.pt
+#
+# poetry run python scripts/train_skill_pipeline.py --config configs/skill_pipeline.yaml
+#
+# device "auto" uses the GPU when torch.cuda.is_available() (ROCm reports as
+# cuda). Rollouts are single-process Python, so a GPU only speeds the PPO
+# step. Expect a few hours on CPU; time one update before leaving it running.
+#
+# wandb: true   or   BATTLEBOATS_WANDB=1
+# Missing wandb / not logged in is a warning, not a crash.
+
+run_dir: runs/skill_pipeline
+device: auto
+seed: 0
+allow_unmet: false
+save_every: 10
+wandb: false
+wandb_project: battleboats-skill-pipeline
+
+arch:
+  d_model: 64
+  nhead: 4
+  num_layers: 2
+  dim_feedforward: 128
+  dropout: 0.1
+
+ppo:
+  lr: 0.0003
+  gamma: 0.99
+  lam: 0.95
+  clip_eps: 0.2
+  vf_coef: 0.5
+  ent_coef: 0.02
+  epochs: 4
+  minibatch_size: 256
+  max_grad_norm: 0.5
+
+stages:
+  - name: skills_6x6
+    kind: interleave
+    max_updates: 80
+    eval_every: 5
+    eval_episodes: 16
+    decisions_per_update: 1536
+    tasks:
+      - {skill: move, width: 6, height: 6, max_turns: 8, max_steps: 12,
+         randomize: true, approach_coef: 0.03, success_threshold: 0.70}
+      - {skill: merchant, width: 6, height: 6, max_turns: 24, max_steps: 48,
+         randomize: true, approach_coef: 0.03, success_threshold: 0.50}
+      - {skill: shipyard, width: 24, height: 24, max_turns: 4, max_steps: 3,
+         randomize: true, approach_coef: 0.0, success_threshold: 0.70}
+      - {skill: combat, width: 6, height: 6, max_turns: 8, max_steps: 10,
+         randomize: true, approach_coef: 0.03, success_threshold: 0.70}
+      - {skill: landing, width: 6, height: 6, max_turns: 12, max_steps: 16,
+         randomize: true, approach_coef: 0.03, success_threshold: 0.65}
+      - {skill: builder, width: 6, height: 6, max_turns: 12, max_steps: 16,
+         randomize: false, approach_coef: 0.03, success_threshold: 0.65}
+
+  - name: opening_6x6
+    kind: interleave
+    max_updates: 40
+    eval_every: 5
+    eval_episodes: 12
+    decisions_per_update: 1792
+    tasks:
+      - {skill: move, width: 6, height: 6, max_turns: 8, max_steps: 12,
+         randomize: true, approach_coef: 0.03, success_threshold: 0.55}
+      - {skill: merchant, width: 6, height: 6, max_turns: 24, max_steps: 48,
+         randomize: true, approach_coef: 0.03, success_threshold: 0.40}
+      - {skill: shipyard, width: 24, height: 24, max_turns: 4, max_steps: 3,
+         randomize: true, approach_coef: 0.0, success_threshold: 0.60}
+      - {skill: combat, width: 6, height: 6, max_turns: 8, max_steps: 10,
+         randomize: true, approach_coef: 0.03, success_threshold: 0.60}
+      - {skill: landing, width: 6, height: 6, max_turns: 12, max_steps: 16,
+         randomize: true, approach_coef: 0.03, success_threshold: 0.55}
+      - {skill: builder, width: 6, height: 6, max_turns: 12, max_steps: 16,
+         randomize: false, approach_coef: 0.03, success_threshold: 0.55}
+      - {skill: opening, width: 6, height: 6, max_turns: 10, max_steps: 20,
+         randomize: true, approach_coef: 0.04, success_threshold: 0.60}
+
+  - name: full_6x6
+    kind: full_mix
+    max_updates: 80
+    eval_every: 5
+    eval_episodes: 12
+    decisions_per_update: 2048
+    width: 6
+    height: 6
+    max_turns: 40
+    max_steps: 220
+    map_count: 2
+    skill_frac: 0.40
+    scripted_frac: 0.25
+    win_threshold: 0.30
+    scripted_threshold: 0.10
+    retain_threshold: 0.40
+    tasks:
+      - {skill: move, width: 6, height: 6, max_turns: 8, max_steps: 12,
+         randomize: true, approach_coef: 0.03, success_threshold: 0.70}
+      - {skill: merchant, width: 6, height: 6, max_turns: 24, max_steps: 48,
+         randomize: true, approach_coef: 0.03, success_threshold: 0.50}
+      - {skill: shipyard, width: 24, height: 24, max_turns: 4, max_steps: 3,
+         randomize: true, approach_coef: 0.0, success_threshold: 0.70}
+      - {skill: combat, width: 6, height: 6, max_turns: 8, max_steps: 10,
+         randomize: true, approach_coef: 0.03, success_threshold: 0.70}
+      - {skill: landing, width: 6, height: 6, max_turns: 12, max_steps: 16,
+         randomize: true, approach_coef: 0.03, success_threshold: 0.65}
+      - {skill: builder, width: 6, height: 6, max_turns: 12, max_steps: 16,
+         randomize: false, approach_coef: 0.03, success_threshold: 0.65}
+
+  - name: full_8x8
+    kind: full_mix
+    max_updates: 40
+    eval_every: 5
+    eval_episodes: 12
+    decisions_per_update: 2048
+    width: 8
+    height: 8
+    max_turns: 50
+    max_steps: 280
+    map_count: 2
+    skill_frac: 0.30
+    scripted_frac: 0.25
+    win_threshold: 0.25
+    scripted_threshold: 0.10
+    retain_threshold: 0.40
+    tasks:
+      - {skill: move, width: 6, height: 6, max_turns: 8, max_steps: 12,
+         randomize: true, approach_coef: 0.03, success_threshold: 0.70}
+      - {skill: merchant, width: 6, height: 6, max_turns: 24, max_steps: 48,
+         randomize: true, approach_coef: 0.03, success_threshold: 0.50}
+      - {skill: shipyard, width: 24, height: 24, max_turns: 4, max_steps: 3,
+         randomize: true, approach_coef: 0.0, success_threshold: 0.70}
+      - {skill: combat, width: 6, height: 6, max_turns: 8, max_steps: 10,
+         randomize: true, approach_coef: 0.03, success_threshold: 0.70}
+      - {skill: landing, width: 6, height: 6, max_turns: 12, max_steps: 16,
+         randomize: true, approach_coef: 0.03, success_threshold: 0.65}
+      - {skill: builder, width: 6, height: 6, max_turns: 12, max_steps: 16,
+         randomize: false, approach_coef: 0.03, success_threshold: 0.65}

@@ -1,0 +1,35 @@
+# Two updates on a 4x4 board, CPU. Pass the smoke curriculum checkpoint
+# when you have one:
+#   poetry run python scripts/train_selfplay.py \
+#       --config configs/selfplay_smoke.yaml \
+#       --init-checkpoint runs/curriculum_smoke/latest.pt
+
+run_dir: runs/selfplay_smoke
+device: cpu
+seed: 0
+init_checkpoint: runs/curriculum_smoke/latest.pt
+width: 4
+height: 4
+map_count: 1
+updates: 2
+rollout_decisions: 12
+max_turns: 8
+max_steps: 24
+snapshot_every: 1
+snapshot_pool: 2
+random_opponent_frac: 0.5
+save_every: 1
+wandb: false
+
+arch:
+  d_model: 32
+  nhead: 2
+  num_layers: 1
+  dim_feedforward: 64
+  dropout: 0.0
+
+ppo:
+  lr: 0.0003
+  epochs: 1
+  minibatch_size: 8
+  ent_coef: 0.01
