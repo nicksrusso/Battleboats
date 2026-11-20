@@ -11,6 +11,19 @@ from battleboats.envs.combat_skill_aec import CombatSkillAEC
 from battleboats.envs.skill_maps import write_builder_map, write_full_map, write_two_home_map
 
 
+def test_combat_random_3x3_always_spawns(tmp_path: Path) -> None:
+    env = CombatSkillAEC(
+        write_two_home_map(tmp_path / "c.json", 3, 3),
+        max_turns=8,
+        randomize_target=True,
+    )
+    for seed in range(12):
+        env.reset(seed=seed)
+        assert env.engine.players[0].owned_ship_ids
+        assert env.engine.players[1].owned_ship_ids
+    env.close()
+
+
 def test_combat_attack_in_range_kills(tmp_path: Path) -> None:
     env = CombatSkillAEC(write_two_home_map(tmp_path / "c.json", 2, 3), max_turns=10)
     env.reset(seed=0)

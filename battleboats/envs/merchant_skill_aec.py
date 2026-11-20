@@ -71,6 +71,7 @@ class MerchantSkillAEC(BattleboatsBaseAEC):
         restrict_verbs: bool = True,
         randomize_ports: bool = False,
         merchant_position: Optional[Tuple[int, int]] = None,
+        approach_coef: float = 0.0,
     ) -> None:
         """
         Args:
@@ -108,6 +109,7 @@ class MerchantSkillAEC(BattleboatsBaseAEC):
         self.terminate_on_delivery = terminate_on_delivery
         self.restrict_verbs = restrict_verbs
         self.randomize_ports = randomize_ports
+        self.approach_coef = float(approach_coef)
         self._reward_per_material = deliver_reward / MERCHANT_CAPACITY
         self.merchant_position = merchant_position
         self._delivered = False
@@ -219,6 +221,7 @@ class MerchantSkillAEC(BattleboatsBaseAEC):
             ship.cargo = min(int(starting_cargo), MERCHANT_CAPACITY)
 
         self._delivered = False
+        self.delivered_any = False
         # Ensure learner to move first for a clean skill episode.
         self.engine.current_player = self.learner_id
         self.engine.turn = 0
@@ -255,6 +258,7 @@ class MerchantSkillAEC(BattleboatsBaseAEC):
         return {
             "cash": int(self.engine.players[pid].cash),
             "cargo": int(cargo),
+            "dist": self._nav_dist(cargo),
         }
 
     def _reward_after_step(
@@ -264,14 +268,26 @@ class MerchantSkillAEC(BattleboatsBaseAEC):
         pre: Dict[str, Any],
     ) -> Dict[str, float]:
         rewards = {a: 0.0 for a in self.agents}
+        learner = self._agent_name(self.learner_id)
         delivered = self._materials_delivered(pre)
         if delivered > 0:
-            learner = self._agent_name(self.learner_id)
+            self.delivered_any = True
             if self.terminate_on_delivery:
                 self._delivered = True
                 rewards[learner] = float(self.deliver_reward)  # sparse warmup mode
             else:
                 rewards[learner] = delivered * self._reward_per_material
+        # Potential toward the current goal (satellite when empty, home when
+        # loaded). Skip the step cargo changes: the goal switches, and the
+        # unload reward already pays for the delivery.
+        post_cargo = self._capture_reward_state()["cargo"]
+        cargo_changed = post_cargo != pre.get("cargo", post_cargo)
+        if self.approach_coef and pre.get("dist") is not None and not cargo_changed:
+            post = self._nav_dist(post_cargo)
+            if post is not None:
+                rewards[learner] = rewards.get(learner, 0.0) + self.approach_coef * (
+                    pre["dist"] - post
+                )
         return rewards
 
     def _is_terminated(self) -> bool:
@@ -292,6 +308,26 @@ class MerchantSkillAEC(BattleboatsBaseAEC):
         ):
             self.engine.step(EndTurnAction())
             guard += 1
+
+    def _nav_dist(self, cargo: int) -> Optional[int]:
+        """Manhattan distance to the port this cargo state should head for."""
+        assert self.engine is not None
+        learner = self.engine.players[self.learner_id]
+        if cargo > 0:
+            goal = learner.home_port
+        else:
+            ports = [p for p in learner.owned_port_positions if p != learner.home_port]
+            if not ports:
+                return None
+            goal = ports[0]
+        best: Optional[int] = None
+        for sid in learner.owned_ship_ids:
+            ship = self.engine.ships.get(sid)
+            if ship is None or ship.type is not ShipType.MERCHANT:
+                continue
+            d = self.engine.map.manhattan(ship.position, goal)
+            best = d if best is None else min(best, d)
+        return best
 
     def _materials_delivered(self, pre: Dict[str, Any]) -> int:
         """Materials unloaded at home this step, measured by cargo decrease.
