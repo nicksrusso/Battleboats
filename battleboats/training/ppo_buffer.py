@@ -29,6 +29,7 @@ from battleboats.training.policy import (
     VERB_TO_IDX,
     VERBS_WITH_TARGET,
 )
+from battleboats.envs.observation import GLOBALS_DIM
 from battleboats.training.rollout import Transition
 
 # Per-verb target cardinality K. attack is the odd one out — it's a POINTER over
@@ -96,7 +97,7 @@ def collate_transitions(
     Returns:
         ``(batch, masks)`` where ``batch`` is a dict of "tokens", "pad_mask",
         "asset_idx", "verb_idx", "target_idx", "logp_old", "value_old",
-        "advantage", "ret", and ``masks`` is the matching ``StoredMasks``.
+        "advantage", "ret", "globals", and ``masks`` is the matching ``StoredMasks``.
     """
     B = len(transitions)
     N_max = max([tr.tokens.shape[0] for tr in transitions])
@@ -143,6 +144,14 @@ def collate_transitions(
         "advantage": advantage,
         "ret": ret,
         "skill_idx": torch.tensor([int(getattr(tr, "skill_idx", 0)) for tr in transitions]),
+        "globals": torch.stack(
+            [
+                tr.globals
+                if getattr(tr, "globals", None) is not None
+                else torch.zeros(GLOBALS_DIM, dtype=torch.float32)
+                for tr in transitions
+            ]
+        ),
     }
 
     if device is not None:

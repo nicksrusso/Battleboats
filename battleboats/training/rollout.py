@@ -48,6 +48,7 @@ class Transition:
     advantage: float = 0.0  # filled by GAE
     ret: float = 0.0  # value target = advantage + value, filled by GAE
     skill_idx: int = 0  # which sandbox / unit type conditioned the policy
+    globals: Optional[torch.Tensor] = None  # (GLOBALS_DIM,) board-wide features
 
 
 def heuristic_action(engine, pid: int, rng, eps: float = 1e-9):
@@ -180,6 +181,7 @@ def collect_trajectory(
                     logp=float(logp),
                     value=float(value),
                     skill_idx=skill_idx,
+                    globals=masks.globals.squeeze(0).cpu(),
                 )
             )
 

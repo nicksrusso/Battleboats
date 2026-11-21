@@ -7,11 +7,15 @@ import pytest
 import torch
 
 from battleboats.envs.factory import make_env
+from battleboats.envs.action_masks import ActionMasks
 from battleboats.envs.observation import (
     BOARD_SIZE_OFFSET,
+    CASH_SCALE,
+    GLOBALS_DIM,
     HOME_REL_FREQS,
     HOME_REL_OFFSET,
     HOME_REL_WAVELENGTHS,
+    MAX_TURNS_SCALE,
     POSITION_FREQS,
     POSITION_MAX_WAVELENGTH,
     POSITION_MIN_WAVELENGTH,
@@ -24,10 +28,11 @@ from battleboats.envs.observation import (
     _write_position,
     build_entity_refs,
     build_entity_tokens,
+    build_globals,
 )
 from battleboats.envs.skill_maps import write_merchant_map
 from battleboats.training.checkpoints import load_checkpoint, save_checkpoint
-from battleboats.training.policy import PolicyNetwork
+from battleboats.training.policy import NUM_VERBS, PolicyNetwork
 
 REPO = Path(__file__).resolve().parents[1]
 V001_CANDIDATES = (
@@ -166,3 +171,91 @@ def test_v001_checkpoint_widens_when_present() -> None:
     assert cfg["token_dim"] == TOKEN_DIM
     assert policy.proj.in_features == TOKEN_DIM
     assert torch.count_nonzero(policy.proj.weight[:, TOKEN_DIM - 2 :]) == 0
+
+
+def test_build_globals_include_cash_turn_and_board_size(tmp_path: Path) -> None:
+    path = write_merchant_map(tmp_path / "g.json", 16, 8)
+    env = make_env("full", path, max_turns=8)
+    env.reset(seed=0)
+    g = build_globals(env.engine, 0)
+    assert g.shape == (GLOBALS_DIM,)
+    assert GLOBALS_DIM == 8
+    assert g.dtype == np.float32
+    np.testing.assert_allclose(g[0], env.engine.players[0].cash / CASH_SCALE)
+    np.testing.assert_allclose(g[5], env.engine.turn / MAX_TURNS_SCALE)
+    np.testing.assert_allclose(g[6], 16 / POSITION_SCALE)
+    np.testing.assert_allclose(g[7], 8 / POSITION_SCALE)
+    # Wider board changes only the size slots, not cash or turn at reset.
+    wide = write_merchant_map(tmp_path / "wide.json", 48, 24)
+    other = make_env("full", wide, max_turns=8)
+    other.reset(seed=0)
+    gw = build_globals(other.engine, 0)
+    np.testing.assert_allclose(gw[6], 48 / POSITION_SCALE)
+    np.testing.assert_allclose(gw[7], 24 / POSITION_SCALE)
+    assert not np.allclose(g[6:8], gw[6:8])
+    env.close()
+    other.close()
+
+
+def test_policy_global_token_keeps_entity_indices(tmp_path: Path) -> None:
+    path = write_merchant_map(tmp_path / "idx.json", 8, 8)
+    env = make_env("full", path, max_turns=8)
+    env.reset(seed=0)
+    masks = ActionMasks(env.engine, 0)
+    policy = PolicyNetwork(
+        token_dim=TOKEN_DIM, d_model=32, nhead=2, num_layers=1, dim_feedforward=64, dropout=0.0
+    )
+    policy.eval()
+    assert masks.globals.shape == (1, GLOBALS_DIM)
+    with torch.no_grad():
+        emb, ctx = policy.encode(masks.tokens, masks.pad_mask, masks.globals)
+    assert emb.shape == (1, masks.n, 32)
+    assert emb.shape[1] == masks.tokens.shape[1]
+    assert 0 <= int(masks.asset.float().argmax()) < emb.shape[1]
+    # Pointer-legal assets stay in entity-index range after the global token is prepended.
+    legal = torch.where(masks.asset[0])[0]
+    assert legal.numel() > 0
+    assert int(legal.max()) < emb.shape[1]
+    env.close()
+
+
+def test_verb_logits_change_with_cash() -> None:
+    torch.manual_seed(0)
+    policy = PolicyNetwork(
+        token_dim=TOKEN_DIM, d_model=32, nhead=2, num_layers=1, dim_feedforward=64, dropout=0.0
+    )
+    policy.eval()
+    tokens = torch.randn(1, 4, TOKEN_DIM)
+    pad = torch.ones(1, 4, dtype=torch.bool)
+    low = torch.zeros(1, GLOBALS_DIM)
+    high = torch.zeros(1, GLOBALS_DIM)
+    low[0, 0] = 50.0 / CASH_SCALE
+    high[0, 0] = 250.0 / CASH_SCALE
+    verb_mask = torch.ones(1, NUM_VERBS, dtype=torch.bool)
+    with torch.no_grad():
+        emb_lo, ctx_lo = policy.encode(tokens, pad, low)
+        emb_hi, ctx_hi = policy.encode(tokens, pad, high)
+        assert not torch.allclose(ctx_lo, ctx_hi)
+        logits_lo = policy.head_verb(torch.cat([ctx_lo, emb_lo[:, 0]], dim=-1), verb_mask)
+        logits_hi = policy.head_verb(torch.cat([ctx_hi, emb_hi[:, 0]], dim=-1), verb_mask)
+    assert not torch.allclose(logits_lo, logits_hi)
+
+
+def test_old_checkpoint_without_global_proj_loads(tmp_path: Path) -> None:
+    policy = PolicyNetwork(
+        token_dim=TOKEN_DIM, d_model=32, nhead=2, num_layers=1, dim_feedforward=64, dropout=0.0
+    )
+    path = tmp_path / "no_global.pt"
+    save_checkpoint(policy, path)
+    payload = torch.load(path, map_location="cpu", weights_only=False)
+    state = payload["model_state"]
+    for key in list(state):
+        if key.startswith("global_proj."):
+            del state[key]
+    payload["model_config"].pop("globals_dim", None)
+    torch.save(payload, path)
+
+    loaded, cfg = load_checkpoint(path, torch.device("cpu"))
+    assert "global_proj.weight" in loaded.state_dict()
+    assert loaded.global_proj.in_features == GLOBALS_DIM
+    torch.testing.assert_close(loaded.proj.weight, policy.proj.weight)
