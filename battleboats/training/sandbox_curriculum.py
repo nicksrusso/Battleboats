@@ -285,6 +285,21 @@ def _succeeded(skill: str, env) -> bool:
     return False
 
 
+@dataclass(frozen=True)
+class DecaySpec:
+    """Linear per-turn reward decay. ``horizon`` 0 uses the episode length."""
+
+    horizon: int = 0
+    floor: float = 0.0
+
+
+def _check_decay(spec: DecaySpec, where: str) -> None:
+    if spec.horizon < 0:
+        raise ValueError(f"{where} horizon must be >= 0")
+    if not 0.0 <= spec.floor < 1.0:
+        raise ValueError(f"{where} floor must be in [0, 1)")
+
+
 @dataclass
 class SandboxRunConfig:
     run_dir: Path
@@ -311,9 +326,14 @@ class SandboxRunConfig:
     save_every: int = 10
     wandb: bool = False
     wandb_project: str = "battleboats-skill-pipeline"
+    reward_decay: DecaySpec = field(default_factory=DecaySpec)
+    reward_decay_drills: Dict[str, DecaySpec] = field(default_factory=dict)
     arch: ArchSpec = field(default_factory=ArchSpec)
     ppo: PPOHyper = field(default_factory=PPOHyper)
     init_checkpoint: Optional[Path] = None
+
+    def decay_for(self, skill: str) -> DecaySpec:
+        return self.reward_decay_drills.get(skill, self.reward_decay)
 
     def __post_init__(self) -> None:
         self.run_dir = Path(self.run_dir)
@@ -336,6 +356,10 @@ class SandboxRunConfig:
             raise ValueError("plateau_updates must be >= 1")
         if self.max_updates_per_size < 1:
             raise ValueError("max_updates_per_size must be >= 1")
+        _check_decay(self.reward_decay, "reward_decay")
+        for name, spec in self.reward_decay_drills.items():
+            skill_index(name)
+            _check_decay(spec, f"reward_decay.drills.{name}")
 
 
 def load_sandbox_config(path: Path) -> SandboxRunConfig:
@@ -343,6 +367,19 @@ def load_sandbox_config(path: Path) -> SandboxRunConfig:
     arch = ArchSpec(**raw.get("arch", {}))
     ppo = PPOHyper(**raw.get("ppo", {}))
     init = raw.get("init_checkpoint") or None
+    decay_raw = raw.get("reward_decay") or {}
+    drills_raw = decay_raw.get("drills") or {}
+    global_decay = DecaySpec(
+        horizon=int(decay_raw.get("horizon", 0)),
+        floor=float(decay_raw.get("floor", 0.0)),
+    )
+    drill_decay = {
+        str(name): DecaySpec(
+            horizon=int((spec or {}).get("horizon", global_decay.horizon)),
+            floor=float((spec or {}).get("floor", global_decay.floor)),
+        )
+        for name, spec in drills_raw.items()
+    }
     return SandboxRunConfig(
         run_dir=raw.get("run_dir", "runs/sandboxes"),
         skills=list(raw.get("skills", SKILL_NAMES)),
@@ -368,6 +405,8 @@ def load_sandbox_config(path: Path) -> SandboxRunConfig:
         save_every=int(raw.get("save_every", 10)),
         wandb=bool(raw.get("wandb", False)),
         wandb_project=str(raw.get("wandb_project", "battleboats-skill-pipeline")),
+        reward_decay=global_decay,
+        reward_decay_drills=drill_decay,
         arch=arch,
         ppo=ppo,
         init_checkpoint=Path(init) if init else None,
@@ -665,7 +704,16 @@ def _env(cfg, envs, skill, size):
         path = cfg.run_dir / "maps" / f"{skill}_{size}.json"
         write_two_home_map(path, int(size), int(size))
         turns, _steps = horizon(skill, int(size))
-        env = make_sandbox(skill, str(path), width=int(size), height=int(size), max_turns=turns)
+        decay = cfg.decay_for(skill)
+        env = make_sandbox(
+            skill,
+            str(path),
+            width=int(size),
+            height=int(size),
+            max_turns=turns,
+            decay_horizon=decay.horizon,
+            decay_floor=decay.floor,
+        )
         # The pointer net has no skill embedding. Zero this so a task id is
         # not stored on the transition. Ship type still sits in the token.
         env.skill_index = 0

@@ -5,6 +5,12 @@
 # one income tick below that cost. The cue is a visible enemy ship of that
 # type, because several hulls share a price. The haul-then-buy builder drill
 # stays. build_* uses the same 0.80 / 64 success window as the other goal drills.
+# Every drill's reward decays linearly with the game turn (not the action
+# count): 1 at turn 0, `reward_decay.floor` at `reward_decay.horizon` turns.
+# horizon 0 uses that drill's own max_turns. `drills` can override one skill.
+# A finish before the horizon pays more than stalling, and an earlier turn
+# pays more than a later one. Full-game self-play is not this decay; it stays
+# the terminal ±1.
 # Rewards are divided by that sandbox's running return scale (max of 1, the
 # absolute mean, and the std of discounted returns) so a larger return cannot
 # own the gradient. A size advances when every sandbox's window clears
@@ -60,6 +66,12 @@ allow_unmet: false
 save_every: 10
 wandb: false
 wandb_project: battleboats-skill-pipeline
+
+# horizon 0 -> each drill's max_turns. floor is the multiplier at that horizon.
+# Example override: drills: {merchant: {horizon: 12, floor: 0.05}}
+reward_decay:
+  horizon: 0
+  floor: 0.0
 
 sizes: [3, 4, 5, 6, 8, 10]
 skills:

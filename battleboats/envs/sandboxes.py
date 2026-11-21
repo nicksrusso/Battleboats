@@ -2,21 +2,23 @@
 
 Each one is a 1-player episode on a freshly randomized map. The opponent seat
 is auto-end-turned, except combat, where it plays ``scripted_action``. Rewards
-are sparse completion rewards (+1, then the episode ends):
+are completion rewards scaled by ``turn_decay`` (game turns, not actions):
 
-- merchant: +1 only after the ship has loaded cargo and then unloaded it at home
-- builder: +1 when a ship is bought. Cash starts at 0 and passive home-port
-  income is removed, so the gold has to come from a merchant delivery. The
-  buy itself is the real ``BuildShipAction``.
-- landing: +1 when the landing ship captures the enemy home. No enemy ships.
-  Sightings are the engine's real fog.
-- scouting: random hull vs random hull. +1 on the first fresh sighting of
-  the enemy ship, scaled by the remaining horizon, and the episode ends.
-  The enemy holds still and starts outside the learner ship's sight.
+- merchant: the decayed reward only after the ship has loaded cargo and then
+  unloaded it at home. Loading alone pays 0.
+- builder: the decayed reward when a ship is bought. Cash starts at 0 and
+  passive home-port income is removed, so the gold has to come from a merchant
+  delivery. The buy itself is the real ``BuildShipAction``.
+- landing: the decayed reward when the landing ship captures the enemy home.
+  No enemy ships. Sightings are the engine's real fog.
+- scouting: random hull vs random hull. The decayed reward on the first fresh
+  sighting of the enemy ship, and the episode ends. The enemy holds still and
+  starts outside the learner ship's sight.
 - combat_<type>: a fixed number of turns against a scripted enemy of the
-  same type. The reward is the change in relative combat power, not a kill.
-  On small boards that enemy's strength is scaled down (15% at 3×3, full
-  strength at 10×10). Sightings are real fog.
+  same type. The reward is the change in relative combat power, each change
+  scaled by the turn it happened, paid once at the horizon. A kill is not a
+  win and does not end the episode. On small boards that enemy's strength is
+  scaled down (15% at 3×3, full strength at 10×10). Sightings are real fog.
 - build_<type>: one drill per buildable hull. Cash starts one home-port
   income tick below that hull's cost, and income is clamped at the cost so
   a dearer hull never becomes legal. The cue is a visible enemy ship of the
@@ -85,15 +87,32 @@ def ship_detection_range(scout: ShipType, target: ShipType) -> float:
     return float(me.scouting) * float(them.visibility)
 
 
-def scouting_find_reward(turn: int, horizon_turns: int) -> float:
-    """+1 at the start of the horizon, 0 once the horizon is spent."""
+def turn_decay(turn: int, horizon_turns: int, floor: float = 0.0) -> float:
+    """1 on turn 0, falling linearly to ``floor`` at ``horizon_turns``.
+
+    The clock is the engine turn, which advances when both seats have ended,
+    not the number of move actions. A ship that spends its speed oscillating
+    has to end the turn, and the reward for finishing later is smaller.
+    A completion before the horizon stays strictly above ``floor`` (and above
+    0 when ``floor`` is 0). Past the horizon the value stays at ``floor``.
+    ``horizon_turns <= 0`` means no decay.
+    """
     horizon_turns = int(horizon_turns)
+    floor = float(floor)
     if horizon_turns <= 0:
-        return 0.0
-    remaining = horizon_turns - int(turn)
-    if remaining <= 0:
-        return 0.0
-    return remaining / float(horizon_turns)
+        return 1.0
+    turn = int(turn)
+    if turn >= horizon_turns:
+        return floor
+    if turn <= 0:
+        return 1.0
+    remaining = (horizon_turns - turn) / float(horizon_turns)
+    return floor + (1.0 - floor) * remaining
+
+
+def scouting_find_reward(turn: int, horizon_turns: int, floor: float = 0.0) -> float:
+    """Full reward on a sighting at turn 0, then ``turn_decay``."""
+    return turn_decay(turn, horizon_turns, floor)
 
 
 def opening_cash(cost: int) -> int:
@@ -101,19 +120,40 @@ def opening_cash(cost: int) -> int:
     return max(0, int(cost) - HOME_TURN_INCOME)
 
 
-def typed_build_reward(delay: int, horizon_turns: int) -> float:
+def typed_build_reward(delay: int, horizon_turns: int, floor: float = 0.0) -> float:
     """1 when the cued hull is bought on the turn it becomes affordable.
 
-    ``delay`` is how many engine turns passed after that moment. Waiting
-    pays the remaining fraction of the horizon. A delay past the horizon pays 0.
+    ``delay`` is how many engine turns passed after that moment. The mandatory
+    income wait is not part of the delay. Waiting after the hull is affordable
+    pays ``turn_decay``.
     """
-    horizon_turns = int(horizon_turns)
-    if horizon_turns <= 0:
+    return turn_decay(delay, horizon_turns, floor)
+
+
+def discounted_combat_reward(
+    samples: Sequence[Tuple[int, float]],
+    horizon_turns: int,
+    floor: float = 0.0,
+) -> float:
+    """Weight each change in normalized combat edge by the turn it happens.
+
+    ``samples`` is ``(turn, edge)`` beginning with the opening edge. ``edge``
+    is ``(own power - enemy power) / starting total``, so the undiscounted
+    sum of changes is ``combat_outcome``. An earlier change keeps more of its
+    weight. Weights lie in ``[floor, 1]``, and a ship dies at most once, so
+    the result stays in ``[-1, 1]``. This is not a win bonus.
+    """
+    if len(samples) < 2:
         return 0.0
-    remaining = horizon_turns - int(delay)
-    if remaining <= 0:
-        return 0.0
-    return remaining / float(horizon_turns)
+    total = 0.0
+    prev = float(samples[0][1])
+    for turn, edge in samples[1:]:
+        now = float(edge)
+        delta = now - prev
+        if delta != 0.0:
+            total += turn_decay(int(turn), horizon_turns, floor) * delta
+        prev = now
+    return total
 
 
 def combat_reach(ship_type: ShipType) -> int:
@@ -354,8 +394,15 @@ class _Sandbox(BattleboatsBaseAEC):
         self._rng = random.Random(0)
         self._tmp: Optional[str] = None
         super().__init__(map_json_path=map_json_path, max_turns=max_turns)
+        # 0 in the config means "this episode's max_turns". Floor 0 keeps a
+        # completion on the last legal turn strictly above a stall.
+        self.decay_horizon = int(max_turns)
+        self.decay_floor = 0.0
         fd, self._tmp = tempfile.mkstemp(suffix=".json", prefix="sandbox_")
         os.close(fd)
+
+    def _turn_scale(self, turn: int) -> float:
+        return turn_decay(int(turn), self.decay_horizon, self.decay_floor)
 
     def _possible_agents(self) -> List[str]:
         return [self._agent_name(self.learner_id)]
@@ -496,7 +543,7 @@ class MerchantSandbox(_Sandbox):
             ship = self.engine.ships[sid]
             if ship.type is ShipType.MERCHANT:
                 cargo += ship.cargo
-        return {"cargo": int(cargo)}
+        return {"cargo": int(cargo), "turn": int(self.engine.turn)}
 
     def _reward_after_step(self, agent, action, pre) -> Dict[str, float]:
         rewards = {a: 0.0 for a in self.agents}
@@ -511,7 +558,7 @@ class MerchantSandbox(_Sandbox):
             self._loaded = True
         if self._loaded and cargo < before and not self._hauled:
             self._hauled = True
-            rewards[self._agent_name(0)] = 1.0
+            rewards[self._agent_name(0)] = self._turn_scale(int(pre.get("turn", 0)))
         return rewards
 
     def _is_terminated(self) -> bool:
@@ -596,6 +643,7 @@ class ShipBuildSandbox(_Sandbox):
         return {
             "cargo": self._merchant_cargo(),
             "ships": set(self.engine.players[0].owned_ship_ids),
+            "turn": int(self.engine.turn),
         }
 
     def _reward_after_step(self, agent, action, pre) -> Dict[str, float]:
@@ -610,7 +658,7 @@ class ShipBuildSandbox(_Sandbox):
             for sid in new:
                 self._spent += int(self.engine.ships[sid].stats.cost)
             self._built = True
-            rewards[self._agent_name(0)] = 1.0
+            rewards[self._agent_name(0)] = self._turn_scale(int(pre.get("turn", 0)))
         self._apply_cash()
         return rewards
 
@@ -664,13 +712,14 @@ class LandingSandbox(_Sandbox):
         self._filter((MoveAction, CapturePortAction, EndTurnAction))
 
     def _capture_reward_state(self) -> Dict:
-        return {}
+        assert self.engine is not None
+        return {"turn": int(self.engine.turn)}
 
     def _reward_after_step(self, agent, action, pre) -> Dict[str, float]:
         rewards = {a: 0.0 for a in self.agents}
         if not self._captured and self.engine is not None and self.engine.winner == 0:
             self._captured = True
-            rewards[self._agent_name(0)] = 1.0
+            rewards[self._agent_name(0)] = self._turn_scale(int(pre.get("turn", 0)))
         return rewards
 
     def _is_terminated(self) -> bool:
@@ -683,9 +732,10 @@ class LandingSandbox(_Sandbox):
 class CombatSandbox(_Sandbox):
     """One combat ship versus a scripted enemy of the same type.
 
-    The episode always lasts ``max_turns``. The only reward is
-    ``combat_outcome`` at that horizon. A kill does not end the episode
-    and does not add a bonus.
+    The episode always lasts ``max_turns``. The only reward is the
+    turn-weighted ``combat_outcome``, paid once at that horizon. An early
+    change in relative power keeps more of its weight than the same change
+    later. A kill does not end the episode and does not add a win bonus.
     """
 
     def __init__(
@@ -708,6 +758,7 @@ class CombatSandbox(_Sandbox):
         self.episode_reward = 0.0
         self._my0 = 0.0
         self._en0 = 0.0
+        self._power_samples: List[Tuple[int, float]] = []
         super().__init__(map_json_path, width=width, height=height, max_turns=max_turns)
 
     @property
@@ -763,7 +814,15 @@ class CombatSandbox(_Sandbox):
         self.engine._refresh_sightings()
         self._my0 = side_power(self.engine, 0)
         self._en0 = side_power(self.engine, 1)
+        self._power_samples = [(0, self._edge())]
         self._filter((MoveAction, AttackAction, EndTurnAction))
+
+    def _edge(self) -> float:
+        """Normalized (own power - enemy power). Opening value is the baseline."""
+        denom = float(self._my0) + float(self._en0)
+        if denom <= 0.0 or self.engine is None:
+            return 0.0
+        return (side_power(self.engine, 0) - side_power(self.engine, 1)) / denom
 
     def _capture_reward_state(self) -> Dict:
         return {}
@@ -773,9 +832,10 @@ class CombatSandbox(_Sandbox):
         assert self.engine is not None
         if self._target_id is not None and self._target_id not in self.engine.ships:
             self._killed = True
+        self._power_samples.append((int(self.engine.turn), self._edge()))
         if not self._scored and self.engine.turn >= self.max_turns:
-            self.episode_reward = combat_outcome(
-                self._my0, self._en0, side_power(self.engine, 0), side_power(self.engine, 1)
+            self.episode_reward = discounted_combat_reward(
+                self._power_samples, self.decay_horizon, self.decay_floor
             )
             self._scored = True
             rewards[self._agent_name(0)] = self.episode_reward
@@ -897,7 +957,9 @@ class ScoutingSandbox(_Sandbox):
         assert self.engine is not None
         if not self._found and self._sees_enemy():
             self._found = True
-            self.episode_reward = scouting_find_reward(self.engine.turn, self.max_turns)
+            self.episode_reward = scouting_find_reward(
+                self.engine.turn, self.decay_horizon, self.decay_floor
+            )
             rewards[self._agent_name(0)] = self.episode_reward
         return rewards
 
@@ -1034,7 +1096,9 @@ class TypedBuildSandbox(_Sandbox):
         bought = self.engine.ships[next(iter(new))].type
         if bought is self.ship_type and self._affordable_turn is not None:
             delay = int(pre.get("turn", 0)) - int(self._affordable_turn)
-            self.episode_reward = typed_build_reward(delay, self.max_turns)
+            self.episode_reward = typed_build_reward(
+                delay, self.decay_horizon, self.decay_floor
+            )
             self._built_target = True
             rewards[self._agent_name(0)] = self.episode_reward
         else:
@@ -1051,33 +1115,51 @@ class TypedBuildSandbox(_Sandbox):
         self._show_cue()
 
 
-def make_sandbox(skill: str, map_json_path: str, *, width: int, height: int, max_turns: int):
-    """Build the sandbox named by ``skill`` (see ``SKILL_NAMES``)."""
+def make_sandbox(
+    skill: str,
+    map_json_path: str,
+    *,
+    width: int,
+    height: int,
+    max_turns: int,
+    decay_horizon: int = 0,
+    decay_floor: float = 0.0,
+):
+    """Build the sandbox named by ``skill`` (see ``SKILL_NAMES``).
+
+    ``decay_horizon`` 0 uses this episode's ``max_turns``. The floor is the
+    multiplier once that many turns have passed.
+    """
     if skill == "merchant":
-        return MerchantSandbox(map_json_path, width=width, height=height, max_turns=max_turns)
-    if skill == "builder":
-        return ShipBuildSandbox(map_json_path, width=width, height=height, max_turns=max_turns)
-    if skill == "landing":
-        return LandingSandbox(map_json_path, width=width, height=height, max_turns=max_turns)
-    if skill == "scouting":
-        return ScoutingSandbox(map_json_path, width=width, height=height, max_turns=max_turns)
-    if skill.startswith("combat_"):
-        return CombatSandbox(
+        env = MerchantSandbox(map_json_path, width=width, height=height, max_turns=max_turns)
+    elif skill == "builder":
+        env = ShipBuildSandbox(map_json_path, width=width, height=height, max_turns=max_turns)
+    elif skill == "landing":
+        env = LandingSandbox(map_json_path, width=width, height=height, max_turns=max_turns)
+    elif skill == "scouting":
+        env = ScoutingSandbox(map_json_path, width=width, height=height, max_turns=max_turns)
+    elif skill.startswith("combat_"):
+        env = CombatSandbox(
             map_json_path,
             ship=skill.split("_", 1)[1],
             width=width,
             height=height,
             max_turns=max_turns,
         )
-    if skill.startswith("build_"):
-        return TypedBuildSandbox(
+    elif skill.startswith("build_"):
+        env = TypedBuildSandbox(
             map_json_path,
             ship=skill.split("_", 1)[1],
             width=width,
             height=height,
             max_turns=max_turns,
         )
-    raise ValueError(f"unknown sandbox {skill!r}")
+    else:
+        raise ValueError(f"unknown sandbox {skill!r}")
+    env.decay_floor = float(decay_floor)
+    if int(decay_horizon) > 0:
+        env.decay_horizon = int(decay_horizon)
+    return env
 
 
 def horizon(skill: str, size: int) -> Tuple[int, int]:
