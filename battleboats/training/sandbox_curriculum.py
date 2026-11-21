@@ -25,7 +25,7 @@ from typing import Deque, Dict, List, Optional, Sequence, Tuple
 import torch
 import yaml
 
-from battleboats.envs.sandboxes import horizon, make_sandbox
+from battleboats.envs.sandboxes import combat_scripted_action, horizon, make_sandbox
 from battleboats.envs.skill_maps import write_two_home_map
 from battleboats.training.checkpoints import load_checkpoint, save_checkpoint
 from battleboats.training.curriculum import ArchSpec
@@ -77,7 +77,18 @@ def _succeeded(skill: str, env) -> bool:
         return bool(env.built)
     if skill == "landing":
         return bool(env.captured)
-    return bool(env.killed)
+    return False
+
+
+def _episode_score(skill: str, env) -> float:
+    """Binary success for the economy sandboxes; combat power change for fights."""
+    if skill.startswith("combat_"):
+        return float(getattr(env, "episode_reward", 0.0))
+    return 1.0 if _succeeded(skill, env) else 0.0
+
+
+def _is_combat(skill: str) -> bool:
+    return skill.startswith("combat_")
 
 
 @dataclass
@@ -90,6 +101,9 @@ class SandboxRunConfig:
     success_threshold: float = 0.8
     window: int = 64
     min_updates: int = 3
+    combat_turns_min: int = 6
+    combat_turns_pad: int = 2
+    baseline_episodes: int = 16
     max_episodes_per_size: int = 400
     decisions_per_update: int = 512
     rehearsal_frac: float = 0.15
@@ -133,6 +147,9 @@ def load_sandbox_config(path: Path) -> SandboxRunConfig:
         success_threshold=float(raw.get("success_threshold", 0.8)),
         window=int(raw.get("window", 64)),
         min_updates=int(raw.get("min_updates", 3)),
+        combat_turns_min=int(raw.get("combat_turns_min", 6)),
+        combat_turns_pad=int(raw.get("combat_turns_pad", 2)),
+        baseline_episodes=int(raw.get("baseline_episodes", 16)),
         max_episodes_per_size=int(raw.get("max_episodes_per_size", 400)),
         decisions_per_update=int(raw.get("decisions_per_update", 512)),
         rehearsal_frac=float(raw.get("rehearsal_frac", 0.15)),
@@ -200,6 +217,12 @@ def _run_skill(cfg, state, skill, policy, envs, rng, device, logger):
         window: Deque[float] = deque(state.get("focus_window", []), maxlen=cfg.window)
         episodes = int(state.get("episodes_this_size", 0))
         updates = int(state.get("updates_this_size", 0))
+        threshold = cfg.success_threshold
+        baseline = None
+        if _is_combat(skill):
+            baseline = _combat_baseline(cfg, skill, size, rng)
+            threshold = baseline
+            print(f"[{skill} {size}x{size}] scripted baseline reward {baseline:.3f}")
         cleared = False
         while not cleared:
             if episodes >= cfg.max_episodes_per_size and updates >= cfg.min_updates:
@@ -226,7 +249,7 @@ def _run_skill(cfg, state, skill, policy, envs, rng, device, logger):
             prior = " ".join(f"{k}={v:.2f}" for k, v in metrics.items() if k.startswith("retain_"))
             print(
                 f"[{skill} {size}x{size} u{updates}] window={rate:.2f} "
-                f"({len(window)}/{cfg.window}, gate {cfg.success_threshold:.2f}) "
+                f"({len(window)}/{cfg.window}, gate {threshold:.2f}) "
                 f"ent={metrics.get('entropy', 0):.3f} {prior}"
             )
             logger.log(
@@ -241,20 +264,20 @@ def _run_skill(cfg, state, skill, policy, envs, rng, device, logger):
             if cfg.save_every and updates % cfg.save_every == 0:
                 save_checkpoint(policy, cfg.run_dir / skill / f"update_{updates}.pt")
             _save_state(cfg.run_dir / "state.json", state)
-            if size_advances(updates, window, cfg.window, cfg.success_threshold, cfg.min_updates):
+            if size_advances(updates, window, cfg.window, threshold, cfg.min_updates):
                 cleared = True
         rate = (sum(window) / len(window)) if window else 0.0
         gate_met = cleared
         if not gate_met and not cfg.allow_unmet:
             state["reason"] = (
                 f"{skill} {size}x{size} stopped at window {rate:.2f} "
-                f"< {cfg.success_threshold:.2f} after {episodes} episodes"
+                f"< {threshold:.2f} after {episodes} episodes"
             )
             print(f"[sandboxes] STOP {state['reason']}")
-            _record_size(state, skill, size, rate, gate_met=False)
+            _record_size(state, skill, size, rate, gate_met=False, baseline=baseline)
             _write_summary(cfg, state)
             return False, policy
-        _record_size(state, skill, size, rate, gate_met=gate_met)
+        _record_size(state, skill, size, rate, gate_met=gate_met, baseline=baseline)
         ckpt = cfg.run_dir / skill / f"size_{size}.pt"
         save_checkpoint(policy, ckpt, extra={"skill": skill, "size": size, "gate_met": gate_met})
         save_checkpoint(policy, cfg.run_dir / "latest.pt", extra={"skill": skill, "size": size})
@@ -297,7 +320,7 @@ def _one_update(cfg, state, focus_skill, focus_size, policy, envs, rng, device, 
         env = _env(cfg, envs, skill, size)
         seed = cfg.seed + int(state.get("episode_counter", 0))
         state["episode_counter"] = int(state.get("episode_counter", 0)) + 1
-        _turns, max_steps = horizon(skill, size)
+        _turns, max_steps = _horizon(cfg, skill, size)
         env.reset(seed=seed)
         traj, info = collect_trajectory(
             policy,
@@ -312,7 +335,7 @@ def _one_update(cfg, state, focus_skill, focus_size, policy, envs, rng, device, 
             compute_gae(traj, gamma=cfg.ppo.gamma, lam=cfg.ppo.lam)
             buffer.add(traj)
             decisions += len(traj)
-        ok = 1.0 if _succeeded(skill, env) else 0.0
+        ok = _episode_score(skill, env)
         if role == "focus":
             window.append(ok)
         elif role == "rehearsal":
@@ -328,16 +351,57 @@ def _one_update(cfg, state, focus_skill, focus_size, policy, envs, rng, device, 
     return episodes, metrics
 
 
+def _horizon(cfg, skill: str, size: int):
+    return horizon(
+        skill,
+        size,
+        combat_turns_min=cfg.combat_turns_min,
+        combat_turns_pad=cfg.combat_turns_pad,
+    )
+
+
 def _eval_rate(policy, env, cfg, size, skill) -> float:
-    _turns, max_steps = horizon(skill, size)
-    hits = 0
+    _turns, max_steps = _horizon(cfg, skill, size)
+    scores = []
     rng = random.Random(10_000 + size)
     policy.eval()
     for i in range(cfg.eval_episodes):
         env.reset(seed=20_000 + i)
         collect_trajectory(policy, None, env, 0, rng, max_steps=max_steps, use_env_reward=True)
-        hits += 1 if _succeeded(skill, env) else 0
-    return hits / max(1, cfg.eval_episodes)
+        scores.append(_episode_score(skill, env))
+    return sum(scores) / max(1, len(scores))
+
+
+def _combat_baseline(cfg, skill: str, size: int, rng: random.Random) -> float:
+    """Mean reward of the same heuristic playing the learner seat.
+
+    The size gate is this number: the learned policy has to match the
+    aggressive/flee script, not hit a fixed kill rate. Measured once per
+    size on fresh random maps and random enemy types.
+    """
+    env = _env(cfg, {}, skill, size)
+    _turns, _steps = _horizon(cfg, skill, size)
+    scores = []
+    for i in range(max(1, cfg.baseline_episodes)):
+        env.reset(seed=cfg.seed + 70_000 + size * 100 + i)
+        guard = 0
+        while (
+            not env.terminations.get("player_0", False)
+            and not env.truncations.get("player_0", False)
+            and guard < 500
+        ):
+            legal = env.infos["player_0"]["legal_actions"]
+            action = combat_scripted_action(env.engine, 0, rng)
+            if action not in legal:
+                action = legal[-1]
+            env.step(action)
+            guard += 1
+        scores.append(float(env.episode_reward))
+    try:
+        env.close()
+    except Exception:
+        pass
+    return sum(scores) / len(scores)
 
 
 def _earlier(cfg, state) -> List[Tuple[str, int]]:
@@ -356,7 +420,7 @@ def _env(cfg, envs, skill, size):
     if key not in envs:
         path = cfg.run_dir / "maps" / f"{skill}_{size}.json"
         write_two_home_map(path, int(size), int(size))
-        turns, _steps = horizon(skill, int(size))
+        turns, _steps = _horizon(cfg, skill, int(size))
         env = make_sandbox(skill, str(path), width=int(size), height=int(size), max_turns=turns)
         env.skill_index = skill_index(skill)
         envs[key] = env
@@ -393,9 +457,12 @@ def _load_or_new(cfg, state, device):
     return policy
 
 
-def _record_size(state, skill, size, rate, *, gate_met: bool) -> None:
+def _record_size(state, skill, size, rate, *, gate_met: bool, baseline=None) -> None:
     block = state["summary"].setdefault(skill, {"sizes": {}, "cleared": False})
-    block["sizes"][str(size)] = {"success_rate": rate, "gate_met": gate_met}
+    entry = {"success_rate": rate, "gate_met": gate_met}
+    if baseline is not None:
+        entry["scripted_baseline"] = baseline
+    block["sizes"][str(size)] = entry
 
 
 def _write_summary(cfg, state) -> None:

@@ -1,8 +1,15 @@
 # Sandbox curriculum. One shared policy, skill one-hot.
-# Order: merchant -> builder (buy a ship) -> landing -> combat ship types.
-# A size advances when the rolling window of on-size episodes clears
-# success_threshold. size_mix_frac of episodes are smaller boards of the
-# same sandbox. rehearsal_frac are fresh episodes of earlier sandboxes.
+# Order: merchant -> builder (buy a ship) -> landing -> combat matrix.
+# Combat is one sandbox per learner ship type. Each episode draws the enemy
+# type uniformly from all eight hulls. Episode length is
+# N = max(combat_turns_min, size + combat_turns_pad) turns (6 at 3x3, 12 at 10x10).
+# The combat gate is not success_threshold. It is the mean end-of-episode
+# power reward of the aggressive/flee script playing the learner seat
+# (baseline_episodes random maps). The learned window mean has to reach that.
+# Merchant, builder, and landing still use success_threshold over `window`.
+# A size also needs min_updates before it can advance.
+# size_mix_frac of episodes are smaller boards of the same sandbox.
+# rehearsal_frac are fresh episodes of earlier sandboxes.
 #
 # poetry run python scripts/train_sandboxes.py --config configs/sandboxes.yaml
 #
@@ -22,6 +29,9 @@ seed: 0
 success_threshold: 0.80
 window: 64
 min_updates: 3
+combat_turns_min: 6
+combat_turns_pad: 2
+baseline_episodes: 16
 max_episodes_per_size: 400
 decisions_per_update: 512
 rehearsal_frac: 0.15
@@ -43,6 +53,9 @@ skills:
   - combat_cruiser
   - combat_battleship
   - combat_carrier
+  - combat_merchant
+  - combat_landing
+  - combat_builder
 
 arch:
   d_model: 64

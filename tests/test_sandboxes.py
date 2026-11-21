@@ -21,8 +21,10 @@ from battleboats.envs.sandboxes import (
     LandingSandbox,
     MerchantSandbox,
     ShipBuildSandbox,
-    enemy_strength_scale,
+    combat_outcome,
+    combat_scripted_action,
     make_sandbox,
+    ship_combat_power,
 )
 from battleboats.envs.skill_maps import write_two_home_map
 from battleboats.training.curriculum import ArchSpec
@@ -157,38 +159,55 @@ def test_landing_capture_is_the_only_reward(tmp_path: Path) -> None:
     far_env.close()
 
 
-def test_combat_scripted_enemy_is_weakened_and_killable(tmp_path: Path) -> None:
+def test_combat_power_and_outcome() -> None:
+    destroyer = ship_combat_power(BASE_STATS[ShipType.DESTROYER])
+    merchant = ship_combat_power(BASE_STATS[ShipType.MERCHANT])
+    assert destroyer > merchant > 0
+    assert combat_outcome(destroyer, merchant, destroyer, 0.0) > 0
+    assert combat_outcome(merchant, destroyer, 0.0, destroyer) < 0
+    assert combat_outcome(merchant, destroyer, merchant, destroyer) == 0.0
+
+
+def test_combat_script_attacks_when_stronger_and_runs_when_weaker(tmp_path: Path) -> None:
     path = write_two_home_map(tmp_path / "c.json", 3, 3)
-    env = CombatSandbox(str(path), ship="destroyer", width=3, height=3, max_turns=8)
-    env.reset(seed=0)
-    target = env.engine.ships[env._target_id]
-    assert target.type is ShipType.DESTROYER
-    assert target.stats.strength < BASE_STATS[ShipType.DESTROYER].strength
-    assert env.engine.players[1].cash == 0
-    assert abs(enemy_strength_scale(3) - 0.15) < 1e-9
-    assert enemy_strength_scale(10) == 1.0
-    env.step(EndTurnAction())
-    assert env.engine.current_player == 0
-    assert env.engine.players[1].cash == 0
+    hunter = CombatSandbox(str(path), ship="destroyer", width=3, height=3, max_turns=6)
+    hunter.force_enemy = ShipType.MERCHANT
+    hunter.reset(seed=0)
+    assert hunter.enemy_type is ShipType.MERCHANT
+    action = combat_scripted_action(hunter.engine, 0, random.Random(0))
+    assert isinstance(action, AttackAction)
+    hunter.close()
+
+    runner = CombatSandbox(str(path), ship="merchant", width=3, height=3, max_turns=6)
+    runner.force_enemy = ShipType.DESTROYER
+    runner.reset(seed=0)
+    action = combat_scripted_action(runner.engine, 0, random.Random(0))
+    assert not isinstance(action, AttackAction)
+    runner.close()
+
+
+def test_combat_episode_scores_the_power_change(tmp_path: Path) -> None:
+    path = write_two_home_map(tmp_path / "c.json", 3, 3)
+    env = CombatSandbox(str(path), ship="destroyer", width=3, height=3, max_turns=4)
+    env.force_enemy = ShipType.MERCHANT
     env.reset(seed=1)
-    killed = False
-    for _ in range(24):
+    rng = random.Random(0)
+    for _ in range(80):
         if env.terminations["player_0"] or env.truncations["player_0"]:
             break
         legal = env.infos["player_0"]["legal_actions"]
-        attacks = [a for a in legal if isinstance(a, AttackAction)]
-        if attacks:
-            env.step(attacks[0])
-            if env.killed:
-                killed = True
-                break
-            continue
-        tgt = env.engine.ships.get(env._target_id)
-        if tgt is None:
-            break
-        _step_toward(env, tgt.position)
-    assert killed or env.killed
-    assert env.rewards["player_0"] == 1.0
+        action = combat_scripted_action(env.engine, 0, rng)
+        if action not in legal:
+            action = legal[-1]
+        env.step(action)
+    assert env.truncations["player_0"] is True
+    assert env.engine.turn >= 4
+    expected = combat_outcome(env._my0, env._en0, 
+        sum(ship_combat_power(env.engine.ships[s].stats) for s in env.engine.players[0].owned_ship_ids if s in env.engine.ships),
+        sum(ship_combat_power(env.engine.ships[s].stats) for s in env.engine.players[1].owned_ship_ids if s in env.engine.ships),
+    )
+    assert env.episode_reward == expected
+    assert env.episode_reward > 0
     env.close()
 
 
@@ -222,6 +241,9 @@ def test_window_and_episode_mix() -> None:
     full = [1.0] * 64
     assert size_advances(2, full, 64, 0.8, 3) is False
     assert size_advances(3, full, 64, 0.8, 3) is True
+    # Combat gate: window mean of combat_outcome vs the scripted baseline.
+    assert size_advances(3, [0.1] * 4, 4, 0.0, 3) is True
+    assert size_advances(3, [0.1] * 4, 4, 0.5, 3) is False
     rng = random.Random(0)
     roles = [
         choose_episode(
@@ -259,6 +281,8 @@ def test_load_real_config() -> None:
     assert cfg.success_threshold == 0.8
     assert cfg.window == 64
     assert cfg.min_updates == 3
+    assert cfg.combat_turns_min == 6
+    assert "combat_merchant" in cfg.skills
     assert cfg.device == "cpu"
     assert cfg.wandb is False
     assert cfg.wandb_project == "battleboats-skill-pipeline"
