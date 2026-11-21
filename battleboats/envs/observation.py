@@ -41,6 +41,7 @@ TOKEN_STATS_DIM: int = 6  # one for each ship stat
 TOKEN_SHIP_STATE_DIM: int = 3  # cargo carried, has_attacked, tiles moved this turn
 TOKEN_PORT_STATE_DIM: int = 3  # mats in stockpile, is home, home-port cash
 TOKEN_SIGHTING_STATE_DIM: int = 2  # fresh, staleness
+TOKEN_BOARD_SIZE_DIM: int = 2  # board width, height (same scale as position)
 
 TOKEN_DIM: int = (
     TOKEN_TYPE_ONEHOT_DIM
@@ -50,6 +51,7 @@ TOKEN_DIM: int = (
     + TOKEN_SHIP_STATE_DIM
     + TOKEN_PORT_STATE_DIM
     + TOKEN_SIGHTING_STATE_DIM
+    + TOKEN_BOARD_SIZE_DIM
 )
 
 # Normalization scales — pick sensible defaults; tune later if values consistently
@@ -57,6 +59,9 @@ TOKEN_DIM: int = (
 CASH_SCALE: float = 1500
 STOCKPILE_SCALE: float = 1500
 MAX_TURNS_SCALE: int = 500
+# Cell coordinates and board size share this scale so a tile is the same
+# fraction on every map, including boards much larger than 48x24 later.
+POSITION_SCALE: float = 256
 
 # Ship-stat scales derived from BASE_STATS so they auto-track CSV retunes.
 # Each scale is the max value of that stat across all ship types, so dividing
@@ -83,6 +88,7 @@ STATS_OFFSET: int = OWNER_OFFSET + TOKEN_OWNER_DIM
 SHIP_STATE_OFFSET: int = STATS_OFFSET + TOKEN_STATS_DIM
 PORT_STATE_OFFSET: int = SHIP_STATE_OFFSET + TOKEN_SHIP_STATE_DIM
 SIGHTING_STATE_OFFSET: int = PORT_STATE_OFFSET + TOKEN_PORT_STATE_DIM
+BOARD_SIZE_OFFSET: int = SIGHTING_STATE_OFFSET + TOKEN_SIGHTING_STATE_DIM
 
 # ----------------------------------------------------------------------------
 # Globals field layout
@@ -158,6 +164,7 @@ def build_entity_tokens(engine: "gameEngine", player_id: int) -> np.ndarray:
             _write_enemy_port_sighting_token(row, payload, engine)
         elif kind == "coastline":
             _write_coastline_token(row, payload, engine)
+        _write_board_size(row, engine)
         tokens.append(row)
 
     # Stack into (N, TOKEN_DIM); explicit empty case so callers get a valid
@@ -237,6 +244,16 @@ def build_globals(engine: "gameEngine", player_id: int) -> np.ndarray:
 # ============================================================================
 
 
+def _write_position(row: np.ndarray, x: float, y: float) -> None:
+    row[POSITION_OFFSET] = x / POSITION_SCALE
+    row[POSITION_OFFSET + 1] = y / POSITION_SCALE
+
+
+def _write_board_size(row: np.ndarray, engine: "gameEngine") -> None:
+    row[BOARD_SIZE_OFFSET] = engine.map.width / POSITION_SCALE
+    row[BOARD_SIZE_OFFSET + 1] = engine.map.height / POSITION_SCALE
+
+
 def _coastline_tiles(engine: "gameEngine") -> List[Tuple[int, int]]:
     """All land tiles adjacent to water and NOT currently ports.
 
@@ -271,8 +288,7 @@ def _write_friendly_ship_token(row: np.ndarray, ship, engine: "gameEngine") -> N
 
     # Position, normalized to [0, 1]
     x, y = ship.position
-    row[POSITION_OFFSET] = x / engine.map.width
-    row[POSITION_OFFSET + 1] = y / engine.map.height
+    _write_position(row, x, y)
 
     # Owner — is_friendly=1, is_enemy=0
     row[OWNER_OFFSET] = 1.0
@@ -303,8 +319,7 @@ def _write_friendly_port_token(row: np.ndarray, port, engine: "gameEngine") -> N
 
     # Position, normalized
     x, y = port.position
-    row[POSITION_OFFSET] = x / engine.map.width
-    row[POSITION_OFFSET + 1] = y / engine.map.height
+    _write_position(row, x, y)
 
     # Owner — is_friendly=1
     row[OWNER_OFFSET] = 1.0
@@ -332,8 +347,7 @@ def _write_enemy_ship_sighting_token(row: np.ndarray, sighting, engine: "gameEng
     # Position — last-known location (current if fresh, frozen at last
     # observation if stale)
     x, y = sighting.position
-    row[POSITION_OFFSET] = x / engine.map.width
-    row[POSITION_OFFSET + 1] = y / engine.map.height
+    _write_position(row, x, y)
 
     # Owner — is_enemy=1 (is_friendly stays 0 from zero-init)
     row[OWNER_OFFSET + 1] = 1.0
@@ -366,8 +380,7 @@ def _write_enemy_port_sighting_token(row: np.ndarray, port_sighting, engine: "ga
     # the port's tile; the freshness flag tells the network whether our
     # ownership record is current).
     x, y = port_sighting.position
-    row[POSITION_OFFSET] = x / engine.map.width
-    row[POSITION_OFFSET + 1] = y / engine.map.height
+    _write_position(row, x, y)
 
     # Owner — is_enemy=1 (is_friendly stays 0 from zero-init)
     row[OWNER_OFFSET + 1] = 1.0
@@ -389,5 +402,4 @@ def _write_coastline_token(row: np.ndarray, position: Tuple[int, int], engine: "
     """
     row[COASTLINE_TYPE_INDEX] = 1.0
     x, y = position
-    row[POSITION_OFFSET] = x / engine.map.width
-    row[POSITION_OFFSET + 1] = y / engine.map.height
+    _write_position(row, x, y)

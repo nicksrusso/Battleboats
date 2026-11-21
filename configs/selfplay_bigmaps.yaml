@@ -1,7 +1,9 @@
 # Full-game PPO on random maps from core/config/generate_map.py at three
 # sizes. Each episode draws one map uniformly from the pool. Warm-starts from
-# v0.0.1 (trained on 8x8; the encoder normalizes positions by board size, so
-# the same weights load on any board).
+# v0.0.1 (or a later sandbox checkpoint). Positions and board width/height
+# are divided by POSITION_SCALE (256), so a tile is the same fraction on every
+# board. Older checkpoints with a narrower token_dim widen the first layer
+# and zero-init the new columns.
 #
 # max_turns / max_steps below are the caps for homes ref_home_distance apart. Each map scales both
 # by (home-to-home Manhattan distance / ref_home_distance), never below 1x.
