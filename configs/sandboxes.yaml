@@ -3,9 +3,11 @@
 # Every sandbox is sampled in the same update, with an equal decision budget.
 # Rewards are divided by that sandbox's running return scale (max of 1, the
 # absolute mean, and the std of discounted returns) so a larger return cannot
-# own the gradient. A size advances when every sandbox's window clears
-# success_threshold, and only after min_updates. rehearsal_frac and
-# size_mix_frac are smaller boards of that same sandbox.
+# own the gradient. Merchant, builder, landing, and scouting advance when
+# that sandbox's window clears success_threshold, and only after min_updates.
+# Scouting pays for the first sighting (sooner is better) and gates on that
+# detection rate, not on a win. rehearsal_frac and size_mix_frac are smaller
+# boards of that same sandbox.
 #
 # poetry run python scripts/train_sandboxes.py --config configs/sandboxes.yaml --device cpu
 #
@@ -17,7 +19,12 @@
 # Final weights: runs/sandboxes/latest.pt
 # Per sandbox:   runs/sandboxes/<skill>/final.pt and size_<N>.pt
 # Rates:         runs/sandboxes/summary.json
-# Each update logs <skill>/success_rate and <skill>/mean_reward (wandb too).
+# Each update logs <skill>/success_rate, <skill>/mean_reward, and <skill>/gate
+# (wandb too). The process prints one [wandb] on/off line at startup.
+#
+# Fresh run (otherwise it resumes runs/sandboxes/state.json):
+#   rm -rf runs/sandboxes
+#   poetry run python scripts/train_sandboxes.py --config configs/sandboxes.yaml --device cpu
 #
 # device is configurable. Default is cpu. "auto" uses a GPU when torch can see
 # one (ROCm reports as cuda). Rollouts are single-process Python, so a GPU
@@ -31,13 +38,18 @@ seed: 0
 success_threshold: 0.80
 window: 64
 min_updates: 3
-# Combat drills advance on a plateau of the raw reward and of value loss,
-# not on a win rate. Gain over plateau_updates below plateau_threshold,
-# after combat_min_episodes. max_updates_per_size advances the size anyway.
+# Combat drills advance on a plateau of a moving average of the per-update
+# reward and of value loss, not on a win rate. plateau_smooth is "mean"
+# (trailing mean of plateau_smooth_window updates) or "ema"
+# (alpha = 2 / (window + 1)). Gain of that average over plateau_updates
+# below plateau_threshold, after combat_min_episodes. A combat pass stays
+# passed for that size. max_updates_per_size advances the size anyway.
 plateau_threshold: 0.02
 plateau_updates: 10
+plateau_smooth: mean
+plateau_smooth_window: 10
 combat_min_episodes: 32
-max_updates_per_size: 40
+max_updates_per_size: 150
 max_episodes_per_size: 400
 decisions_per_update: 512
 rehearsal_frac: 0.15
@@ -54,6 +66,7 @@ skills:
   - merchant
   - builder
   - landing
+  - scouting
   - combat_destroyer
   - combat_submarine
   - combat_cruiser

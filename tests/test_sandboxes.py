@@ -21,10 +21,14 @@ from battleboats.envs.sandboxes import (
     CombatSandbox,
     LandingSandbox,
     MerchantSandbox,
+    ScoutingSandbox,
     ShipBuildSandbox,
     combat_outcome,
+    detection_range,
+    detection_reward,
     enemy_strength_scale,
     make_sandbox,
+    scout_layout,
     side_power,
 )
 from battleboats.envs.skill_maps import write_two_home_map
@@ -35,6 +39,10 @@ from battleboats.training.checkpoints import load_checkpoint
 from battleboats.training.curriculum import _new_policy
 from battleboats.training.sandbox_curriculum import (
     SandboxRunConfig,
+    _drill_done,
+    _ensure_runtime_state,
+    _fresh_state,
+    _reset_size_progress,
     choose_episode,
     choose_mixed_episode,
     drill_done,
@@ -43,6 +51,7 @@ from battleboats.training.sandbox_curriculum import (
     return_scale,
     run_sandboxes,
     scale_trajectory,
+    smooth_series,
     window_cleared,
 )
 from battleboats.training.sandbox_skills import SKILL_NAMES, skill_index
@@ -197,6 +206,74 @@ def test_combat_reward_is_the_power_change_at_the_horizon(tmp_path: Path) -> Non
     env.close()
 
 
+def _manhattan(a, b) -> int:
+    return abs(a[0] - b[0]) + abs(a[1] - b[1])
+
+
+def test_detection_reward_is_higher_when_the_sighting_is_sooner() -> None:
+    assert detection_reward(0, 9) == 1.0
+    assert detection_reward(8, 9) == 1.0 / 9
+    assert detection_reward(0, 9) > detection_reward(4, 9) > detection_reward(9, 9)
+    assert detection_reward(9, 9) == 0.0
+
+
+def test_scouting_starts_blind_and_pays_for_the_first_sighting(tmp_path: Path) -> None:
+    path = write_two_home_map(tmp_path / "s.json", 3, 3)
+    env = ScoutingSandbox(str(path), width=3, height=3, max_turns=9)
+    seen = set()
+    for seed in range(8):
+        env.reset(seed=seed)
+        seen.add(env.learner_type)
+        seen.add(env.enemy_type)
+        assert env.found is False
+        assert env.engine.visible_enemy_ships(0) == []
+        hunter = env.engine.ships[env._hunter_id]
+        target = env.engine.ships[env._target_id]
+        reach = detection_range(hunter.type, target.type)
+        assert _manhattan(hunter.position, target.position) > reach
+        legal = env.infos["player_0"]["legal_actions"]
+        assert legal
+        assert all(isinstance(a, (MoveAction, EndTurnAction)) for a in legal)
+        held = target.position
+        env.step(EndTurnAction())
+        assert env.engine.ships[env._target_id].position == held
+        assert env.found is False
+        assert env.rewards["player_0"] == 0.0
+    assert len(seen) >= 3
+    assert any(t in seen for t in (ShipType.MERCHANT, ShipType.LANDING, ShipType.BUILDER))
+    env.reset(seed=1)
+    goal = env.engine.ships[env._target_id].position
+    for _ in range(40):
+        if env.terminations["player_0"] or env.truncations["player_0"]:
+            break
+        legal = env.infos["player_0"]["legal_actions"]
+        moves = [a for a in legal if isinstance(a, MoveAction)]
+        if not moves:
+            env.step(EndTurnAction())
+            continue
+        env.step(min(moves, key=lambda a: _manhattan(a.destination, goal)))
+    assert env.found
+    assert env.terminations["player_0"] is True
+    assert env.episode_reward == detection_reward(env.engine.turn, env.max_turns)
+    assert env.rewards["player_0"] == env.episode_reward
+    assert 0.0 < env.episode_reward <= 1.0
+    env.close()
+
+    far = write_two_home_map(tmp_path / "s10.json", 10, 10)
+    wide = ScoutingSandbox(str(far), width=10, height=10, max_turns=4)
+    wide.reset(seed=2)
+    assert wide.engine.visible_enemy_ships(0) == []
+    for _ in range(6):
+        if wide.terminations["player_0"] or wide.truncations["player_0"]:
+            break
+        wide.step(EndTurnAction())
+    assert wide.found is False
+    assert wide.episode_reward == 0.0
+    assert wide.truncations["player_0"] is True
+    wide.close()
+    assert scout_layout(random.Random(0), 3, 3, reach=20) is None
+
+
 def test_make_sandbox_covers_every_skill(tmp_path: Path) -> None:
     for name in SKILL_NAMES:
         path = write_two_home_map(tmp_path / f"{name}.json", 3, 3)
@@ -338,6 +415,15 @@ def test_combat_plateau_ignores_wins_and_the_update_cap_advances(tmp_path: Path)
         **{**common, "episodes": 10},
     )
     assert not drill_done("merchant", reward_trace=flat, value_trace=[0.4] * 10, **common)
+    assert smooth_series([1.0, 3.0], 2, "mean") == [1.0, 2.0]
+    assert smooth_series([0.0, 0.0, 10.0], 1, "ema") == [0.0, 0.0, 10.0]
+    noisy = [0.05, 0.35] * 12
+    assert not plateaued(noisy, 10, 0.02, higher_is_better=True)
+    assert plateaued(noisy, 10, 0.02, higher_is_better=True, smooth_window=10, smooth="mean")
+    assert plateaued([0.4] * 20, 10, 0.02, higher_is_better=False, smooth_window=10, smooth="ema")
+    # Scouting uses the goal bar, not the combat plateau.
+    assert drill_done("scouting", reward_trace=noisy, value_trace=[0.4] * 10, **{**common, "window": [1.0] * 64})
+    assert not drill_done("scouting", reward_trace=flat, value_trace=[0.4] * 10, **{**common, "window": []})
 
     cfg = SandboxRunConfig(
         run_dir=tmp_path / "cap",
@@ -365,6 +451,35 @@ def test_combat_plateau_ignores_wins_and_the_update_cap_advances(tmp_path: Path)
     assert size["capped"] is True
 
 
+def test_combat_pass_stays_passed_for_that_size(tmp_path: Path) -> None:
+    cfg = SandboxRunConfig(
+        run_dir=tmp_path / "latch",
+        skills=["combat_destroyer", "merchant"],
+        sizes=[3, 4],
+    )
+    assert cfg.plateau_smooth == "mean"
+    assert cfg.plateau_smooth_window == 10
+    state = _fresh_state()
+    _ensure_runtime_state(state, cfg)
+    state["updates_this_size"] = 20
+    state["episodes"]["combat_destroyer"] = 40
+    state["reward_trace"]["combat_destroyer"] = [0.2] * 20
+    state["value_trace"]["combat_destroyer"] = [0.4] * 20
+    assert _drill_done(cfg, state, "combat_destroyer", [])
+    state["reward_trace"]["combat_destroyer"] = [0.05, 0.35] * 16
+    state["value_trace"]["combat_destroyer"] = [0.9, 0.1] * 16
+    assert _drill_done(cfg, state, "combat_destroyer", [])
+    assert state["combat_passed"]["combat_destroyer"] is True
+    assert not _drill_done(cfg, state, "merchant", [])
+    _reset_size_progress(state, cfg)
+    state["updates_this_size"] = 20
+    state["episodes"]["combat_destroyer"] = 40
+    state["reward_trace"]["combat_destroyer"] = [0.01 * i for i in range(1, 21)]
+    state["value_trace"]["combat_destroyer"] = [0.4] * 20
+    assert state["combat_passed"]["combat_destroyer"] is False
+    assert not _drill_done(cfg, state, "combat_destroyer", [])
+
+
 def test_unknown_skill_rejected() -> None:
     try:
         skill_index("league")
@@ -386,8 +501,11 @@ def test_load_real_config() -> None:
     assert cfg.min_updates == 3
     assert cfg.plateau_threshold == 0.02
     assert cfg.plateau_updates == 10
+    assert cfg.plateau_smooth == "mean"
+    assert cfg.plateau_smooth_window == 10
     assert cfg.combat_min_episodes == 32
-    assert cfg.max_updates_per_size == 40
+    assert cfg.max_updates_per_size == 150
+    assert cfg.skills[3] == "scouting"
     assert cfg.device == "cpu"
     assert cfg.wandb is False
     assert cfg.wandb_project == "battleboats-skill-pipeline"
