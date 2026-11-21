@@ -43,7 +43,7 @@ from battleboats.core.actions import (
     MoveAction,
 )
 from battleboats.core.shipyard.ship_type import ShipType
-from battleboats.envs.observation import build_entity_refs, build_entity_tokens
+from battleboats.envs.observation import build_entity_refs, build_entity_tokens, build_globals
 from battleboats.training.policy import NUM_DIRECTIONS, NUM_SHIP_TYPES, NUM_VERBS, VERB_TO_IDX
 
 # Direction order (dx, dy) — fixed; index IS the move/build_port target. Movement
@@ -121,6 +121,12 @@ class ActionMasks:
         """(1, N, TOKEN_DIM) — entity tokens for this state (lazy; rollout only)."""
         toks = build_entity_tokens(self._engine, self.player_id)
         return torch.from_numpy(toks).unsqueeze(0).to(self.device)
+
+    @property
+    def globals(self) -> "torch.Tensor":
+        """(1, GLOBALS_DIM) — cash, counts, turn, board size (lazy; rollout only)."""
+        g = build_globals(self._engine, self.player_id)
+        return torch.from_numpy(g).unsqueeze(0).to(self.device)
 
     @property
     def pad_mask(self) -> "torch.Tensor":

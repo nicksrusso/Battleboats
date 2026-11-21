@@ -51,6 +51,8 @@ from __future__ import annotations
 from typing import Optional
 
 import torch
+
+from battleboats.envs.observation import GLOBALS_DIM
 from torch import nn
 from torch.distributions import Categorical
 
@@ -214,9 +216,11 @@ class PolicyNetwork(nn.Module):
         dim_feedforward: int = 128,
         dropout: float = 0.1,
         skill_count: int = 0,
+        globals_dim: int = GLOBALS_DIM,
     ):
         super().__init__()
         self.d_model = d_model
+        self.globals_dim = int(globals_dim)
         # One-hot skill / unit type, consumed as an embedding added to the
         # pooled context. 0 keeps the old network (no skill input).
         self.skill_count = int(skill_count)
@@ -225,6 +229,11 @@ class PolicyNetwork(nn.Module):
 
         # --- Encoder (identical recipe to TransformerValueModel) ---
         self.proj = nn.Linear(token_dim, d_model)
+        # Board-wide features (cash, counts, turn, board size) become one extra
+        # token so every entity can attend to them. Entity indices stay aligned
+        # with ActionMasks: encode() prepends this token, then slices it off
+        # before the pointer heads.
+        self.global_proj = nn.Linear(self.globals_dim, d_model)
         layer = nn.TransformerEncoderLayer(
             d_model=d_model,
             nhead=nhead,
@@ -249,26 +258,36 @@ class PolicyNetwork(nn.Module):
         self.value_head = nn.Sequential(nn.Linear(d_model, d_model), nn.ReLU(), nn.Linear(d_model, 1))
 
     # --- Encoder ---------------------------------------------------------------
-    def encode(self, tokens: torch.Tensor, pad_mask: torch.Tensor):
+    def encode(self, tokens: torch.Tensor, pad_mask: torch.Tensor, globals=None):
         """tokens: (B, N, token_dim)   pad_mask: (B, N) bool, True = real token.
 
-        Returns (embeddings (B, N, d_model), context (B, d_model)).
-        Same as TransformerValueModel.forward up to the pool, but return BOTH:
-          - embeddings: proj -> encoder(src_key_padding_mask = ~pad_mask).
-            Remember the polarity flip (torch wants True = ignore).
-          - context: masked mean-pool of embeddings over real tokens only
-            (zero the padding rows, sum, divide by pad_mask.sum, clamp >=1).
-        The value head and the categorical heads consume `context`; the pointer
-        heads consume `embeddings`.
-        """
-        x = self.proj(tokens)  # lift 1x27 tokens to 64d vector, size model expects as input
-        x = self.encoder(x, src_key_padding_mask=~pad_mask)  # attend to vectors
+        ``globals`` is ``(B, globals_dim)`` (or omitted, then zeros). It is
+        projected to a single token and prepended for the encoder only, so
+        attention can read cash and the other board-wide features. Returned
+        ``embeddings`` stay ``(B, N, d_model)`` in ActionMasks index order.
 
-        m = pad_mask.unsqueeze(-1)  # add trailing axis
-        summed = (x * m).sum(dim=1)  # zero out padding rows
-        counts = pad_mask.sum(dim=1, keepdim=True).clamp(min=1)  # count how many real tokens the board has
-        pooled = summed / counts  # take mean of embedded tokens
-        return x, pooled
+        Returns (embeddings (B, N, d_model), context (B, d_model)).
+        Context is a masked mean-pool over the global token and every real
+        entity token, so the verb and value heads see cash directly.
+        """
+        B = tokens.shape[0]
+        entity = self.proj(tokens)
+        if globals is None:
+            g_in = tokens.new_zeros(B, self.globals_dim)
+        else:
+            g_in = globals.to(device=tokens.device, dtype=tokens.dtype)
+            if g_in.dim() == 1:
+                g_in = g_in.unsqueeze(0)
+            if g_in.shape[0] == 1 and B > 1:
+                g_in = g_in.expand(B, -1)
+        x = torch.cat([self.global_proj(g_in).unsqueeze(1), entity], dim=1)
+        enc_pad = torch.cat([pad_mask.new_ones((B, 1)), pad_mask], dim=1)
+        x = self.encoder(x, src_key_padding_mask=~enc_pad)
+
+        embeddings = x[:, 1:, :]
+        m = enc_pad.unsqueeze(-1)
+        pooled = (x * m).sum(dim=1) / enc_pad.sum(dim=1, keepdim=True).clamp(min=1)
+        return embeddings, pooled
 
     def _with_skill(self, context: torch.Tensor, skill_idx, batch: int) -> torch.Tensor:
         """Add the skill one-hot (as an embedding) to the pooled context."""
@@ -302,7 +321,7 @@ class PolicyNetwork(nn.Module):
 
     # --- Rollout (sequential sampling) -----------------------------------------
     @torch.no_grad()
-    def act(self, tokens: torch.Tensor, pad_mask: torch.Tensor, masks, skill_idx=None):
+    def act(self, tokens: torch.Tensor, pad_mask: torch.Tensor, masks, skill_idx=None, globals=None):
         """One action for ONE state (rollout). `masks` carries the engine's
         legality info; suggested contract (an object/dict the env builds):
             masks.asset            : (1, N) bool  — selectable assets (Head A)
@@ -350,11 +369,13 @@ class PolicyNetwork(nn.Module):
         # B = how many boards at once. Live rollout is B=1, but we keep the batch
         # axis explicit so the exact same code path also runs batched.
         B = tokens.shape[0]
+        if globals is None:
+            globals = getattr(masks, "globals", None)
 
         # One encoder pass yields BOTH things the heads need: per-entity embeddings
         # (the pointer head scores these) and the pooled board summary `context`
         # (the categorical + value heads consume this). Never re-encode mid-action.
-        embeddings, context = self.encode(tokens, pad_mask)
+        embeddings, context = self.encode(tokens, pad_mask, globals)
         context = self._with_skill(context, skill_idx, B)
 
         # ----- Factor 1: ASSET — "which of my entities acts?" --------------------
@@ -429,6 +450,7 @@ class PolicyNetwork(nn.Module):
         target_idx: torch.Tensor,
         masks,
         skill_idx=None,
+        globals=None,
     ):
         """Re-score a BATCH of stored (asset, verb, target) triples under the
         CURRENT policy. Returns (joint_logprob (B,), entropy (B,), value (B,)).
@@ -456,7 +478,9 @@ class PolicyNetwork(nn.Module):
         isn't in VERBS_WITH_TARGET), so the sentinel is harmless.
         """
         B = tokens.shape[0]
-        embeddings, context = self.encode(tokens, pad_mask)
+        if globals is None:
+            globals = getattr(masks, "globals", None)
+        embeddings, context = self.encode(tokens, pad_mask, globals)
         context = self._with_skill(context, skill_idx, B)
 
         # --- Asset factor: score the batch, then read off the STORED idx's log-prob

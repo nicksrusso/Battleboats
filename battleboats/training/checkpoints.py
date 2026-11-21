@@ -33,6 +33,7 @@ def model_config_of(policy: PolicyNetwork) -> Dict[str, Any]:
         "dim_feedforward": int(layer.linear1.out_features),
         "dropout": float(layer.dropout.p),
         "skill_count": int(getattr(policy, "skill_count", 0)),
+        "globals_dim": int(getattr(policy, "globals_dim", policy.global_proj.in_features)),
     }
 
 
@@ -86,7 +87,15 @@ def load_checkpoint(
         )
     else:
         policy = PolicyNetwork(**cfg)
-    policy.load_state_dict(state)
+    current_keys = set(policy.state_dict())
+    missing = [k for k in current_keys if k not in state]
+    unexpected = [k for k in state if k not in current_keys]
+    # Older checkpoints have no global token projection. Keep the freshly
+    # initialized global_proj and load the rest.
+    only_global_proj = missing and all(k.startswith("global_proj.") for k in missing) and not unexpected
+    policy.load_state_dict(state, strict=not only_global_proj)
+    if only_global_proj:
+        print(f"[checkpoint] initialized new global_proj ({policy.globals_dim} -> {policy.d_model})")
     policy.to(device)
     return policy, cfg
 

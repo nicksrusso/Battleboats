@@ -78,6 +78,7 @@ def ppo_update(
                 batch["target_idx"],
                 masks,
                 skill_idx=batch.get("skill_idx"),
+                globals=batch.get("globals"),
             )
             adv = batch["advantage"]
             # Population std (unbiased=False): a size-1 minibatch — which happens

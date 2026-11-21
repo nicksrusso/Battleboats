@@ -2,7 +2,7 @@
 
 Builds a fog-of-war-filtered observation dict for a given player from the
 engine state. The observation is consumed by the policy network's encoder
-(transformer over entity tokens + small MLP over globals).
+(transformer over entity tokens plus a projected globals token).
 
 Token schema (per docs/policy_architecture.md):
     type_onehot | abs_fourier_pos | home_rel_fourier | owner | stats | ship_state | port_state | sighting_state | board_size
@@ -124,9 +124,9 @@ BOARD_SIZE_OFFSET: int = SIGHTING_STATE_OFFSET + TOKEN_SIGHTING_STATE_DIM
 # Globals field layout
 # ----------------------------------------------------------------------------
 # Fixed-length vector of board-wide summary features that don't fit as
-# per-entity tokens. Concatenated with the pooled token embedding before
-# feeding the policy/value heads. Cheap shortcut for facts the network would
-# otherwise have to aggregate via attention.
+# per-entity tokens. Projected to a special globals token and prepended in
+# the policy encoder so attention, the verb head, and the value head can
+# read cash, turn, and board size without hunting through entity tokens.
 #
 # Fields (in order written by build_globals):
 #   0: own cash                   (cash / CASH_SCALE)
@@ -135,11 +135,13 @@ BOARD_SIZE_OFFSET: int = SIGHTING_STATE_OFFSET + TOKEN_SIGHTING_STATE_DIM
 #   3: sighted enemy ship count   (fresh only, n / SHIP_COUNT_SCALE)
 #   4: sighted enemy port count   (fresh only, n / PORT_COUNT_SCALE)
 #   5: turn                       (turn / MAX_TURNS_SCALE)
+#   6: board width                (width / POSITION_SCALE)
+#   7: board height               (height / POSITION_SCALE)
 
 SHIP_COUNT_SCALE: float = 50  # generous upper bound for fielded ships per side
 PORT_COUNT_SCALE: float = 25  # generous upper bound for owned ports per side
 
-GLOBALS_DIM: int = 6
+GLOBALS_DIM: int = 8
 
 
 # ============================================================================
@@ -257,7 +259,7 @@ def build_globals(engine: "gameEngine", player_id: int) -> np.ndarray:
     Field order matches the layout block at module top:
         0: own cash, 1: own ships, 2: own ports,
         3: sighted enemy ships (fresh), 4: sighted enemy ports (fresh),
-        5: turn
+        5: turn, 6: board width, 7: board height
     """
     g = np.zeros(GLOBALS_DIM, dtype=np.float32)
     player = engine.players[player_id]
@@ -267,6 +269,8 @@ def build_globals(engine: "gameEngine", player_id: int) -> np.ndarray:
     g[3] = sum(1 for s in player.sightings.values() if s.fresh) / SHIP_COUNT_SCALE
     g[4] = sum(1 for s in player.port_sightings.values() if s.fresh) / PORT_COUNT_SCALE
     g[5] = engine.turn / MAX_TURNS_SCALE
+    g[6] = engine.map.width / POSITION_SCALE
+    g[7] = engine.map.height / POSITION_SCALE
     return g
 
 
