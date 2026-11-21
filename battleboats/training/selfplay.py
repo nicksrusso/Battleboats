@@ -42,7 +42,10 @@ class SelfPlayConfig:
     updates: int = 200
     rollout_decisions: int = 2048
     max_turns: int = 80
-    max_steps: int = 400
+    # 400 cut full games near turn 45. 3000 lets an 80-turn game finish
+    # on the turn cap. collect_episodes caps how many games an update
+    # starts, not how many steps one game may take.
+    max_steps: int = 3000
     snapshot_every: int = 5
     snapshot_pool: int = 4
     random_opponent_frac: float = 0.15
@@ -73,7 +76,7 @@ def load_selfplay_config(path: Path) -> SelfPlayConfig:
         updates=int(raw.get("updates", 200)),
         rollout_decisions=int(raw.get("rollout_decisions", 2048)),
         max_turns=int(raw.get("max_turns", 80)),
-        max_steps=int(raw.get("max_steps", 400)),
+        max_steps=int(raw.get("max_steps", 3000)),
         snapshot_every=int(raw.get("snapshot_every", 5)),
         snapshot_pool=int(raw.get("snapshot_pool", 4)),
         random_opponent_frac=float(raw.get("random_opponent_frac", 0.15)),
@@ -207,11 +210,15 @@ def run_selfplay(cfg: SelfPlayConfig, *, resume: bool = True) -> Dict[str, Any]:
         wins = sum(1 for info in infos if info.get("outcome", 0) > 0)
         draws = sum(1 for info in infos if info.get("outcome", 0) == 0)
         n = max(1, len(infos))
+        turns = [int(info.get("turn", 0)) for info in infos]
+        step_counts = [int(info.get("steps", 0)) for info in infos]
         row = {
             "update": update + 1,
             "win_rate": wins / n,
             "draw_rate": draws / n,
             "games": len(infos),
+            "max_turn": max(turns) if turns else 0,
+            "mean_steps": (sum(step_counts) / len(step_counts)) if step_counts else 0.0,
             "pool": snapshots.names(),
             **{f"ppo_{k}": v for k, v in metrics.items()},
         }
@@ -220,7 +227,8 @@ def run_selfplay(cfg: SelfPlayConfig, *, resume: bool = True) -> Dict[str, Any]:
         print(
             f"[selfplay {update + 1}/{cfg.updates}] "
             f"win={row['win_rate']:.2f} draw={row['draw_rate']:.2f} "
-            f"games={row['games']} pool={len(snapshots.paths)} "
+            f"games={row['games']} max_turn={row['max_turn']} "
+            f"mean_steps={row['mean_steps']:.0f} pool={len(snapshots.paths)} "
             f"ent={metrics['entropy']:.3f}"
         )
         if use_wandb:

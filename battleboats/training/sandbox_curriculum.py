@@ -2,12 +2,13 @@
 
 Every sandbox is in the batch together. An update gives each sandbox the
 same decision budget, then a size advances only once every sandbox's own
-gate has cleared. Merchant, builder, landing, and scouting clear on a
-success window. Combat clears on a plateau of smoothed reward and value
-loss, and a combat pass stays passed for that size. A fraction of each
-sandbox's episodes are smaller boards it has already cleared (rehearsal
-and size mix). Rewards are divided by that sandbox's running return scale
-so a drill with a larger return cannot own the gradient.
+gate has cleared. Merchant, builder, landing, scouting, and each
+``build_<type>`` drill clear on a success window. Combat clears on a
+plateau of smoothed reward and value loss, and a combat pass stays passed
+for that size. A fraction of each sandbox's episodes are smaller boards it
+has already cleared (rehearsal and size mix). Rewards are divided by that
+sandbox's running return scale so a drill with a larger return cannot own
+the gradient.
 
 The network is the full-game pointer net (``skill_count=0``). Ship type
 comes from the ordinary observation tokens, not a task id. ``latest.pt``
@@ -243,8 +244,9 @@ def drill_done(
 ) -> bool:
     """Goal drills use the success window. Combat drills use a smoothed plateau.
 
-    Merchant, builder, landing, and scouting need ``need`` on-size episodes
-    at ``success_threshold``. Scouting's success bit is detection, not a win.
+    Merchant, builder, landing, scouting, and ``build_<type>`` need ``need``
+    on-size episodes at ``success_threshold``. Scouting's success bit is
+    detection. A build drill's bit is buying the cued hull, not the speed reward.
 
     Combat compares moving averages of the per-update reward and of value
     loss. Each average has to have improved by less than ``plateau_threshold``
@@ -278,6 +280,8 @@ def _succeeded(skill: str, env) -> bool:
         return bool(env.captured)
     if skill == "scouting":
         return bool(env.found)
+    if skill.startswith("build_"):
+        return bool(getattr(env, "built_target", False))
     return False
 
 

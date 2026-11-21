@@ -17,8 +17,16 @@ are sparse completion rewards (+1, then the episode ends):
   same type. The reward is the change in relative combat power, not a kill.
   On small boards that enemy's strength is scaled down (15% at 3×3, full
   strength at 10×10). Sightings are real fog.
+- build_<type>: one drill per buildable hull. Cash starts one home-port
+  income tick below that hull's cost, and income is clamped at the cost so
+  a dearer hull never becomes legal. The cue is a visible enemy ship of the
+  target type (several hulls share a price, so cash cannot name it). Buying
+  that type pays more the sooner it happens after it becomes affordable.
+  Any other purchase pays 0. The episode ends on the purchase or the horizon.
+  The haul-then-buy ``builder`` drill stays: it is a delivery, not a typed buy.
 
 ``skill_index`` is the one-hot slot the shared policy conditions on.
+The warm-up trains with ``skill_count=0`` and does not read it.
 """
 
 from __future__ import annotations
@@ -40,11 +48,12 @@ from battleboats.core.actions import (
     MerchantUnloadAction,
     MoveAction,
 )
-from battleboats.core.gameEngine import CASH_PER_MATERIAL
+from battleboats.core.gameEngine import CASH_PER_MATERIAL, PORT_PRODUCTION
 from battleboats.core.map.Map import WATER
 from battleboats.core.shipyard.ship_data import BASE_STATS
 from battleboats.core.shipyard.ship_stats import ShipStats
 from battleboats.core.shipyard.ship_type import ShipType
+from battleboats.core.sighting import Sighting
 from battleboats.envs.base_aec import BattleboatsBaseAEC
 from battleboats.training.sandbox_skills import SKILL_INDEX
 
@@ -58,6 +67,10 @@ COMBAT_SHIPS = {
     "battleship": ShipType.BATTLESHIP,
     "carrier": ShipType.CARRIER,
 }
+
+# Every ShipType has a cost in BASE_STATS and is a legal BuildShipAction target.
+BUILD_SHIPS = {ship.name.lower(): ship for ship in ShipType}
+HOME_TURN_INCOME = PORT_PRODUCTION * CASH_PER_MATERIAL
 
 
 def ship_detection_range(scout: ShipType, target: ShipType) -> float:
@@ -78,6 +91,26 @@ def scouting_find_reward(turn: int, horizon_turns: int) -> float:
     if horizon_turns <= 0:
         return 0.0
     remaining = horizon_turns - int(turn)
+    if remaining <= 0:
+        return 0.0
+    return remaining / float(horizon_turns)
+
+
+def opening_cash(cost: int) -> int:
+    """Cash at the start of a typed-build drill: one income tick short of ``cost``."""
+    return max(0, int(cost) - HOME_TURN_INCOME)
+
+
+def typed_build_reward(delay: int, horizon_turns: int) -> float:
+    """1 when the cued hull is bought on the turn it becomes affordable.
+
+    ``delay`` is how many engine turns passed after that moment. Waiting
+    pays the remaining fraction of the horizon. A delay past the horizon pays 0.
+    """
+    horizon_turns = int(horizon_turns)
+    if horizon_turns <= 0:
+        return 0.0
+    remaining = horizon_turns - int(delay)
     if remaining <= 0:
         return 0.0
     return remaining / float(horizon_turns)
@@ -246,6 +279,32 @@ def scouting_layout(rng: random.Random, w: int, h: int, reach: float) -> Optiona
             "home": home,
             "opp": opp,
         }
+    return None
+
+
+def typed_build_layout(rng: random.Random, w: int, h: int) -> Optional[dict]:
+    """Two homes, a cue tile by the enemy home, and a free spawn by ours.
+
+    The cue tile is water and is not the learner's only build tile.
+    """
+    cells = [(x, y) for x in range(w) for y in range(h)]
+    if len(cells) < 4:
+        return None
+    for _ in range(80):
+        home, opp = rng.sample(cells, 2)
+        land = {home, opp}
+        home_water = [p for p in _neighbors(home, w, h) if p not in land]
+        opp_water = [p for p in _neighbors(opp, w, h) if p not in land]
+        if not home_water or not opp_water:
+            continue
+        cue = None
+        for candidate in opp_water:
+            if candidate not in home_water or len(home_water) > 1:
+                cue = candidate
+                break
+        if cue is None:
+            continue
+        return {"home": home, "opp": opp, "cue": cue}
     return None
 
 
@@ -849,6 +908,149 @@ class ScoutingSandbox(_Sandbox):
         self._pass_opponent(scripted=False, stop=lambda: self._found)
 
 
+class TypedBuildSandbox(_Sandbox):
+    """Wait for income, then buy the hull the visible enemy ship names.
+
+    Merchant, destroyer, and submarine all cost 100. Carrier, landing, and
+    builder all cost 250. A cash ceiling cannot tell those apart, and the
+    warm-up has no skill embedding. The cue is an enemy ship token of the
+    target type, the same type one-hot the full game already shows, kept
+    fresh so a large board's fog does not hide it. Home-port income is the
+    real tick (``HOME_TURN_INCOME``) and is then clamped to the target cost,
+    so the learner must EndTurn at least once and a dearer hull stays illegal.
+    Cheaper hulls can be legal earlier. Buying one pays 0 and ends the episode.
+    Buying the cued hull pays ``typed_build_reward``.
+    """
+
+    def __init__(
+        self,
+        map_json_path: str,
+        *,
+        ship: str,
+        width: int,
+        height: int,
+        max_turns: int = 12,
+    ) -> None:
+        if ship not in BUILD_SHIPS:
+            raise ValueError(f"unknown build ship {ship!r}; expected one of {tuple(BUILD_SHIPS)}")
+        self.ship = ship
+        self.skill_name = f"build_{ship}"
+        self.ship_type = BUILD_SHIPS[ship]
+        self._cost = int(BASE_STATS[self.ship_type].cost)
+        self._built_target = False
+        self._built_wrong = False
+        self._affordable_turn: Optional[int] = None
+        self._cue_id: Optional[int] = None
+        self.episode_reward = 0.0
+        self._layout: dict = {}
+        super().__init__(map_json_path, width=width, height=height, max_turns=max_turns)
+
+    @property
+    def built_target(self) -> bool:
+        return self._built_target
+
+    def reset(self, seed: Optional[int] = None, options=None) -> None:
+        if (options or {}).get("scenario"):
+            super().reset(seed=seed, options=options)
+            return
+        last_error: Optional[BaseException] = None
+        for attempt in range(40):
+            rng = random.Random((seed or 0) + attempt * 17)
+            layout = typed_build_layout(rng, self.width, self.height)
+            if layout is None:
+                continue
+            self._layout = layout
+            try:
+                self._write_map([layout["home"], layout["opp"]], [layout["home"]], [layout["opp"]])
+                super().reset(seed=seed, options=options)
+                return
+            except RuntimeError as exc:
+                last_error = exc
+        raise RuntimeError(f"TypedBuildSandbox: no build layout on {self.width}x{self.height}: {last_error}")
+
+    def _configure_scenario(self, seed, options) -> None:
+        assert self.engine is not None
+        self._built_target = False
+        self._built_wrong = False
+        self._affordable_turn = None
+        self.episode_reward = 0.0
+        lay = self._layout
+        cue = lay["cue"]
+        m = self.engine.map
+        if m.terrain[cue] != WATER:
+            raise RuntimeError("TypedBuildSandbox: cue tile is not water")
+        ship = self.engine._spawn_ship(1, self.ship_type, cue)
+        self._cue_id = ship.id
+        if self._adjacent_water(self.engine.players[0].home_port) is None:
+            raise RuntimeError("TypedBuildSandbox: no free water next to home")
+        self.engine.players[0].cash = opening_cash(self._cost)
+        self.engine.players[1].cash = 0
+        self.engine.current_player = 0
+        self.engine.turn = 0
+        self.engine.winner = None
+        self.engine._refresh_sightings()
+        self._show_cue()
+        self._filter((BuildShipAction, EndTurnAction))
+
+    def _show_cue(self) -> None:
+        """Keep the target type in the learner's tokens on every board size."""
+        assert self.engine is not None and self._cue_id is not None
+        ship = self.engine.ships.get(self._cue_id)
+        if ship is None:
+            return
+        self.engine.players[0].sightings[ship.id] = Sighting(
+            ship_id=ship.id,
+            type=ship.type,
+            position=ship.position,
+            turn_seen=self.engine.turn,
+            fresh=True,
+        )
+
+    def _cap_cash(self) -> None:
+        """Real income, stopped at the target cost so a dearer hull stays illegal."""
+        assert self.engine is not None
+        if self._built_target or self._built_wrong:
+            return
+        player = self.engine.players[0]
+        if player.cash > self._cost:
+            player.cash = self._cost
+
+    def _capture_reward_state(self) -> Dict:
+        assert self.engine is not None
+        turn = int(self.engine.turn)
+        if self._affordable_turn is None and self.engine.players[0].cash >= self._cost:
+            self._affordable_turn = turn
+        return {
+            "ships": set(self.engine.players[0].owned_ship_ids),
+            "turn": turn,
+        }
+
+    def _reward_after_step(self, agent, action, pre) -> Dict[str, float]:
+        rewards = {a: 0.0 for a in self.agents}
+        assert self.engine is not None
+        new = set(self.engine.players[0].owned_ship_ids) - set(pre.get("ships", ()))
+        if not new or self._built_target or self._built_wrong:
+            return rewards
+        bought = self.engine.ships[next(iter(new))].type
+        if bought is self.ship_type and self._affordable_turn is not None:
+            delay = int(pre.get("turn", 0)) - int(self._affordable_turn)
+            self.episode_reward = typed_build_reward(delay, self.max_turns)
+            self._built_target = True
+            rewards[self._agent_name(0)] = self.episode_reward
+        else:
+            self._built_wrong = True
+            self.episode_reward = 0.0
+        return rewards
+
+    def _is_terminated(self) -> bool:
+        return self._built_target or self._built_wrong
+
+    def _after_engine_step(self, agent, action) -> None:
+        self._pass_opponent(scripted=False, stop=lambda: self._built_target or self._built_wrong)
+        self._cap_cash()
+        self._show_cue()
+
+
 def make_sandbox(skill: str, map_json_path: str, *, width: int, height: int, max_turns: int):
     """Build the sandbox named by ``skill`` (see ``SKILL_NAMES``)."""
     if skill == "merchant":
@@ -861,6 +1063,14 @@ def make_sandbox(skill: str, map_json_path: str, *, width: int, height: int, max
         return ScoutingSandbox(map_json_path, width=width, height=height, max_turns=max_turns)
     if skill.startswith("combat_"):
         return CombatSandbox(
+            map_json_path,
+            ship=skill.split("_", 1)[1],
+            width=width,
+            height=height,
+            max_turns=max_turns,
+        )
+    if skill.startswith("build_"):
+        return TypedBuildSandbox(
             map_json_path,
             ship=skill.split("_", 1)[1],
             width=width,
@@ -888,4 +1098,10 @@ def horizon(skill: str, size: int) -> Tuple[int, int]:
     if skill.startswith("combat_"):
         turns = max(8, int(size) * 3)
         return turns, max(24, turns * 8)
+    if skill.startswith("build_"):
+        # One income tick makes the hull affordable. Extra turns are the
+        # wait the speed reward penalizes. ``builder`` (no underscore) is
+        # the haul-then-buy drill and is not this branch.
+        turns = max(6, int(size) * 2)
+        return turns, max(12, turns * 2)
     return max(8, size * 3), max(16, size * 8)

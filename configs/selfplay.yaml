@@ -15,7 +15,11 @@ map_count: 4
 updates: 200
 rollout_decisions: 2048
 max_turns: 80
-max_steps: 400
+# Both seats act every turn, and a fleet is many actions before EndTurn.
+# 400 stopped games near turn 45. 3000 reaches the 80-turn cap.
+# Nothing else inside a game caps steps: the update's episode count cap
+# only limits how many games are started.
+max_steps: 3000
 snapshot_every: 5
 snapshot_pool: 4
 random_opponent_frac: 0.15
