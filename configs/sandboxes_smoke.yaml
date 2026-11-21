@@ -1,14 +1,15 @@
-# Trivial 3x3 only, tiny net, CPU. Each sandbox stops when its rolling
-# window clears 0.6, or after max_episodes_per_size (allow_unmet hands off).
+# Short 3x3 run of the harder sandboxes. Advances after min_updates once the
+# window clears 0.5, otherwise allow_unmet hands the checkpoint on.
 #
 # poetry run python scripts/train_sandboxes.py --config configs/sandboxes_smoke.yaml
 
 run_dir: runs/sandboxes_smoke
 device: cpu
 seed: 0
-success_threshold: 0.6
+success_threshold: 0.5
 window: 8
-max_episodes_per_size: 160
+min_updates: 3
+max_episodes_per_size: 80
 decisions_per_update: 128
 rehearsal_frac: 0.15
 size_mix_frac: 0.0

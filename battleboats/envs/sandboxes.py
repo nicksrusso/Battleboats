@@ -5,16 +5,16 @@ is auto-end-turned, except combat, where it plays ``scripted_action``. Rewards
 are sparse completion rewards (+1, then the episode ends):
 
 - merchant: +1 only after the ship has loaded cargo and then unloaded it at home
-- builder: +1 when a ship is bought at a port
-- landing: +1 when the landing ship captures the enemy home (no enemy ships)
-- combat_<type>: +1 when the learner's combat ship destroys the scripted enemy
-  merchant. The target is a merchant because strength 0 means a hit is a kill,
-  so a trivial board is reachable by random actions. The merchant is still
-  driven by the scripted policy (it will walk toward its own satellite).
-
-No distance shaping. The enemy home (landing) and the enemy ship (combat) are
-re-injected into sightings each step so the skill is "go to the thing you can
-see", including on a 10×10 board where port vision does not reach the far corner.
+- builder: +1 when a ship is bought. Cash starts at 0 and passive home-port
+  income is removed, so the gold has to come from a merchant delivery. The
+  buy itself is the real ``BuildShipAction``.
+- landing: +1 when the landing ship captures the enemy home. No enemy ships.
+  Sightings are the engine's real fog.
+- combat_<type>: +1 when the learner destroys a scripted enemy ship of the
+  same type. The scripted policy fights and moves that ship; its owner has
+  no cash, so it does not buy a second fleet. On small boards the enemy's
+  strength is scaled down (15% at 3×3, full strength at 10×10) so a shot can
+  actually kill. The reward is still only the kill. Sightings are real fog.
 
 ``skill_index`` is the one-hot slot the shared policy conditions on.
 """
@@ -38,10 +38,11 @@ from battleboats.core.actions import (
     MerchantUnloadAction,
     MoveAction,
 )
+from battleboats.core.gameEngine import CASH_PER_MATERIAL
 from battleboats.core.map.Map import WATER
 from battleboats.core.shipyard.ship_data import BASE_STATS
+from battleboats.core.shipyard.ship_stats import ShipStats
 from battleboats.core.shipyard.ship_type import ShipType
-from battleboats.core.sighting import PortSighting, Sighting
 from battleboats.envs.base_aec import BattleboatsBaseAEC
 from battleboats.training.sandbox_skills import SKILL_INDEX
 
@@ -58,10 +59,29 @@ COMBAT_SHIPS = {
 
 
 def combat_reach(ship_type: ShipType) -> int:
-    """Tiles at which this ship can both see and hit a merchant."""
+    """Tiles at which this ship can both see and hit another of the same type."""
     me = BASE_STATS[ship_type]
-    them = BASE_STATS[ShipType.MERCHANT]
-    return int(min(me.attack_range, me.scouting * them.visibility))
+    detect = me.scouting * me.visibility
+    return max(1, int(min(me.attack_range, detect)))
+
+
+def enemy_strength_scale(width: int) -> float:
+    """0.15 at 3×3, 1.0 at 10×10. Linear in board width."""
+    t = (int(width) - 3) / 7.0
+    t = min(1.0, max(0.0, t))
+    return 0.15 + 0.85 * t
+
+
+def weaken_strength(stats: ShipStats, scale: float) -> ShipStats:
+    """Copy of ``stats`` with strength multiplied by ``scale`` (at least 1)."""
+    return ShipStats(
+        speed=stats.speed,
+        cost=stats.cost,
+        strength=max(1.0, float(stats.strength) * float(scale)),
+        attack_range=stats.attack_range,
+        visibility=stats.visibility,
+        scouting=stats.scouting,
+    )
 
 
 def _water_neighbor(land: set, w: int, h: int, pos: Pos) -> bool:
@@ -338,12 +358,19 @@ class MerchantSandbox(_Sandbox):
 
 
 class ShipBuildSandbox(_Sandbox):
-    """Empty fleet, cash on hand. +1 when any ship is bought."""
+    """Haul cash home with a merchant, then buy a ship. +1 on the buy only.
+
+    Passive home-port income is removed after every step. Starting cash is 0,
+    and the spawned merchant was not bought, so a ``BuildShipAction`` is legal
+    only after a delivery.
+    """
 
     skill_name = "builder"
 
-    def __init__(self, map_json_path: str, *, width: int, height: int, max_turns: int = 6) -> None:
+    def __init__(self, map_json_path: str, *, width: int, height: int, max_turns: int = 20) -> None:
         self._built = False
+        self._haul_cash = 0
+        self._spent = 0
         super().__init__(map_json_path, width=width, height=height, max_turns=max_turns)
 
     @property
@@ -353,28 +380,74 @@ class ShipBuildSandbox(_Sandbox):
     def reset(self, seed: Optional[int] = None, options=None) -> None:
         if not (options or {}).get("scenario"):
             rng = random.Random(seed)
-            home, opp = _sample_lands(rng, self.width, self.height, 2)
-            self._write_map([home, opp], [home], [opp])
+            placed = False
+            for _ in range(40):
+                home, satellite, opp = _sample_lands(rng, self.width, self.height, 3)
+                land = {home, satellite, opp}
+                if _ports_connected(land, self.width, self.height, home, satellite):
+                    self._write_map([home, satellite, opp], [home, satellite], [opp])
+                    placed = True
+                    break
+            if not placed:
+                raise RuntimeError("ShipBuildSandbox: no route from home to the satellite")
         super().reset(seed=seed, options=options)
 
     def _configure_scenario(self, seed, options) -> None:
         assert self.engine is not None
         self._built = False
+        self._haul_cash = 0
+        self._spent = 0
+        learner = self.engine.players[0]
+        learner.cash = 0
+        satellite = next(p for p in learner.owned_port_positions if p != learner.home_port)
+        self.engine.ports[satellite].stockpile = 500
+        spawn = self._spawn_reaching(learner.home_port, satellite)
+        if spawn is None:
+            raise RuntimeError("ShipBuildSandbox: no water next to home")
+        self.engine._spawn_ship(0, ShipType.MERCHANT, spawn)
         self.engine.current_player = 0
         self.engine.turn = 0
         self.engine.winner = None
         self.engine._refresh_sightings()
-        self._filter((BuildShipAction, EndTurnAction))
+        self._filter(
+            (MoveAction, MerchantLoadAction, MerchantUnloadAction, BuildShipAction, EndTurnAction)
+        )
+        self._apply_cash()
+
+    def _apply_cash(self) -> None:
+        assert self.engine is not None
+        self.engine.players[0].cash = max(0, self._haul_cash - self._spent)
+
+    def _merchant_cargo(self) -> int:
+        assert self.engine is not None
+        cargo = 0
+        for sid in self.engine.players[0].owned_ship_ids:
+            ship = self.engine.ships[sid]
+            if ship.type is ShipType.MERCHANT:
+                cargo += ship.cargo
+        return int(cargo)
 
     def _capture_reward_state(self) -> Dict:
-        return {}
+        assert self.engine is not None
+        return {
+            "cargo": self._merchant_cargo(),
+            "ships": set(self.engine.players[0].owned_ship_ids),
+        }
 
     def _reward_after_step(self, agent, action, pre) -> Dict[str, float]:
         rewards = {a: 0.0 for a in self.agents}
         assert self.engine is not None
-        if not self._built and self.engine.players[0].owned_ship_ids:
+        cargo = self._merchant_cargo()
+        before = int(pre.get("cargo", 0))
+        if cargo < before:
+            self._haul_cash += (before - cargo) * CASH_PER_MATERIAL
+        new = set(self.engine.players[0].owned_ship_ids) - set(pre.get("ships", ()))
+        if new and not self._built:
+            for sid in new:
+                self._spent += int(self.engine.ships[sid].stats.cost)
             self._built = True
             rewards[self._agent_name(0)] = 1.0
+        self._apply_cash()
         return rewards
 
     def _is_terminated(self) -> bool:
@@ -424,22 +497,7 @@ class LandingSandbox(_Sandbox):
         self.engine.turn = 0
         self.engine.winner = None
         self.engine._refresh_sightings()
-        self._reveal_home()
         self._filter((MoveAction, CapturePortAction, EndTurnAction))
-
-    def _reveal_home(self) -> None:
-        assert self.engine is not None
-        home = self.engine.players[1].home_port
-        port = self.engine.ports[home]
-        if port.owner == 0:
-            return
-        self.engine.players[0].port_sightings[home] = PortSighting(
-            position=home,
-            last_known_owner=port.owner,
-            is_home=True,
-            turn_seen=self.engine.turn,
-            fresh=True,
-        )
 
     def _capture_reward_state(self) -> Dict:
         return {}
@@ -456,11 +514,10 @@ class LandingSandbox(_Sandbox):
 
     def _after_engine_step(self, agent, action) -> None:
         self._pass_opponent(scripted=False, stop=lambda: self._captured)
-        self._reveal_home()
 
 
 class CombatSandbox(_Sandbox):
-    """One combat ship versus a scripted enemy merchant. +1 when it is destroyed."""
+    """One combat ship versus a scripted enemy of the same type. +1 on the kill."""
 
     def __init__(
         self,
@@ -496,11 +553,7 @@ class CombatSandbox(_Sandbox):
             try:
                 self._layout = combat_layout(rng, self.width, self.height, reach, close)
                 lay = self._layout
-                self._write_map(
-                    [lay["home"], lay["opp"], lay["satellite"]],
-                    [lay["home"]],
-                    [lay["opp"], lay["satellite"]],
-                )
+                self._write_map([lay["home"], lay["opp"]], [lay["home"]], [lay["opp"]])
                 super().reset(seed=seed, options=options)
                 return
             except RuntimeError as exc:
@@ -518,29 +571,22 @@ class CombatSandbox(_Sandbox):
         if m.terrain[own] != WATER or m.terrain[tgt] != WATER or own == tgt:
             raise RuntimeError("CombatSandbox: spawn tiles are not water")
         hunter = self.engine._spawn_ship(0, self.ship_type, own)
-        target = self.engine._spawn_ship(1, ShipType.MERCHANT, tgt)
+        target = self.engine._spawn_ship(1, self.ship_type, tgt)
+        full = BASE_STATS[self.ship_type].strength
+        scale = enemy_strength_scale(self.width)
+        target.stats = weaken_strength(BASE_STATS[self.ship_type], scale)
+        self._strength_scale = scale
+        if target.stats.strength >= full and scale < 1.0:
+            raise RuntimeError("CombatSandbox: enemy strength was not reduced")
+        # No cash: the scripted policy fights this ship instead of buying more.
+        self.engine.players[1].cash = 0
         self._hunter_id = hunter.id
         self._target_id = target.id
         self.engine.current_player = 0
         self.engine.turn = 0
         self.engine.winner = None
         self.engine._refresh_sightings()
-        self._reveal_target()
         self._filter((MoveAction, AttackAction, EndTurnAction))
-
-    def _reveal_target(self) -> None:
-        if self.engine is None or self._target_id is None:
-            return
-        ship = self.engine.ships.get(self._target_id)
-        if ship is None:
-            return
-        self.engine.players[0].sightings[ship.id] = Sighting(
-            ship_id=ship.id,
-            type=ship.type,
-            position=ship.position,
-            turn_seen=self.engine.turn,
-            fresh=True,
-        )
 
     def _capture_reward_state(self) -> Dict:
         return {}
@@ -562,7 +608,8 @@ class CombatSandbox(_Sandbox):
 
     def _after_engine_step(self, agent, action) -> None:
         self._pass_opponent(scripted=True, stop=lambda: self._killed)
-        self._reveal_target()
+        if self.engine is not None:
+            self.engine.players[1].cash = 0
 
 
 def make_sandbox(skill: str, map_json_path: str, *, width: int, height: int, max_turns: int):
@@ -587,7 +634,7 @@ def make_sandbox(skill: str, map_json_path: str, *, width: int, height: int, max
 def horizon(skill: str, size: int) -> Tuple[int, int]:
     """(max_turns, max_steps) for a square board of this size."""
     if skill == "builder":
-        return 4, 8
+        return max(10, size * 4), max(36, size * 12)
     if skill == "merchant":
         return max(8, size * 4), max(24, size * 12)
     return max(8, size * 3), max(16, size * 8)

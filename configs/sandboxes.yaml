@@ -10,16 +10,18 @@
 # Per sandbox:   runs/sandboxes/<skill>/final.pt and size_<N>.pt
 # Rates:         runs/sandboxes/summary.json
 #
-# device auto uses the GPU when torch.cuda.is_available() (ROCm is cuda).
-# Rollouts are single-process Python, so the GPU only shortens the PPO step.
+# device is configurable. Default is cpu. "auto" uses a GPU when torch can see
+# one (ROCm reports as cuda). Rollouts are single-process Python, so a GPU
+# only shortens the PPO step.
 # wandb: true  or  BATTLEBOATS_WANDB=1
 # Missing wandb or no login is a warning, not a crash.
 
 run_dir: runs/sandboxes
-device: auto
+device: cpu
 seed: 0
-success_threshold: 0.70
-window: 24
+success_threshold: 0.80
+window: 64
+min_updates: 3
 max_episodes_per_size: 400
 decisions_per_update: 512
 rehearsal_frac: 0.15

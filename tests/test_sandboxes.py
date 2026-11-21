@@ -14,11 +14,14 @@ from battleboats.core.actions import (
     MerchantUnloadAction,
     MoveAction,
 )
+from battleboats.core.shipyard.ship_data import BASE_STATS
+from battleboats.core.shipyard.ship_type import ShipType
 from battleboats.envs.sandboxes import (
     CombatSandbox,
     LandingSandbox,
     MerchantSandbox,
     ShipBuildSandbox,
+    enemy_strength_scale,
     make_sandbox,
 )
 from battleboats.envs.skill_maps import write_two_home_map
@@ -88,14 +91,39 @@ def test_merchant_rewards_only_a_completed_haul(tmp_path: Path) -> None:
     env.close()
 
 
-def test_builder_rewards_a_purchased_ship(tmp_path: Path) -> None:
+def test_builder_needs_a_haul_before_the_buy(tmp_path: Path) -> None:
     path = write_two_home_map(tmp_path / "b.json", 3, 3)
-    env = ShipBuildSandbox(str(path), width=3, height=3, max_turns=4)
+    env = ShipBuildSandbox(str(path), width=3, height=3, max_turns=12)
     env.reset(seed=0)
-    legal = env.infos["player_0"]["legal_actions"]
-    builds = [a for a in legal if isinstance(a, BuildShipAction)]
-    assert builds
-    env.step(builds[0])
+    assert env.engine.players[0].cash == 0
+    assert not any(isinstance(a, BuildShipAction) for a in env.infos["player_0"]["legal_actions"])
+    env.step(EndTurnAction())
+    assert env.engine.players[0].cash == 0
+    assert env.built is False
+    home = env.engine.players[0].home_port
+    satellite = next(p for p in env.engine.players[0].owned_port_positions if p != home)
+    loaded = False
+    for _ in range(40):
+        if env.terminations["player_0"] or env.truncations["player_0"]:
+            break
+        legal = env.infos["player_0"]["legal_actions"]
+        builds = [a for a in legal if isinstance(a, BuildShipAction)]
+        loads = [a for a in legal if isinstance(a, MerchantLoadAction)]
+        unloads = [a for a in legal if isinstance(a, MerchantUnloadAction)]
+        if builds:
+            env.step(builds[0])
+            break
+        if loads and not loaded:
+            env.step(loads[0])
+            loaded = True
+            assert env.built is False
+            continue
+        if unloads and loaded:
+            env.step(unloads[0])
+            assert env.engine.players[0].cash > 0
+            assert env.built is False
+            continue
+        _step_toward(env, satellite if not loaded else home)
     assert env.built
     assert env.rewards["player_0"] == 1.0
     assert env.terminations["player_0"] is True
@@ -119,28 +147,47 @@ def test_landing_capture_is_the_only_reward(tmp_path: Path) -> None:
     assert env.captured
     assert env.rewards["player_0"] == 1.0
     env.close()
+    from battleboats.envs.base_aec import BattleboatsBaseAEC
+
+    far_path = write_two_home_map(tmp_path / "far.json", 10, 10)
+    far_env = LandingSandbox(str(far_path), width=10, height=10, max_turns=8)
+    far_env._write_map([(0, 0), (9, 9)], [(0, 0)], [(9, 9)])
+    BattleboatsBaseAEC.reset(far_env, seed=0)
+    assert (9, 9) not in far_env.engine.players[0].port_sightings
+    far_env.close()
 
 
-def test_combat_scripted_opponent_and_kill(tmp_path: Path) -> None:
+def test_combat_scripted_enemy_is_weakened_and_killable(tmp_path: Path) -> None:
     path = write_two_home_map(tmp_path / "c.json", 3, 3)
     env = CombatSandbox(str(path), ship="destroyer", width=3, height=3, max_turns=8)
     env.reset(seed=0)
-    assert env.skill_index == skill_index("combat_destroyer")
-    # One learner end-turn must let the scripted merchant act without crashing.
+    target = env.engine.ships[env._target_id]
+    assert target.type is ShipType.DESTROYER
+    assert target.stats.strength < BASE_STATS[ShipType.DESTROYER].strength
+    assert env.engine.players[1].cash == 0
+    assert abs(enemy_strength_scale(3) - 0.15) < 1e-9
+    assert enemy_strength_scale(10) == 1.0
     env.step(EndTurnAction())
     assert env.engine.current_player == 0
+    assert env.engine.players[1].cash == 0
     env.reset(seed=1)
-    for _ in range(20):
+    killed = False
+    for _ in range(24):
         if env.terminations["player_0"] or env.truncations["player_0"]:
             break
         legal = env.infos["player_0"]["legal_actions"]
         attacks = [a for a in legal if isinstance(a, AttackAction)]
         if attacks:
             env.step(attacks[0])
+            if env.killed:
+                killed = True
+                break
+            continue
+        tgt = env.engine.ships.get(env._target_id)
+        if tgt is None:
             break
-        tgt = env.engine.ships[env._target_id].position
-        _step_toward(env, tgt)
-    assert env.killed
+        _step_toward(env, tgt.position)
+    assert killed or env.killed
     assert env.rewards["player_0"] == 1.0
     env.close()
 
@@ -170,6 +217,11 @@ def test_skill_one_hot_changes_the_context() -> None:
 def test_window_and_episode_mix() -> None:
     assert window_cleared([1, 1, 0], need=4, threshold=0.5) is False
     assert window_cleared([1, 0, 1, 1], need=4, threshold=0.7) is True
+    from battleboats.training.sandbox_curriculum import size_advances
+
+    full = [1.0] * 64
+    assert size_advances(2, full, 64, 0.8, 3) is False
+    assert size_advances(3, full, 64, 0.8, 3) is True
     rng = random.Random(0)
     roles = [
         choose_episode(
@@ -204,6 +256,10 @@ def test_load_real_config() -> None:
     assert cfg.skills[2] == "landing"
     assert cfg.sizes[-1] == 10
     assert cfg.rehearsal_frac == 0.15
+    assert cfg.success_threshold == 0.8
+    assert cfg.window == 64
+    assert cfg.min_updates == 3
+    assert cfg.device == "cpu"
     assert cfg.wandb is False
     assert cfg.wandb_project == "battleboats-skill-pipeline"
 
@@ -222,6 +278,7 @@ def test_tiny_builder_curriculum_writes_summary(tmp_path: Path) -> None:
         size_mix_frac=0.0,
         eval_episodes=0,
         allow_unmet=True,
+        min_updates=1,
         arch=ArchSpec(d_model=32, nhead=2, num_layers=1, dim_feedforward=64, dropout=0.0),
         ppo=PPOHyper(epochs=1, minibatch_size=4, ent_coef=0.01),
     )
