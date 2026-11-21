@@ -17,14 +17,18 @@ from battleboats.core.actions import (
 )
 from battleboats.core.shipyard.ship_data import BASE_STATS
 from battleboats.core.shipyard.ship_type import ShipType
+from battleboats.envs.base_aec import BattleboatsBaseAEC
 from battleboats.envs.sandboxes import (
     CombatSandbox,
     LandingSandbox,
     MerchantSandbox,
+    ScoutingSandbox,
     ShipBuildSandbox,
     combat_outcome,
     enemy_strength_scale,
     make_sandbox,
+    scouting_find_reward,
+    ship_detection_range,
     side_power,
 )
 from battleboats.envs.skill_maps import write_two_home_map
@@ -35,16 +39,20 @@ from battleboats.training.checkpoints import load_checkpoint
 from battleboats.training.curriculum import _new_policy
 from battleboats.training.sandbox_curriculum import (
     SandboxRunConfig,
+    _drill_done,
     choose_episode,
     choose_mixed_episode,
     drill_done,
+    full_smooth,
     load_sandbox_config,
     plateaued,
     return_scale,
     run_sandboxes,
     scale_trajectory,
+    smooth_series,
     window_cleared,
 )
+from battleboats.training.wandb_log import init_wandb
 from battleboats.training.sandbox_skills import SKILL_NAMES, skill_index
 
 
@@ -302,12 +310,22 @@ def test_return_scale_shrinks_only_the_larger_sandbox() -> None:
     assert large["mean"] == 50.0
 
 
-def test_combat_plateau_ignores_wins_and_the_update_cap_advances(tmp_path: Path) -> None:
-    flat = [0.2] * 10
+def test_combat_plateau_uses_a_moving_average_and_stays_passed(tmp_path: Path) -> None:
+    flat = [0.2] * 20
     assert plateaued(flat, 10, 0.02, higher_is_better=True)
-    assert plateaued([0.4] * 10, 10, 0.02, higher_is_better=False)
-    assert not plateaued([0.01 * i for i in range(1, 11)], 10, 0.02, higher_is_better=True)
+    assert plateaued([0.4] * 20, 10, 0.02, higher_is_better=False)
+    rising = [0.01 * (i + 1) for i in range(30)]
+    assert not plateaued(full_smooth(rising, method="mean", span=8), 10, 0.02, higher_is_better=True)
     assert not plateaued([1.0, 0.5], 2, 0.02, higher_is_better=False)
+    # The per-update swing that kept a raw 2% test from firing.
+    swing = [0.08, 0.30] * 20
+    assert not plateaued(swing, 10, 0.02, higher_is_better=True)
+    smoothed = full_smooth(swing, method="mean", span=8)
+    assert smoothed
+    assert max(smoothed) - min(smoothed) < 1e-9
+    assert abs(smoothed[-1] - 0.19) < 1e-6
+    assert plateaued(smoothed, 10, 0.02, higher_is_better=True)
+    assert abs(smooth_series([1.0, 3.0], method="ema", span=1)[-1] - 3.0) < 1e-9
     common = dict(
         updates=10,
         window=[0.0] * 64,
@@ -317,27 +335,62 @@ def test_combat_plateau_ignores_wins_and_the_update_cap_advances(tmp_path: Path)
         min_updates=3,
         plateau_updates=10,
         plateau_threshold=0.02,
+        plateau_smooth="mean",
+        plateau_smooth_span=8,
         combat_min_episodes=32,
     )
     assert drill_done(
         "combat_destroyer",
-        reward_trace=flat,
-        value_trace=[0.4] * 10,
+        reward_trace=swing,
+        value_trace=[0.5, 0.2] * 20,
         **common,
     )
     assert not drill_done(
         "combat_destroyer",
-        reward_trace=[0.01 * i for i in range(1, 11)],
-        value_trace=[0.4] * 10,
+        reward_trace=rising,
+        value_trace=[0.4] * len(rising),
         **common,
     )
     assert not drill_done(
         "combat_destroyer",
         reward_trace=flat,
-        value_trace=[0.4] * 10,
+        value_trace=[0.4] * len(flat),
         **{**common, "episodes": 10},
     )
-    assert not drill_done("merchant", reward_trace=flat, value_trace=[0.4] * 10, **common)
+    assert not drill_done("merchant", reward_trace=flat, value_trace=[0.4] * len(flat), **common)
+    # A later climb would reopen the gate. already_passed keeps this size shut.
+    climbed = flat + [0.2 + 0.05 * i for i in range(1, 15)]
+    assert not drill_done(
+        "combat_destroyer",
+        reward_trace=climbed,
+        value_trace=[0.4] * len(climbed),
+        **common,
+    )
+    assert drill_done(
+        "combat_destroyer",
+        reward_trace=climbed,
+        value_trace=[0.4] * len(climbed),
+        already_passed=True,
+        **common,
+    )
+    cfg = SandboxRunConfig(
+        run_dir=tmp_path / "latch",
+        skills=["combat_destroyer"],
+        sizes=[3],
+        window=64,
+        min_updates=3,
+    )
+    state = {
+        "updates_this_size": 10,
+        "episodes": {"combat_destroyer": 40},
+        "reward_trace": {"combat_destroyer": list(swing)},
+        "value_trace": {"combat_destroyer": [0.5, 0.2] * 20},
+        "combat_passed": {},
+    }
+    assert _drill_done(cfg, state, "combat_destroyer", [0.0])
+    assert state["combat_passed"]["combat_destroyer"] is True
+    state["reward_trace"]["combat_destroyer"] = list(climbed)
+    assert _drill_done(cfg, state, "combat_destroyer", [0.0])
 
     cfg = SandboxRunConfig(
         run_dir=tmp_path / "cap",
@@ -365,6 +418,20 @@ def test_combat_plateau_ignores_wins_and_the_update_cap_advances(tmp_path: Path)
     assert size["capped"] is True
 
 
+def test_unknown_smooth_rejected(tmp_path: Path) -> None:
+    try:
+        SandboxRunConfig(
+            run_dir=tmp_path / "bad",
+            skills=["merchant"],
+            sizes=[3],
+            plateau_smooth="kalman",
+        )
+    except ValueError as exc:
+        assert "plateau_smooth" in str(exc)
+    else:
+        raise AssertionError("unknown smooth method should be rejected")
+
+
 def test_unknown_skill_rejected() -> None:
     try:
         skill_index("league")
@@ -384,10 +451,13 @@ def test_load_real_config() -> None:
     assert cfg.success_threshold == 0.8
     assert cfg.window == 64
     assert cfg.min_updates == 3
+    assert cfg.skills[3] == "scouting"
     assert cfg.plateau_threshold == 0.02
     assert cfg.plateau_updates == 10
+    assert cfg.plateau_smooth == "mean"
+    assert cfg.plateau_smooth_span == 8
     assert cfg.combat_min_episodes == 32
-    assert cfg.max_updates_per_size == 40
+    assert cfg.max_updates_per_size == 150
     assert cfg.device == "cpu"
     assert cfg.wandb is False
     assert cfg.wandb_project == "battleboats-skill-pipeline"
@@ -457,3 +527,126 @@ def test_tiny_builder_curriculum_writes_summary(tmp_path: Path) -> None:
         assert tuple(value.shape) == tuple(game.state_dict()[key].shape)
     ctx = torch.zeros(1, loaded.d_model)
     assert torch.equal(loaded._with_skill(ctx, 0, 1), loaded._with_skill(ctx, 7, 1))
+
+
+def test_scouting_starts_hidden_and_pays_sooner(tmp_path: Path) -> None:
+    assert scouting_find_reward(0, 4) == 1.0
+    assert abs(scouting_find_reward(1, 4) - 0.75) < 1e-9
+    assert scouting_find_reward(4, 4) == 0.0
+    assert ship_detection_range(ShipType.SUBMARINE, ShipType.CARRIER) == 4.0
+    from battleboats.envs.sandboxes import horizon
+
+    assert horizon("scouting", 3) == (12, 96)
+    assert horizon("scouting", 10) == (40, 320)
+
+    path = write_two_home_map(tmp_path / "s.json", 8, 8)
+    layout = {
+        "learner_ship": (0, 1),
+        "enemy_ship": (0, 6),
+        "home": (0, 0),
+        "opp": (7, 7),
+    }
+
+    def open_fixed(turns: int) -> ScoutingSandbox:
+        env = ScoutingSandbox(str(path), width=8, height=8, max_turns=turns)
+        env._learner_type = ShipType.SUBMARINE
+        env._enemy_type = ShipType.CARRIER
+        env._layout = layout
+        env._write_map([layout["home"], layout["opp"]], [layout["home"]], [layout["opp"]])
+        BattleboatsBaseAEC.reset(env, seed=0)
+        return env
+
+    env = open_fixed(4)
+    assert env.found is False
+    assert env._sees_enemy() is False
+    # The home port would see this carrier. Only the submarine's own range counts.
+    assert not env.engine.players[0].owned_port_positions
+    legal = env.infos["player_0"]["legal_actions"]
+    assert legal
+    assert all(isinstance(a, (MoveAction, EndTurnAction)) for a in legal)
+    env.step(next(a for a in legal if isinstance(a, MoveAction) and a.destination == (0, 2)))
+    assert env.found is True
+    assert env.rewards["player_0"] == 1.0
+    assert env.terminations["player_0"] is True
+    env.close()
+
+    late = open_fixed(4)
+    late.step(EndTurnAction())
+    assert late.found is False
+    assert late.engine.turn == 1
+    legal = late.infos["player_0"]["legal_actions"]
+    late.step(next(a for a in legal if isinstance(a, MoveAction) and a.destination == (0, 2)))
+    assert late.found is True
+    assert abs(late.episode_reward - 0.75) < 1e-9
+    late.close()
+
+    expired = open_fixed(1)
+    expired.step(EndTurnAction())
+    assert expired.found is False
+    assert expired.truncations["player_0"] is True
+    assert expired.rewards["player_0"] == 0.0
+    expired.close()
+
+    seen = set()
+    path3 = write_two_home_map(tmp_path / "s3.json", 3, 3)
+    for seed in range(12):
+        probe = ScoutingSandbox(str(path3), width=3, height=3, max_turns=6)
+        probe.reset(seed=seed)
+        own = probe.engine.ships[probe._hunter_id]
+        tgt = probe.engine.ships[probe._target_id]
+        dist = abs(own.position[0] - tgt.position[0]) + abs(own.position[1] - tgt.position[1])
+        assert dist > ship_detection_range(own.type, tgt.type)
+        assert probe.found is False
+        assert probe._sees_enemy() is False
+        seen.add((own.type, tgt.type))
+        probe.close()
+    assert len(seen) >= 2
+
+
+def test_scouting_gate_is_detection_not_a_plateau() -> None:
+    common = dict(
+        updates=3,
+        episodes=64,
+        reward_trace=[0.2] * 20,
+        value_trace=[0.4] * 20,
+        success_threshold=0.8,
+        need=64,
+        min_updates=3,
+        plateau_updates=10,
+        plateau_threshold=0.02,
+        combat_min_episodes=32,
+    )
+    assert drill_done("scouting", window=[1.0] * 64, **common)
+    assert not drill_done("scouting", window=[0.0] * 64, **common)
+    assert not drill_done("merchant", window=[1.0] * 10, **common)
+
+
+def test_scouting_update_logs_the_drill_and_wandb_state(tmp_path: Path, capsys) -> None:
+    cfg = SandboxRunConfig(
+        run_dir=tmp_path / "scout",
+        skills=["scouting"],
+        sizes=[3],
+        device="cpu",
+        success_threshold=0.99,
+        window=8,
+        max_updates_per_size=1,
+        max_episodes_per_size=8,
+        decisions_per_update=4,
+        rehearsal_frac=0.0,
+        size_mix_frac=0.0,
+        eval_episodes=0,
+        allow_unmet=True,
+        min_updates=5,
+        wandb=False,
+        arch=ArchSpec(d_model=32, nhead=2, num_layers=1, dim_feedforward=64, dropout=0.0),
+        ppo=PPOHyper(epochs=1, minibatch_size=2, ent_coef=0.01),
+    )
+    result = run_sandboxes(cfg, resume=False)
+    assert result["ok"]
+    logged = capsys.readouterr().out
+    assert "[wandb] off (config wandb=false, BATTLEBOATS_WANDB unset)" in logged
+    assert "wandb=off" in logged
+    row = json.loads((tmp_path / "scout" / "history.jsonl").read_text().splitlines()[0])
+    for key in ("success_rate", "mean_reward", "gate", "return_scale", "reward_smooth"):
+        assert f"scouting/{key}" in row
+    assert init_wandb(False, project="battleboats-skill-pipeline", config={}).enabled is False
