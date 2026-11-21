@@ -1,5 +1,6 @@
-"""Sparse sandboxes, the size gate, and the skill one-hot."""
+"""Sparse sandboxes, the mixed warm-up, and the skill-free pointer net."""
 
+import json
 import random
 from pathlib import Path
 
@@ -28,11 +29,16 @@ from battleboats.envs.skill_maps import write_two_home_map
 from battleboats.training.curriculum import ArchSpec
 from battleboats.training.loop import PPOHyper
 from battleboats.training.policy import PolicyNetwork
+from battleboats.training.checkpoints import load_checkpoint
+from battleboats.training.curriculum import _new_policy
 from battleboats.training.sandbox_curriculum import (
     SandboxRunConfig,
     choose_episode,
+    choose_mixed_episode,
     load_sandbox_config,
+    return_scale,
     run_sandboxes,
+    scale_trajectory,
     window_cleared,
 )
 from battleboats.training.sandbox_skills import SKILL_NAMES, skill_index
@@ -240,6 +246,63 @@ def test_window_and_episode_mix() -> None:
     assert roles.count("focus") > 150
 
 
+def test_mixed_sampling_is_even_across_sandboxes() -> None:
+    rng = random.Random(0)
+    skills = ["merchant", "builder", "landing"]
+    counts = {name: 0 for name in skills}
+    roles = []
+    for i in range(300):
+        skill = skills[i % len(skills)]
+        picked, size, role = choose_mixed_episode(
+            rng,
+            skills=skills,
+            focus_size=6,
+            smaller_sizes=[3, 4],
+            rehearsal_frac=0.15,
+            size_mix_frac=0.2,
+            skill=skill,
+        )
+        assert picked == skill
+        assert size in (6, 3, 4)
+        counts[picked] += 1
+        roles.append(role)
+    assert counts == {"merchant": 100, "builder": 100, "landing": 100}
+    assert roles.count("focus") > roles.count("rehearsal")
+    assert roles.count("rehearsal") > 10
+    focus_only, _, role = choose_mixed_episode(
+        rng,
+        skills=skills,
+        focus_size=10,
+        smaller_sizes=[],
+        rehearsal_frac=1.0,
+        size_mix_frac=1.0,
+        skill="merchant",
+    )
+    assert (focus_only, role) == ("merchant", "focus")
+
+
+def test_return_scale_shrinks_only_the_larger_sandbox() -> None:
+    assert return_scale(0.0, 0.0, 1) == 1.0
+
+    class _Step:
+        def __init__(self, reward: float) -> None:
+            self.reward = reward
+
+    small = {"mean": 0.0, "m2": 0.0, "count": 0}
+    large = {"mean": 0.0, "m2": 0.0, "count": 0}
+    last_small = _Step(1.0)
+    last_large = _Step(50.0)
+    for _ in range(6):
+        last_small = _Step(1.0)
+        last_large = _Step(50.0)
+        assert scale_trajectory([last_small], small, gamma=1.0) == 1.0
+        assert scale_trajectory([last_large], large, gamma=1.0) == 50.0
+    assert last_small.reward == 1.0
+    assert abs(last_large.reward - 1.0) < 1e-6
+    assert small["mean"] == 1.0
+    assert large["mean"] == 50.0
+
+
 def test_unknown_skill_rejected() -> None:
     try:
         skill_index("league")
@@ -262,6 +325,33 @@ def test_load_real_config() -> None:
     assert cfg.device == "cpu"
     assert cfg.wandb is False
     assert cfg.wandb_project == "battleboats-skill-pipeline"
+
+
+def test_one_update_trains_every_sandbox(tmp_path: Path) -> None:
+    cfg = SandboxRunConfig(
+        run_dir=tmp_path / "mix",
+        skills=["merchant", "landing"],
+        sizes=[3],
+        device="cpu",
+        success_threshold=0.0,
+        window=1,
+        max_episodes_per_size=4,
+        decisions_per_update=4,
+        rehearsal_frac=0.0,
+        size_mix_frac=0.0,
+        eval_episodes=0,
+        allow_unmet=True,
+        min_updates=1,
+        arch=ArchSpec(d_model=32, nhead=2, num_layers=1, dim_feedforward=64, dropout=0.0),
+        ppo=PPOHyper(epochs=1, minibatch_size=2, ent_coef=0.01),
+    )
+    result = run_sandboxes(cfg, resume=False)
+    assert result["ok"]
+    row = json.loads((tmp_path / "mix" / "history.jsonl").read_text().splitlines()[0])
+    assert "merchant/success_rate" in row and "landing/success_rate" in row
+    assert "merchant/mean_reward" in row and "landing/mean_reward" in row
+    loaded, model_config = load_checkpoint(tmp_path / "mix" / "latest.pt", torch.device("cpu"))
+    assert model_config["skill_count"] == 0
 
 
 def test_tiny_builder_curriculum_writes_summary(tmp_path: Path) -> None:
@@ -287,4 +377,17 @@ def test_tiny_builder_curriculum_writes_summary(tmp_path: Path) -> None:
     assert (tmp_path / "run" / "summary.json").is_file()
     assert (tmp_path / "run" / "builder" / "size_3.pt").is_file()
     assert (tmp_path / "run" / "builder" / "final.pt").is_file()
-    assert (tmp_path / "run" / "latest.pt").is_file()
+    latest = tmp_path / "run" / "latest.pt"
+    assert latest.is_file()
+    loaded, model_config = load_checkpoint(latest, torch.device("cpu"))
+    assert model_config["skill_count"] == 0
+    assert loaded.skill_count == 0
+    assert "skill_embed.weight" not in loaded.state_dict()
+    fresh = PolicyNetwork(**model_config)
+    game = _new_policy(cfg.arch, int(model_config["token_dim"]), torch.device("cpu"))
+    assert game.skill_count == 0
+    assert set(loaded.state_dict()) == set(fresh.state_dict()) == set(game.state_dict())
+    for key, value in loaded.state_dict().items():
+        assert tuple(value.shape) == tuple(game.state_dict()[key].shape)
+    ctx = torch.zeros(1, loaded.d_model)
+    assert torch.equal(loaded._with_skill(ctx, 0, 1), loaded._with_skill(ctx, 7, 1))
