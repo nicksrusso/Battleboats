@@ -16,6 +16,7 @@ from battleboats.core.actions import (
     MoveAction,
 )
 from battleboats.core.shipyard.ship_data import BASE_STATS
+from battleboats.core.shipyard.ship_stats import ShipStats
 from battleboats.core.shipyard.ship_type import ShipType
 from battleboats.envs.base_aec import BattleboatsBaseAEC
 from battleboats.envs.observation import (
@@ -33,12 +34,14 @@ from battleboats.envs.sandboxes import (
     ShipBuildSandbox,
     TypedBuildSandbox,
     combat_outcome,
+    discounted_combat_reward,
     enemy_strength_scale,
     make_sandbox,
     opening_cash,
     scouting_find_reward,
     ship_detection_range,
     side_power,
+    turn_decay,
     typed_build_reward,
 )
 from battleboats.envs.skill_maps import write_two_home_map
@@ -48,6 +51,7 @@ from battleboats.training.policy import PolicyNetwork
 from battleboats.training.checkpoints import load_checkpoint
 from battleboats.training.curriculum import _new_policy
 from battleboats.training.sandbox_curriculum import (
+    DecaySpec,
     SandboxRunConfig,
     _drill_done,
     choose_episode,
@@ -114,7 +118,9 @@ def test_merchant_rewards_only_a_completed_haul(tmp_path: Path) -> None:
         _step_toward(env, satellite if not loaded else home)
     assert loaded
     assert env.hauled
-    assert env.rewards["player_0"] == 1.0
+    paid = env.rewards["player_0"]
+    assert paid == env._turn_scale(env.engine.turn)
+    assert 0.0 < paid <= 1.0
     assert env.terminations["player_0"] is True
     env.close()
 
@@ -153,7 +159,9 @@ def test_builder_needs_a_haul_before_the_buy(tmp_path: Path) -> None:
             continue
         _step_toward(env, satellite if not loaded else home)
     assert env.built
-    assert env.rewards["player_0"] == 1.0
+    paid = env.rewards["player_0"]
+    assert paid == env._turn_scale(env.engine.turn)
+    assert 0.0 < paid <= 1.0
     assert env.terminations["player_0"] is True
     env.close()
 
@@ -173,7 +181,9 @@ def test_landing_capture_is_the_only_reward(tmp_path: Path) -> None:
             break
         _step_toward(env, goal)
     assert env.captured
-    assert env.rewards["player_0"] == 1.0
+    paid = env.rewards["player_0"]
+    assert paid == env._turn_scale(env.engine.turn)
+    assert 0.0 < paid <= 1.0
     env.close()
     from battleboats.envs.base_aec import BattleboatsBaseAEC
 
@@ -207,11 +217,13 @@ def test_combat_reward_is_the_power_change_at_the_horizon(tmp_path: Path) -> Non
     assert env.terminations["player_0"] is False
     assert env.truncations["player_0"] is True
     assert env.engine.turn >= 3
-    expected = combat_outcome(
-        env._my0, env._en0, side_power(env.engine, 0), side_power(env.engine, 1)
-    )
-    assert env.episode_reward == expected
-    assert env.rewards["player_0"] == expected
+    expected = discounted_combat_reward(env._power_samples, env.decay_horizon, env.decay_floor)
+    assert abs(env.episode_reward - expected) < 1e-9
+    assert abs(env.episode_reward) <= 1.0
+    assert env.rewards["player_0"] == env.episode_reward
+    # The raw swing is still what the weights scale. A win is not added.
+    raw = combat_outcome(env._my0, env._en0, side_power(env.engine, 0), side_power(env.engine, 1))
+    assert abs(raw) <= 1.0
     env.close()
 
 
@@ -477,6 +489,11 @@ def test_load_real_config() -> None:
     assert cfg.device == "cpu"
     assert cfg.wandb is False
     assert cfg.wandb_project == "battleboats-skill-pipeline"
+    assert cfg.reward_decay == DecaySpec(0, 0.0)
+    assert cfg.reward_decay_drills == {}
+    assert smoke.reward_decay == DecaySpec()
+    assert smoke.decay_for("merchant") == DecaySpec()
+    assert smoke.decay_for("combat_carrier") == DecaySpec()
 
 
 def test_one_update_trains_every_sandbox(tmp_path: Path) -> None:
@@ -835,3 +852,185 @@ def test_typed_build_waits_then_pays_only_the_cued_hull(tmp_path: Path) -> None:
     loaded, model_config = load_checkpoint(tmp_path / "buy" / "latest.pt", torch.device("cpu"))
     assert model_config["skill_count"] == 0
     assert loaded.skill_count == 0
+
+
+def test_turn_decay_prefers_a_fast_finish(tmp_path: Path) -> None:
+    assert turn_decay(0, 8) == 1.0
+    assert turn_decay(0, 8) > turn_decay(1, 8) > turn_decay(7, 8) > 0.0
+    assert turn_decay(8, 8) == 0.0
+    assert turn_decay(3, 8, floor=0.2) > turn_decay(8, 8, floor=0.2) == 0.2
+    assert scouting_find_reward(1, 4) == turn_decay(1, 4)
+    assert typed_build_reward(1, 6) == turn_decay(1, 6)
+    early = discounted_combat_reward([(0, 0.0), (0, 0.5)], 6)
+    late_swing = discounted_combat_reward([(0, 0.0), (3, 0.5)], 6)
+    stall = discounted_combat_reward([(0, 0.0), (5, 0.0)], 6)
+    assert early == 0.5
+    assert abs(late_swing - 0.5 * turn_decay(3, 6)) < 1e-9
+    assert early > late_swing > stall == 0.0
+    died_now = discounted_combat_reward([(0, 0.2), (0, -0.3)], 6)
+    died_late = discounted_combat_reward([(0, 0.2), (4, -0.3)], 6)
+    assert died_now < died_late < 0.0
+    assert abs(died_now) <= 1.0 and abs(died_late) <= 1.0
+
+    path = tmp_path / "decay.yaml"
+    path.write_text(
+        "run_dir: runs/x\nskills: [merchant, landing]\nsizes: [3]\n"
+        "reward_decay:\n  horizon: 10\n  floor: 0.1\n  drills:\n"
+        "    merchant: {horizon: 4, floor: 0.2}\n"
+        "    landing: {floor: 0.05}\n"
+    )
+    cfg = load_sandbox_config(path)
+    assert cfg.decay_for("merchant") == DecaySpec(4, 0.2)
+    assert cfg.decay_for("landing") == DecaySpec(10, 0.05)
+    assert cfg.decay_for("builder") == DecaySpec(10, 0.1)
+    bad = tmp_path / "bad.yaml"
+    bad.write_text(
+        "run_dir: runs/x\nskills: [merchant]\nsizes: [3]\nreward_decay: {horizon: 0, floor: 1}\n"
+    )
+    try:
+        load_sandbox_config(bad)
+    except ValueError as exc:
+        assert "floor" in str(exc)
+    else:
+        raise AssertionError("a floor of 1 removes the reason to finish sooner")
+
+    board = write_two_home_map(tmp_path / "m.json", 3, 3)
+
+    def haul(extra: int) -> float:
+        env = MerchantSandbox(str(board), width=3, height=3, max_turns=30)
+        env.reset(seed=1)
+        for _ in range(extra):
+            env.step(EndTurnAction())
+            assert env.rewards["player_0"] == 0.0
+            assert env.hauled is False
+        home = env.engine.players[0].home_port
+        satellite = next(p for p in env.engine.players[0].owned_port_positions if p != home)
+        loaded = False
+        for _ in range(40):
+            if env.terminations["player_0"] or env.truncations["player_0"]:
+                break
+            legal = env.infos["player_0"]["legal_actions"]
+            loads = [a for a in legal if isinstance(a, MerchantLoadAction)]
+            unloads = [a for a in legal if isinstance(a, MerchantUnloadAction)]
+            if loads and not loaded:
+                env.step(loads[0])
+                loaded = True
+                continue
+            if unloads and loaded:
+                env.step(unloads[0])
+                break
+            _step_toward(env, satellite if not loaded else home)
+        paid = env.rewards["player_0"]
+        assert env.hauled and paid == env._turn_scale(env.engine.turn)
+        env.close()
+        return paid
+
+    assert 1.0 >= haul(0) > haul(1) > 0.0
+
+    stalled = MerchantSandbox(str(board), width=3, height=3, max_turns=4)
+    stalled.reset(seed=1)
+    for _ in range(8):
+        if stalled.truncations["player_0"]:
+            break
+        stalled.step(EndTurnAction())
+    assert stalled.hauled is False
+    assert stalled.rewards["player_0"] == 0.0
+    stalled.close()
+
+    def capture(extra: int) -> float:
+        env = LandingSandbox(str(board), width=3, height=3, max_turns=20)
+        env.reset(seed=2)
+        for _ in range(extra):
+            env.step(EndTurnAction())
+            assert env.rewards["player_0"] == 0.0
+        goal = env.engine.players[1].home_port
+        for _ in range(30):
+            if env.terminations["player_0"] or env.truncations["player_0"]:
+                break
+            legal = env.infos["player_0"]["legal_actions"]
+            caps = [a for a in legal if isinstance(a, CapturePortAction)]
+            if caps:
+                env.step(caps[0])
+                break
+            _step_toward(env, goal)
+        paid = env.rewards["player_0"]
+        assert env.captured and paid == env._turn_scale(env.engine.turn)
+        env.close()
+        return paid
+
+    assert 1.0 >= capture(0) > capture(1) > 0.0
+
+    def buy(extra: int) -> float:
+        env = ShipBuildSandbox(str(board), width=3, height=3, max_turns=30)
+        env.reset(seed=0)
+        for _ in range(extra):
+            env.step(EndTurnAction())
+            assert env.rewards["player_0"] == 0.0
+            assert env.built is False
+        home = env.engine.players[0].home_port
+        satellite = next(p for p in env.engine.players[0].owned_port_positions if p != home)
+        loaded = False
+        for _ in range(40):
+            if env.terminations["player_0"] or env.truncations["player_0"]:
+                break
+            legal = env.infos["player_0"]["legal_actions"]
+            builds = [a for a in legal if isinstance(a, BuildShipAction)]
+            loads = [a for a in legal if isinstance(a, MerchantLoadAction)]
+            unloads = [a for a in legal if isinstance(a, MerchantUnloadAction)]
+            if builds:
+                env.step(builds[0])
+                break
+            if loads and not loaded:
+                env.step(loads[0])
+                loaded = True
+                continue
+            if unloads and loaded:
+                env.step(unloads[0])
+                continue
+            _step_toward(env, satellite if not loaded else home)
+        paid = env.rewards["player_0"]
+        assert env.built and paid == env._turn_scale(env.engine.turn)
+        env.close()
+        return paid
+
+    assert 1.0 >= buy(0) > buy(1) > 0.0
+
+    def freeze(env) -> None:
+        ship = env.engine.ships[env._target_id]
+        stats = ship.stats
+        ship.stats = ShipStats(
+            speed=0,
+            cost=stats.cost,
+            strength=0.0,
+            attack_range=0,
+            visibility=stats.visibility,
+            scouting=stats.scouting,
+        )
+
+    def fight(delay: int) -> float:
+        env = CombatSandbox(str(board), ship="destroyer", width=3, height=3, max_turns=6)
+        env.reset(seed=0)
+        freeze(env)
+        for _ in range(delay):
+            env.step(EndTurnAction())
+            assert env.rewards["player_0"] == 0.0
+        attacks = [a for a in env.infos["player_0"]["legal_actions"] if isinstance(a, AttackAction)]
+        assert attacks
+        env.step(attacks[0])
+        assert env.killed
+        assert env.rewards["player_0"] == 0.0
+        assert env.terminations["player_0"] is False
+        for _ in range(20):
+            if env.truncations["player_0"]:
+                break
+            env.step(EndTurnAction())
+        assert env.terminations["player_0"] is False
+        assert env.truncations["player_0"] is True
+        paid = env.episode_reward
+        weighted = discounted_combat_reward(env._power_samples, env.decay_horizon, env.decay_floor)
+        assert abs(paid - weighted) < 1e-9
+        assert abs(paid) <= 1.0
+        env.close()
+        return paid
+
+    assert fight(0) > fight(2) > 0.0
