@@ -1,50 +1,46 @@
-"""Text view of one seat's decision, format version 2.
+"""Text view of one seat's decision.
 
-The prompt is built only from what that seat can know: own ships and ports
-are read from the engine, enemy ships and ports only from sightings (fresh
-or stale). Terrain is public. Enemy cargo, enemy gold, and unspotted units
-are omitted. Distances use the engine's rules: 4-directional water moves,
-Manhattan attack range, and detection = scouting * visibility.
+The board text is the same fog-filtered set the RL encoder sees: friendly
+ships and ports, enemy ship and port sightings, and coastline land tokens
+(``battleboats.envs.observation.build_entity_refs``). Values are the raw
+token fields, not the normalized floats. The legal MOVES menu is unchanged.
 """
 
 from __future__ import annotations
 
-import json
-from collections import deque
-from typing import Iterable, List, Optional, Set, Tuple
+from typing import Iterable, List, Optional, Tuple
 
 from battleboats.core.actions import (Action, AttackAction, BuildPortAction,
                                       BuildShipAction, CapturePortAction,
                                       EndTurnAction, MerchantLoadAction,
                                       MerchantUnloadAction, MoveAction)
-from battleboats.core.gameEngine import MERCHANT_CAPACITY, gameEngine
+from battleboats.core.gameEngine import gameEngine
 from battleboats.core.shipyard.ship import Ship
 from battleboats.core.shipyard.ship_data import BASE_STATS
 from battleboats.core.shipyard.ship_stats import ShipStats
 from battleboats.core.shipyard.ship_type import ShipType
+from battleboats.envs.observation import build_entity_refs
 
-FORMAT_VERSION = 2
+FORMAT_VERSION = 3
 
 # Byte-stable prefix of every prompt. llama-server cache_prompt reuses it.
 # Nothing in here may depend on the seat, the board, or the turn.
 STATIC_PREFIX = (
-    "FORMAT 2\n"
+    "FORMAT 3\n"
     "Reply with one MOVES number then one short sentence.\n"
-    "hp=strength (one hit kills). turns 0=this turn. "
-    "Hidden: enemy cargo, enemy gold, unspotted units. "
-    "Threats assume a full enemy move and no attack yet.\n"
-    "Omitted when default: cargo 0, moved 0, stock 0, attacked false, home false. "
-    "A fresh contact omits fresh and seen. A stale one has fresh=false and seen=turn.\n"
-    "Grid: .=water #=land H/P=my home/port h/p=sighted enemy home/port. "
-    "Ship upper=me lower=enemy. C carrier B battleship R cruiser D destroyer "
-    "S sub M merchant L landing U builder. Top row=high y, x right.\n"
-    "Sections: ENTITIES GRID FACTS(home_turns,cargo_turns,in_range) "
-    "EDGES(from,to,kind,turns) MOVES. "
+    "One line per ship and per port. Land is tokens, one row y: x or x-x. "
+    "board WxH is stated once. Positions are cells.\n"
+    "Ship: id owner type (x,y) speed strength range vis scout cost "
+    "cargo moved attacked fresh stale.\n"
+    "Port: id owner (x,y) home stock cash fresh stale. "
+    "range=attack_range vis=visibility scout=scouting.\n"
+    "Always on a ship: speed strength range vis scout cost. "
+    "Omitted when zero: cargo, moved, attacked, home, stock, cash. "
+    "A fresh sighting omits fresh and stale.\n"
     "Builds: B@(x,y): n Type cost | n Type cost.\n"
 )
 
 Pos = Tuple[int, int]
-_CARDINAL: Tuple[Pos, ...] = ((1, 0), (-1, 0), (0, 1), (0, -1))
 
 # One character per ship. Builder is U so it does not collide with Battleship.
 _LETTER = {
@@ -57,6 +53,9 @@ _LETTER = {
     ShipType.LANDING: "L",
     ShipType.BUILDER: "U",
 }
+
+_SHIP_OPTIONAL = ("cargo", "moved", "attacked", "fresh", "stale")
+_PORT_OPTIONAL = ("home", "stock", "cash", "fresh", "stale")
 
 
 def _whole(value: float) -> int | float:
@@ -82,11 +81,15 @@ def build_view(
     horizon: int = 4,
     max_edges: int = 20,
 ) -> dict:
-    """Structured, fog-filtered view. ``render_prompt`` prints this dict."""
+    """Fog-filtered token view. ``render_prompt`` prints this dict.
+
+    ``horizon`` and ``max_edges`` are accepted so existing callers keep
+    working. Path and threat facts are not part of the RL tokens, so they
+    are not part of the prompt.
+    """
+    _ = horizon, max_edges
     player = engine.players[player_id]
-    entities = _entities(engine, player_id)
-    facts = _facts(engine, player_id)
-    edges = build_edges(engine, player_id, horizon=horizon, max_edges=max_edges)
+    ships, ports, land = _token_entities(engine, player_id)
     return {
         "format_version": FORMAT_VERSION,
         "seat": f"player_{player_id}",
@@ -94,12 +97,9 @@ def build_view(
         "turn": engine.turn,
         "gold": player.cash,
         "board": [engine.map.width, engine.map.height],
-        "entities": entities,
-        "grid": render_grid(engine, player_id),
-        "facts": facts,
-        "edges": edges,
-        "horizon": horizon,
-        "max_edges": max_edges,
+        "ships": ships,
+        "ports": ports,
+        "land": land,
         "moves": [describe_action(action, engine, player_id) for action in legal],
         "legal": [action_record(action) for action in legal],
     }
@@ -114,18 +114,15 @@ def render_prompt(view: dict) -> str:
             f"seat {view['seat']} board {width}x{height} "
             f"turn {view['turn']} gold {view['gold']}"
         ),
-        "ENTITIES",
+        "SHIPS",
     ]
-    for ent in view["entities"]:
-        lines.append(_compact(ent))
-    lines.append("GRID")
-    lines.extend(view["grid"])
-    lines.append("FACTS")
-    for fact in view["facts"]:
-        lines.append(_compact(fact))
-    lines.append(f"EDGES h={view['horizon']}")
-    for edge in view["edges"]:
-        lines.append(_compact(edge))
+    for ent in view["ships"]:
+        lines.append(_ship_line(ent))
+    lines.append("PORTS")
+    for ent in view["ports"]:
+        lines.append(_port_line(ent))
+    lines.append("LAND")
+    lines.extend(_land_lines(view["land"]))
     lines.append("MOVES")
     lines.extend(menu_lines(view))
     return "\n".join(lines)
@@ -159,171 +156,6 @@ def menu_lines(view: dict) -> List[str]:
             lines.append(f"{i} {moves[i]}")
             i += 1
     return lines
-
-
-def render_grid(engine: gameEngine, player_id: int) -> List[str]:
-    """One character per cell. Unsighted ports stay land. High y is the top row."""
-    mp = engine.map
-    player = engine.players[player_id]
-    cells = [["." for _ in range(mp.width)] for _ in range(mp.height)]
-    for x in range(mp.width):
-        for y in range(mp.height):
-            if mp.is_land((x, y)):
-                cells[y][x] = "#"
-    for pos in player.owned_port_positions:
-        port = engine.ports[pos]
-        cells[pos[1]][pos[0]] = "H" if port.is_home else "P"
-    for sight in player.port_sightings.values():
-        x, y = sight.position
-        cells[y][x] = "h" if sight.is_home else "p"
-    stale = [s for s in player.sightings.values() if not s.fresh]
-    fresh = [s for s in player.sightings.values() if s.fresh]
-    for sight in stale + fresh:
-        x, y = sight.position
-        if mp.in_bounds((x, y)):
-            cells[y][x] = _LETTER[sight.type].lower()
-    for sid in player.owned_ship_ids:
-        ship = engine.ships[sid]
-        x, y = ship.position
-        cells[y][x] = _LETTER[ship.type]
-    return ["".join(cells[y]) for y in range(mp.height - 1, -1, -1)]
-
-
-def build_edges(
-    engine: gameEngine,
-    player_id: int,
-    *,
-    horizon: int = 4,
-    max_edges: int = 20,
-) -> List[dict]:
-    """Interactions within ``horizon`` turns, nearest first, capped.
-
-    Kinds: can_attack, can_load, can_unload, can_capture, threat.
-    A threat is an enemy who can attack one of our ships. Enemy movement
-    state is not observed, so threats assume a full move and no attack yet.
-    Paths walk water only and treat own ships and fresh sightings as blocked.
-    Stale contacts use their last-known tile and do not block.
-    """
-    player = engine.players[player_id]
-    own = [engine.ships[sid] for sid in sorted(player.owned_ship_ids)]
-    sightings = sorted(player.sightings.values(), key=lambda s: s.ship_id)
-    edges: List[dict] = []
-
-    for ship in own:
-        remaining = _remaining(ship)
-        blocked = _known_blocked(engine, player_id, ship.position)
-        for sight in sightings:
-            stats = BASE_STATS[sight.type]
-            turns = _turns_to_fire(
-                engine,
-                ship.position,
-                ship.stats,
-                remaining,
-                act_now=not ship.has_attacked,
-                target_pos=sight.position,
-                target_vis=stats.visibility,
-                blocked=blocked,
-            )
-            if turns is None or turns > horizon:
-                continue
-            edges.append(
-                {
-                    "from": ship_id(ship.id),
-                    "to": ship_id(sight.ship_id),
-                    "kind": "can_attack",
-                    "turns": turns,
-                }
-            )
-        if ship.type is ShipType.MERCHANT and ship.cargo < MERCHANT_CAPACITY:
-            for pos in sorted(player.owned_port_positions):
-                port = engine.ports[pos]
-                if port.is_home or pos == player.home_port or port.stockpile <= 0:
-                    continue
-                turns = _turns_to_adjacent(
-                    engine, ship.position, remaining, ship.stats.speed, pos, blocked
-                )
-                if turns is None or turns > horizon:
-                    continue
-                edges.append(
-                    {
-                        "from": ship_id(ship.id),
-                        "to": port_id(pos),
-                        "kind": "can_load",
-                        "turns": turns,
-                    }
-                )
-        if ship.type is ShipType.MERCHANT and ship.cargo > 0:
-            turns = _turns_to_adjacent(
-                engine,
-                ship.position,
-                remaining,
-                ship.stats.speed,
-                player.home_port,
-                blocked,
-            )
-            if turns is not None and turns <= horizon:
-                edges.append(
-                    {
-                        "from": ship_id(ship.id),
-                        "to": port_id(player.home_port),
-                        "kind": "can_unload",
-                        "turns": turns,
-                    }
-                )
-        if ship.type is ShipType.LANDING:
-            for sight in sorted(
-                player.port_sightings.values(), key=lambda s: s.position
-            ):
-                turns = _turns_to_adjacent(
-                    engine,
-                    ship.position,
-                    remaining,
-                    ship.stats.speed,
-                    sight.position,
-                    blocked,
-                )
-                if turns is None or turns > horizon:
-                    continue
-                edges.append(
-                    {
-                        "from": ship_id(ship.id),
-                        "to": port_id(sight.position),
-                        "kind": "can_capture",
-                        "turns": turns,
-                    }
-                )
-
-    for sight in sightings:
-        stats = BASE_STATS[sight.type]
-        if stats.attack_range <= 0 or stats.speed <= 0:
-            continue
-        blocked = _known_blocked(engine, player_id, sight.position)
-        for ship in own:
-            turns = _turns_to_fire(
-                engine,
-                sight.position,
-                stats,
-                stats.speed,
-                act_now=True,
-                target_pos=ship.position,
-                target_vis=ship.stats.visibility,
-                blocked=blocked,
-            )
-            if turns is None or turns > horizon:
-                continue
-            edges.append(
-                {
-                    "from": ship_id(sight.ship_id),
-                    "to": ship_id(ship.id),
-                    "kind": "threat",
-                    "turns": turns,
-                }
-            )
-
-    edges.sort(key=lambda e: (e["turns"], e["kind"], e["from"], e["to"]))
-    if max_edges >= 0:
-        edges = edges[:max_edges]
-    return edges
 
 
 def describe_action(action: Action, engine: gameEngine, player_id: int) -> str:
@@ -411,270 +243,145 @@ def action_record(action: Action) -> dict:
     return {"type": type(action).__name__}
 
 
-def _entities(engine: gameEngine, player_id: int) -> List[dict]:
-    player = engine.players[player_id]
-    out: List[dict] = []
-    for sid in sorted(player.owned_ship_ids):
-        ship = engine.ships[sid]
-        ent = {
-            "id": ship_id(ship.id),
-            "owner": "me",
-            "type": ship.type.value,
-            "pos": list(ship.position),
-            "hp": _whole(ship.stats.strength),
-            "speed": ship.stats.speed,
-            "range": ship.stats.attack_range,
-        }
-        if ship.cargo:
-            ent["cargo"] = ship.cargo
-        if ship.tiles_moved_this_turn:
-            ent["moved"] = ship.tiles_moved_this_turn
-        if ship.has_attacked:
-            ent["attacked"] = True
-        out.append(ent)
-    for pos in sorted(player.owned_port_positions):
-        port = engine.ports[pos]
-        ent = {
-            "id": port_id(pos),
-            "kind": "port",
-            "owner": "me",
-            "pos": list(pos),
-        }
-        if port.is_home or pos == player.home_port:
-            ent["home"] = True
-        if port.stockpile:
-            ent["stock"] = port.stockpile
-        out.append(ent)
-    for sight in sorted(player.sightings.values(), key=lambda s: s.ship_id):
-        stats = BASE_STATS[sight.type]
-        ent = {
-            "id": ship_id(sight.ship_id),
-            "owner": "enemy",
-            "type": sight.type.value,
-            "pos": list(sight.position),
-            "hp": _whole(stats.strength),
-            "speed": stats.speed,
-            "range": stats.attack_range,
-        }
-        if not sight.fresh:
-            ent["fresh"] = False
-            ent["seen"] = sight.turn_seen
-        out.append(ent)
-    for sight in sorted(player.port_sightings.values(), key=lambda s: s.position):
-        ent = {
-            "id": port_id(sight.position),
-            "kind": "port",
-            "owner": "enemy",
-            "pos": list(sight.position),
-        }
-        if sight.is_home:
-            ent["home"] = True
-        if not sight.fresh:
-            ent["fresh"] = False
-            ent["seen"] = sight.turn_seen
-        out.append(ent)
-    return out
+def _token_entities(engine: gameEngine, player_id: int):
+    """Ships, ports, and coastline cells in RL token order."""
+    ships: List[dict] = []
+    ports: List[dict] = []
+    land: List[List[int]] = []
+    ship_sights = {s.ship_id: s for s in engine.known_enemy_ships(player_id)}
+    port_sights = {s.position: s for s in engine.known_enemy_ports(player_id)}
+    for kind, ident in build_entity_refs(engine, player_id):
+        if kind == "friendly_ship":
+            ships.append(_friendly_ship(engine.ships[ident]))
+        elif kind == "enemy_ship":
+            ships.append(_enemy_ship(ship_sights[ident], engine.turn))
+        elif kind == "friendly_port":
+            ports.append(_friendly_port(engine.ports[ident], engine))
+        elif kind == "enemy_port":
+            ports.append(_enemy_port(port_sights[ident], engine.turn))
+        elif kind == "coastline":
+            land.append([int(ident[0]), int(ident[1])])
+    return ships, ports, land
 
 
-def _facts(engine: gameEngine, player_id: int) -> List[dict]:
-    player = engine.players[player_id]
-    sightings = list(player.sightings.values())
-    stocked = [
-        pos
-        for pos in player.owned_port_positions
-        if pos != player.home_port and engine.ports[pos].stockpile > 0
+def _stat_fields(stats: ShipStats) -> dict:
+    return {
+        "speed": _whole(stats.speed),
+        "strength": _whole(stats.strength),
+        "range": _whole(stats.attack_range),
+        "vis": _whole(stats.visibility),
+        "scout": _whole(stats.scouting),
+        "cost": _whole(stats.cost),
+    }
+
+
+def _friendly_ship(ship: Ship) -> dict:
+    ent = {
+        "id": ship_id(ship.id),
+        "owner": "me",
+        "type": ship.type.value,
+        "pos": list(ship.position),
+        **_stat_fields(ship.stats),
+    }
+    if ship.cargo:
+        ent["cargo"] = ship.cargo
+    if ship.tiles_moved_this_turn:
+        ent["moved"] = ship.tiles_moved_this_turn
+    if ship.has_attacked:
+        ent["attacked"] = 1
+    return ent
+
+
+def _enemy_ship(sight, turn: int) -> dict:
+    ent = {
+        "id": ship_id(sight.ship_id),
+        "owner": "enemy",
+        "type": sight.type.value,
+        "pos": list(sight.position),
+        **_stat_fields(BASE_STATS[sight.type]),
+    }
+    if not sight.fresh:
+        ent["fresh"] = 0
+        ent["stale"] = turn - sight.turn_seen
+    return ent
+
+
+def _friendly_port(port, engine: gameEngine) -> dict:
+    ent = {
+        "id": port_id(port.position),
+        "owner": "me",
+        "pos": list(port.position),
+    }
+    if port.is_home:
+        ent["home"] = 1
+        if engine.players[port.owner].cash:
+            ent["cash"] = engine.players[port.owner].cash
+    if port.stockpile:
+        ent["stock"] = port.stockpile
+    return ent
+
+
+def _enemy_port(sight, turn: int) -> dict:
+    ent = {
+        "id": port_id(sight.position),
+        "owner": "enemy",
+        "pos": list(sight.position),
+    }
+    if sight.is_home:
+        ent["home"] = 1
+    if not sight.fresh:
+        ent["fresh"] = 0
+        ent["stale"] = turn - sight.turn_seen
+    return ent
+
+
+def _ship_line(ent: dict) -> str:
+    parts = [
+        ent["id"],
+        ent["owner"],
+        ent["type"],
+        _xy(tuple(ent["pos"])),
+        f"speed={ent['speed']}",
+        f"strength={ent['strength']}",
+        f"range={ent['range']}",
+        f"vis={ent['vis']}",
+        f"scout={ent['scout']}",
+        f"cost={ent['cost']}",
     ]
-    facts = []
-    for sid in sorted(player.owned_ship_ids):
-        ship = engine.ships[sid]
-        remaining = _remaining(ship)
-        blocked = _known_blocked(engine, player_id, ship.position)
-        home_dist = _bfs_to_adjacent(engine, ship.position, player.home_port, blocked)
-        cargo_dist = _nearest_adjacent(engine, ship.position, stocked, blocked)
-        in_range = []
-        for sight in sightings:
-            stats = BASE_STATS[sight.type]
-            if _in_range(ship.stats, stats.visibility, ship.position, sight.position):
-                in_range.append(ship_id(sight.ship_id))
-        in_range.sort()
-        facts.append(
-            {
-                "id": ship_id(ship.id),
-                "home_turns": _turns_to_act(
-                    home_dist, remaining, ship.stats.speed, True
-                ),
-                "cargo_turns": _turns_to_act(
-                    cargo_dist, remaining, ship.stats.speed, True
-                ),
-                "in_range": in_range,
-            }
-        )
-    return facts
+    for key in _SHIP_OPTIONAL:
+        if key in ent:
+            parts.append(f"{key}={ent[key]}")
+    return " ".join(parts)
 
 
-def _turns_to_fire(
-    engine: gameEngine,
-    start: Pos,
-    stats: ShipStats,
-    remaining: int,
-    *,
-    act_now: bool,
-    target_pos: Pos,
-    target_vis: float,
-    blocked: Set[Pos],
-) -> Optional[int]:
-    if stats.attack_range <= 0:
-        return None
-    goals = _firing_tiles(engine, stats, target_vis, target_pos, blocked, start)
-    dist = _bfs_dist(engine, start, goals, blocked)
-    return _turns_to_act(dist, remaining, stats.speed, act_now)
+def _port_line(ent: dict) -> str:
+    parts = [ent["id"], ent["owner"], _xy(tuple(ent["pos"]))]
+    for key in _PORT_OPTIONAL:
+        if key in ent:
+            parts.append(f"{key}={ent[key]}")
+    return " ".join(parts)
 
 
-def _turns_to_adjacent(
-    engine: gameEngine,
-    start: Pos,
-    remaining: int,
-    speed: int,
-    target: Pos,
-    blocked: Set[Pos],
-) -> Optional[int]:
-    dist = _bfs_to_adjacent(engine, start, target, blocked)
-    return _turns_to_act(dist, remaining, speed, True)
-
-
-def _firing_tiles(
-    engine: gameEngine,
-    stats: ShipStats,
-    target_vis: float,
-    target_pos: Pos,
-    blocked: Set[Pos],
-    start: Pos,
-) -> Set[Pos]:
-    detection = stats.scouting * target_vis
-    goals: Set[Pos] = set()
-    for pos in engine.map.tiles_within(target_pos, stats.attack_range):
-        if engine.map.manhattan(pos, target_pos) > detection:
-            continue
-        if pos == start or (engine.map.is_water(pos) and pos not in blocked):
-            goals.add(pos)
-    return goals
-
-
-def _bfs_to_adjacent(
-    engine: gameEngine, start: Pos, target: Pos, blocked: Set[Pos]
-) -> Optional[int]:
-    return _bfs_dist(
-        engine, start, _adjacent_water(engine, target, blocked, start), blocked
-    )
-
-
-def _nearest_adjacent(
-    engine: gameEngine, start: Pos, targets: Iterable[Pos], blocked: Set[Pos]
-) -> Optional[int]:
-    best: Optional[int] = None
-    for target in targets:
-        dist = _bfs_to_adjacent(engine, start, target, blocked)
-        if dist is None:
-            continue
-        if best is None or dist < best:
-            best = dist
-    return best
-
-
-def _adjacent_water(
-    engine: gameEngine, target: Pos, blocked: Set[Pos], start: Pos
-) -> Set[Pos]:
-    goals: Set[Pos] = set()
-    for dx, dy in _CARDINAL:
-        nxt = (target[0] + dx, target[1] + dy)
-        if not engine.map.in_bounds(nxt) or not engine.map.is_water(nxt):
-            continue
-        if nxt == start or nxt not in blocked:
-            goals.add(nxt)
-    return goals
-
-
-def _bfs_dist(
-    engine: gameEngine, start: Pos, goals: Set[Pos], blocked: Set[Pos]
-) -> Optional[int]:
-    """Water-only 4-connected distance. ``start`` may be a goal (distance 0)."""
-    if not goals:
-        return None
-    if start in goals:
-        return 0
-    seen = {start}
-    queue: deque[Tuple[Pos, int]] = deque([(start, 0)])
-    mp = engine.map
-    while queue:
-        pos, dist = queue.popleft()
-        for dx, dy in _CARDINAL:
-            nxt = (pos[0] + dx, pos[1] + dy)
-            if nxt in seen or nxt in blocked:
+def _land_lines(positions: Iterable) -> List[str]:
+    """Horizontal runs of coastline tokens. Same cells, fewer characters."""
+    by_y: dict[int, List[int]] = {}
+    for pos in positions:
+        x, y = int(pos[0]), int(pos[1])
+        by_y.setdefault(y, []).append(x)
+    lines: List[str] = []
+    for y in sorted(by_y):
+        xs = sorted(set(by_y[y]))
+        spans: List[str] = []
+        start = prev = xs[0]
+        for x in xs[1:]:
+            if x == prev + 1:
+                prev = x
                 continue
-            if not mp.in_bounds(nxt) or not mp.is_water(nxt):
-                continue
-            seen.add(nxt)
-            nd = dist + 1
-            if nxt in goals:
-                return nd
-            queue.append((nxt, nd))
-    return None
-
-
-def _turns_to_act(
-    dist: Optional[int], remaining: int, speed: int, act_now: bool
-) -> Optional[int]:
-    """Turns until the ship can be on the goal tile and act.
-
-    0 means this turn (it can still spend ``remaining`` movement, then act).
-    Later turns get a full ``speed`` after EndTurn. ``act_now`` is false when
-    this ship has already attacked.
-    """
-    if dist is None:
-        return None
-    remaining = max(0, remaining)
-    if dist <= remaining:
-        return 0 if act_now else 1
-    if speed <= 0:
-        return None
-    left = dist - remaining
-    return (left + speed - 1) // speed
-
-
-def _known_blocked(engine: gameEngine, player_id: int, mover_pos: Pos) -> Set[Pos]:
-    """Tiles we know a ship occupies, excluding the mover's own tile.
-
-    Fresh sightings are really there. Stale sightings are not blocked: the
-    ship may have left, and blocking on a guess would invent a rule the
-    engine does not apply. Hidden ships are not blocked either.
-    """
-    player = engine.players[player_id]
-    blocked: Set[Pos] = set()
-    for sid in player.owned_ship_ids:
-        pos = engine.ships[sid].position
-        if pos != mover_pos:
-            blocked.add(pos)
-    for sight in player.sightings.values():
-        if sight.fresh and sight.position != mover_pos:
-            blocked.add(sight.position)
-    return blocked
-
-
-def _in_range(stats: ShipStats, target_vis: float, origin: Pos, target: Pos) -> bool:
-    if stats.attack_range <= 0:
-        return False
-    dist = _manhattan(origin, target)
-    if dist > stats.attack_range:
-        return False
-    return dist <= stats.scouting * target_vis
-
-
-def _remaining(ship: Ship) -> int:
-    return max(0, ship.stats.speed - ship.tiles_moved_this_turn)
-
-
-def _manhattan(a: Pos, b: Pos) -> int:
-    return abs(a[0] - b[0]) + abs(a[1] - b[1])
+            spans.append(str(start) if start == prev else f"{start}-{prev}")
+            start = prev = x
+        spans.append(str(start) if start == prev else f"{start}-{prev}")
+        lines.append(f"{y}: {','.join(spans)}")
+    return lines
 
 
 def _own_label(ship: Optional[Ship], sid: int) -> str:
@@ -689,5 +396,5 @@ def _xy(pos: Optional[Pos]) -> str:
     return f"({pos[0]},{pos[1]})"
 
 
-def _compact(obj: dict) -> str:
-    return json.dumps(obj, separators=(",", ":"))
+def _manhattan(a: Pos, b: Pos) -> int:
+    return abs(a[0] - b[0]) + abs(a[1] - b[1])

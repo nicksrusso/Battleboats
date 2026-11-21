@@ -12,6 +12,7 @@ from battleboats.core.gameEngine import gameEngine
 from battleboats.core.shipyard.ship_data import BASE_STATS
 from battleboats.core.shipyard.ship_type import ShipType
 from battleboats.envs.battleboats_aec import BattleboatsAEC
+from battleboats.envs.observation import build_entity_refs
 from battleboats.envs.skill_maps import write_two_home_map
 from battleboats.llm.play import (chat_completions_url, chat_payload,
                                   choose_move, message_text, parse_choice,
@@ -42,10 +43,6 @@ def _engine(path: str, ships, *, stock=None, cargo=None, cash=None):
             engine.players[pid].cash = amount
     engine._refresh_sightings()
     return engine, spawned
-
-
-def _cell(grid, x, y, height):
-    return grid[height - 1 - y][x]
 
 
 def _open_engine(tmp_path: Path):
@@ -82,79 +79,57 @@ def test_prompt_sections_and_interactions(tmp_path: Path) -> None:
     view = build_view(engine, 0, legal, horizon=4, max_edges=20)
     prompt = render_prompt(view)
 
-    for section in ("FORMAT 2", "ENTITIES", "GRID", "FACTS", "EDGES", "MOVES"):
+    for section in ("FORMAT 3", "SHIPS", "PORTS", "LAND", "MOVES"):
         assert section in prompt
-    assert view["format_version"] == FORMAT_VERSION == 2
+    for dropped in ("GRID", "FACTS", "EDGES", "ENTITIES"):
+        assert dropped not in prompt
+    assert view["format_version"] == FORMAT_VERSION == 3
     assert prompt.startswith(STATIC_PREFIX)
+    assert prompt.count("8x6") == 1
     assert render_prompt(view) == prompt
     assert "424242" not in prompt
     assert "gold 250" in prompt
-    assert all(ent.get("kind") not in ("gold", "turn") for ent in view["entities"])
-    assert '"cargo":0' not in prompt
-    assert '"moved"' not in prompt
-    assert '"attacked"' not in prompt
+    assert "cargo=0" not in prompt
+    assert "moved=" not in prompt
+    assert "attacked=" not in prompt
+    assert "can_attack" not in prompt
+    assert "home_turns" not in prompt
 
-    ids = {ent.get("id") for ent in view["entities"]}
+    ids = {ent.get("id") for ent in view["ships"]}
     assert f"s{sub.id}" not in ids
     assert f"s{cruiser.id}" in ids
+    assert f"s{destroyer.id}" in ids
+    assert f"s{landing.id}" in ids
     cruiser_ent = next(
-        ent for ent in view["entities"] if ent.get("id") == f"s{cruiser.id}"
+        ent for ent in view["ships"] if ent.get("id") == f"s{cruiser.id}"
     )
     assert cruiser_ent["owner"] == "enemy"
     assert cruiser_ent["pos"] == [6, 2]
+    assert cruiser_ent["strength"] == int(BASE_STATS[ShipType.CRUISER].strength)
+    assert cruiser_ent["range"] == BASE_STATS[ShipType.CRUISER].attack_range
     assert "fresh" not in cruiser_ent
-    assert "seen" not in cruiser_ent
+    assert "stale" not in cruiser_ent
     assert "cargo" not in cruiser_ent
+    destroyer_ent = next(
+        ent for ent in view["ships"] if ent.get("id") == f"s{destroyer.id}"
+    )
+    assert destroyer_ent["owner"] == "me"
+    assert destroyer_ent["strength"] == int(destroyer.stats.strength)
+    assert destroyer_ent["speed"] == destroyer.stats.speed
     merchant_ent = next(
-        ent for ent in view["entities"] if ent.get("id") == f"s{merchant.id}"
+        ent for ent in view["ships"] if ent.get("id") == f"s{merchant.id}"
     )
     assert merchant_ent["cargo"] == 40
-    home = next(ent for ent in view["entities"] if ent.get("id") == "p0_0")
-    assert home["home"] is True
+    home = next(ent for ent in view["ports"] if ent.get("id") == "p0_0")
+    assert home["home"] == 1
+    assert home["cash"] == 250
     assert "stock" not in home
-    stocked = next(ent for ent in view["entities"] if ent.get("id") == "p0_5")
+    stocked = next(ent for ent in view["ports"] if ent.get("id") == "p0_5")
     assert stocked["stock"] == 50
     assert "home" not in stocked
-    assert _cell(view["grid"], 7, 0, 6) == "."
-    assert _cell(view["grid"], 6, 2, 6) == "r"
-    assert _cell(view["grid"], 3, 2, 6) == "D"
-    assert _cell(view["grid"], 0, 0, 6) == "H"
-    assert _cell(view["grid"], 0, 5, 6) == "P"
-    assert _cell(view["grid"], 7, 5, 6) == "h"
-
-    def edge(kind, src, dst):
-        return next(
-            item
-            for item in view["edges"]
-            if item["kind"] == kind and item["from"] == src and item["to"] == dst
-        )
-
-    assert edge("can_attack", f"s{destroyer.id}", f"s{cruiser.id}")["turns"] == 0
-    assert edge("can_load", f"s{merchant.id}", "p0_5")["turns"] == 1
-    assert edge("can_unload", f"s{merchant.id}", "p0_0")["turns"] == 0
-    assert edge("can_capture", f"s{landing.id}", "p7_5")["turns"] == 0
-    assert edge("threat", f"s{cruiser.id}", f"s{destroyer.id}")["turns"] == 0
-    assert edge("threat", f"s{cruiser.id}", f"s{merchant.id}")["turns"] == 0
-    assert edge("threat", f"s{cruiser.id}", f"s{landing.id}")["turns"] == 0
-    assert all(f"s{sub.id}" not in (item["from"], item["to"]) for item in view["edges"])
-
-    facts = {fact["id"]: fact for fact in view["facts"]}
-    assert facts[f"s{destroyer.id}"]["home_turns"] == 0
-    assert facts[f"s{destroyer.id}"]["cargo_turns"] == 0
-    assert facts[f"s{destroyer.id}"]["in_range"] == [f"s{cruiser.id}"]
-    assert facts[f"s{merchant.id}"]["home_turns"] == 0
-    assert facts[f"s{merchant.id}"]["cargo_turns"] == 1
-    assert facts[f"s{merchant.id}"]["in_range"] == []
-    assert facts[f"s{landing.id}"]["home_turns"] == 2
-    assert facts[f"s{landing.id}"]["cargo_turns"] == 1
-
-    near = build_view(engine, 0, legal, horizon=0, max_edges=20)
-    assert all(item["turns"] == 0 for item in near["edges"])
-    assert all(item["kind"] != "can_load" for item in near["edges"])
-    capped = build_view(engine, 0, legal, horizon=4, max_edges=1)
-    assert len(capped["edges"]) == 1
-    assert capped["edges"][0]["turns"] == 0
-    assert capped["edges"][0]["kind"] == "can_attack"
+    assert view["land"] == []
+    assert "\nLAND\nMOVES\n" in prompt
+    assert "(6,2)" in prompt
 
     assert len(view["moves"]) == len(legal)
     assert any(isinstance(action, AttackAction) for action in legal)
@@ -218,17 +193,15 @@ def test_stale_sighting_hides_true_position(tmp_path: Path) -> None:
     legal = engine.enumerate_legal(0)
     view = build_view(engine, 0, legal, horizon=4, max_edges=20)
     prompt = render_prompt(view)
-    ent = next(item for item in view["entities"] if item.get("id") == f"s{sub.id}")
+    ent = next(item for item in view["ships"] if item.get("id") == f"s{sub.id}")
     assert ent["pos"] == [3, 1]
-    assert ent["fresh"] is False
-    assert "[15,6]" not in prompt
-    assert _cell(view["grid"], 3, 1, 8) == "s"
-    assert _cell(view["grid"], 15, 6, 8) == "."
-    assert _cell(view["grid"], 15, 7, 8) == "#"
-    threat = next(item for item in view["edges"] if item["kind"] == "threat")
-    assert threat["from"] == f"s{sub.id}"
-    assert threat["to"] == f"s{merchant.id}"
-    assert threat["turns"] == 0
+    assert ent["fresh"] == 0
+    assert ent["stale"] == engine.turn - sight.turn_seen
+    assert "(15,6)" not in prompt
+    assert "(3,1)" in prompt
+    assert f"s{merchant.id}" in prompt
+    assert all(pos != [15, 6] for pos in view["land"])
+    assert [15, 7] not in view["land"]
 
 
 def test_wall_blocks_capture_path(tmp_path: Path) -> None:
@@ -245,10 +218,11 @@ def test_wall_blocks_capture_path(tmp_path: Path) -> None:
     legal = engine.enumerate_legal(0)
     view = build_view(engine, 0, legal, horizon=4, max_edges=20)
     assert any(
-        ent.get("id") == "p5_0" and ent.get("owner") == "enemy"
-        for ent in view["entities"]
+        ent.get("id") == "p5_0" and ent.get("owner") == "enemy" and ent.get("home") == 1
+        for ent in view["ports"]
     )
-    assert all(item["kind"] != "can_capture" for item in view["edges"])
+    assert view["land"] == [[2, 0], [2, 1], [2, 2]]
+    assert "\n0: 2\n1: 2\n2: 2\n" in render_prompt(view)
 
 
 def test_parse_choice_and_retry() -> None:
@@ -329,7 +303,12 @@ def test_thinking_blocks_do_not_choose_a_move() -> None:
 
     listed = {
         "choices": [
-            {"message": {"content": [{"type": "text", "text": "2 "}, "go"], "reasoning_content": None}}
+            {
+                "message": {
+                    "content": [{"type": "text", "text": "2 "}, "go"],
+                    "reasoning_content": None,
+                }
+            }
         ]
     }
     assert message_text(listed) == "2 go"
@@ -342,7 +321,10 @@ def test_thinking_blocks_do_not_choose_a_move() -> None:
     assert parse_choice(message_text(reasoning_only), 5) is None
 
     assert parse_choice("<think>99</think>\n2 go", 5) == (2, "go")
-    assert parse_choice("[Start thinking]\n7\n[End thinking]\n1 north", 5) == (1, "north")
+    assert parse_choice("[Start thinking]\n7\n[End thinking]\n1 north", 5) == (
+        1,
+        "north",
+    )
     assert parse_choice("<|content_thinking|>8<|content_text|>0 end", 3) == (0, "end")
     assert parse_choice("[Start thinking]\n4 I pick this", 10) is None
     assert parse_choice("<think>3", 5) is None
@@ -400,7 +382,7 @@ def test_fake_llm_plays_a_short_game(tmp_path: Path) -> None:
         if row["type"] != "decision":
             continue
         prompt = row["prompt"]
-        for section in ("FORMAT 2", "ENTITIES", "GRID", "FACTS", "EDGES", "MOVES"):
+        for section in ("FORMAT 3", "SHIPS", "PORTS", "LAND", "MOVES"):
             assert section in prompt
         assert prompt.startswith(STATIC_PREFIX)
         assert row["fallback"] is False
@@ -450,7 +432,7 @@ def test_fallback_random_still_finishes(tmp_path: Path) -> None:
         assert row["fallback"] is True
         assert row["action"]["type"] == "end"
         assert row["choice"] == 0
-        assert "ENTITIES" in row["prompt"]
+        assert "SHIPS" in row["prompt"]
         assert "usage" not in row
         assert "timings" not in row
 
@@ -499,3 +481,136 @@ def test_decision_log_records_usage(tmp_path: Path) -> None:
     assert [row["usage"]["prompt_tokens"] for row in decisions] == [1001, 1002]
     assert all(row["timings"]["prompt_ms"] == 12.5 for row in decisions)
     assert all(row["fallback"] is False for row in decisions)
+
+
+def _token_estimate(text: str) -> int:
+    """chars/4, or tiktoken cl100k when that package is installed."""
+    try:
+        import tiktoken
+
+        return len(tiktoken.get_encoding("cl100k_base").encode(text))
+    except Exception:
+        return (len(text) + 3) // 4
+
+
+def _standard_map(tmp_path: Path) -> str:
+    """160x80 board. Prefer map.json when that file is already this size."""
+    repo_map = (
+        Path(__file__).resolve().parents[1]
+        / "battleboats"
+        / "core"
+        / "config"
+        / "map.json"
+    )
+    if repo_map.is_file():
+        data = json.loads(repo_map.read_text())
+        if data.get("width") == 160 and data.get("height") == 80:
+            return str(repo_map)
+    from battleboats.core.config.generate_map import generate_map_json
+
+    yaml_path = (
+        Path(__file__).resolve().parents[1]
+        / "battleboats"
+        / "core"
+        / "config"
+        / "mapConfigLarge.yaml"
+    )
+    out = tmp_path / "map_160x80.json"
+    generate_map_json(str(yaml_path), str(out), seed=0)
+    return str(out)
+
+
+def _parse_land(prompt: str) -> set:
+    body = prompt.split("\nLAND\n", 1)[1].split("\nMOVES\n", 1)[0]
+    cells = set()
+    for line in body.splitlines():
+        if not line.strip():
+            continue
+        y_s, xs = line.split(": ", 1)
+        y = int(y_s)
+        for span in xs.split(","):
+            if "-" in span:
+                start_s, end_s = span.split("-", 1)
+                cells.update((x, y) for x in range(int(start_s), int(end_s) + 1))
+            else:
+                cells.add((int(span), y))
+    return cells
+
+
+def test_sparse_prompt_is_much_smaller_than_the_grid(tmp_path: Path) -> None:
+    """Opening and mid-game prompts stay far under the old 160x80 text grid."""
+    path = _standard_map(tmp_path)
+    engine = gameEngine(path)
+    engine.reset(seed=0)
+    assert (engine.map.width, engine.map.height) == (160, 80)
+    initial_view = build_view(engine, 0, engine.enumerate_legal(0))
+    initial = render_prompt(initial_view)
+
+    waters = [
+        (x, y)
+        for y in range(engine.map.height)
+        for x in range(engine.map.width)
+        if engine.map.is_water((x, y))
+    ]
+    base = waters[len(waters) // 3]
+    spots = [base]
+    for dist in (2, 4, 8, 12):
+        for x, y in waters:
+            if abs(x - base[0]) + abs(y - base[1]) == dist:
+                spots.append((x, y))
+                break
+    fleet = [
+        (0, ShipType.DESTROYER),
+        (0, ShipType.MERCHANT),
+        (0, ShipType.LANDING),
+        (1, ShipType.CRUISER),
+        (1, ShipType.SUBMARINE),
+        (1, ShipType.BATTLESHIP),
+    ]
+    spawned = []
+    for (owner, ship_type), pos in zip(fleet, spots):
+        spawned.append(engine._spawn_ship(owner, ship_type, pos))
+    occupied = {ship.position for ship in spawned}
+    far = next(pos for pos in reversed(waters) if pos not in occupied)
+    sub = next(ship for ship in spawned if ship.type is ShipType.SUBMARINE)
+    engine.map.relocate_ship(sub.id, sub.position, far)
+    sub.position = far
+    engine.turn = 12
+    engine._refresh_sightings()
+    for ship in engine.ships.values():
+        if ship.owner == 0 and ship.type is ShipType.MERCHANT:
+            ship.cargo = 30
+        if ship.owner == 0 and ship.type is ShipType.DESTROYER:
+            ship.tiles_moved_this_turn = 1
+            ship.has_attacked = True
+    for pos in sorted(engine.players[0].owned_port_positions):
+        if pos != engine.players[0].home_port:
+            engine.ports[pos].stockpile = 75
+            break
+    mid_view = build_view(engine, 0, engine.enumerate_legal(0))
+    mid = render_prompt(mid_view)
+
+    # The old GRID block alone was one character per cell plus a newline per row.
+    grid_chars = engine.map.width * engine.map.height + engine.map.height
+    for label, prompt in (("initial", initial), ("mid", mid)):
+        assert prompt.count(f"{engine.map.width}x{engine.map.height}") == 1, label
+        assert "GRID" not in prompt, label
+        assert len(prompt) * 2 < grid_chars, (label, len(prompt), grid_chars)
+        assert _token_estimate(prompt) < grid_chars // 6, (
+            label,
+            len(prompt),
+            _token_estimate(prompt),
+        )
+    coast = {
+        (ident[0], ident[1])
+        for kind, ident in build_entity_refs(engine, 0)
+        if kind == "coastline"
+    }
+    assert _parse_land(initial) == coast
+    assert _parse_land(mid) == coast
+    assert coast
+    assert len(initial_view["land"]) == len(coast)
+    assert "cargo=30" in mid
+    assert "attacked=1" in mid
+    assert "moved=1" in mid
+    assert "stock=75" in mid

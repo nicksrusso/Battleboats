@@ -34,10 +34,16 @@ def main() -> None:
     )
     parser.add_argument("--temperature", type=float, default=0.3)
     parser.add_argument(
-        "--horizon", type=int, default=4, help="Interaction lookahead in turns."
+        "--horizon",
+        type=int,
+        default=4,
+        help="Ignored. The prompt is the RL token view, not interaction edges.",
     )
     parser.add_argument(
-        "--max-edges", type=int, default=20, help="Cap on the interactions block."
+        "--max-edges",
+        type=int,
+        default=20,
+        help="Ignored. Kept so older commands still parse.",
     )
     parser.add_argument(
         "--max-tokens", type=int, default=48, help="Reply budget. Keep small."
