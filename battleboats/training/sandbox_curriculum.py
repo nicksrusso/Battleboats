@@ -154,6 +154,68 @@ def size_advances(updates: int, window: Sequence[float], need: int, threshold: f
     return updates >= min_updates and window_cleared(window, need, threshold)
 
 
+def _is_combat(skill: str) -> bool:
+    return skill.startswith("combat_")
+
+
+def plateaued(history: Sequence[float], n: int, threshold: float, *, higher_is_better: bool) -> bool:
+    """True when ``history`` has not improved by ``threshold`` over the last ``n`` points.
+
+    Improvement is ``(newer - older) / max(|older|, 1e-6)`` when higher is
+    better, and the opposite for a loss. A short history is not a plateau.
+    """
+    if n < 1 or len(history) < n:
+        return False
+    older = float(history[-n])
+    newer = float(history[-1])
+    base = max(abs(older), 1e-6)
+    gain = (newer - older) / base if higher_is_better else (older - newer) / base
+    return gain < threshold
+
+
+def relative_gain(history: Sequence[float], n: int, *, higher_is_better: bool) -> float:
+    """Signed improvement over the last ``n`` points. 1.0 until that span exists."""
+    if n < 1 or len(history) < n:
+        return 1.0
+    older = float(history[-n])
+    newer = float(history[-1])
+    base = max(abs(older), 1e-6)
+    return (newer - older) / base if higher_is_better else (older - newer) / base
+
+
+def drill_done(
+    skill: str,
+    *,
+    updates: int,
+    window: Sequence[float],
+    episodes: int,
+    reward_trace: Sequence[float],
+    value_trace: Sequence[float],
+    success_threshold: float,
+    need: int,
+    min_updates: int,
+    plateau_updates: int,
+    plateau_threshold: float,
+    combat_min_episodes: int,
+) -> bool:
+    """Goal drills use the success window. Combat drills use a plateau.
+
+    Combat is done when the mean raw reward and the value loss have each
+    improved by less than ``plateau_threshold`` across the last
+    ``plateau_updates`` updates, and the size has seen
+    ``combat_min_episodes``. Wins are not an input.
+    """
+    if _is_combat(skill):
+        if episodes < combat_min_episodes:
+            return False
+        return plateaued(
+            reward_trace, plateau_updates, plateau_threshold, higher_is_better=True
+        ) and plateaued(
+            value_trace, plateau_updates, plateau_threshold, higher_is_better=False
+        )
+    return size_advances(updates, window, need, success_threshold, min_updates)
+
+
 def _succeeded(skill: str, env) -> bool:
     if skill == "merchant":
         return bool(env.hauled)
@@ -161,7 +223,7 @@ def _succeeded(skill: str, env) -> bool:
         return bool(env.built)
     if skill == "landing":
         return bool(env.captured)
-    return bool(env.killed)
+    return False
 
 
 @dataclass
@@ -174,6 +236,10 @@ class SandboxRunConfig:
     success_threshold: float = 0.8
     window: int = 64
     min_updates: int = 3
+    plateau_threshold: float = 0.02
+    plateau_updates: int = 10
+    combat_min_episodes: int = 32
+    max_updates_per_size: int = 40
     max_episodes_per_size: int = 400
     decisions_per_update: int = 512
     rehearsal_frac: float = 0.15
@@ -217,6 +283,10 @@ def load_sandbox_config(path: Path) -> SandboxRunConfig:
         success_threshold=float(raw.get("success_threshold", 0.8)),
         window=int(raw.get("window", 64)),
         min_updates=int(raw.get("min_updates", 3)),
+        plateau_threshold=float(raw.get("plateau_threshold", 0.02)),
+        plateau_updates=int(raw.get("plateau_updates", 10)),
+        combat_min_episodes=int(raw.get("combat_min_episodes", 32)),
+        max_updates_per_size=int(raw.get("max_updates_per_size", 40)),
         max_episodes_per_size=int(raw.get("max_episodes_per_size", 400)),
         decisions_per_update=int(raw.get("decisions_per_update", 512)),
         rehearsal_frac=float(raw.get("rehearsal_frac", 0.15)),
@@ -299,17 +369,41 @@ def run_sandboxes(cfg: SandboxRunConfig, *, resume: bool = True) -> Dict:
 def _run_size(cfg, state, policy, envs, rng, device, logger):
     """Train every sandbox at the current board size. Returns (cleared, policy)."""
     size = cfg.sizes[state["size_index"]]
+    state["size_capped"] = False
     windows = {
         skill: deque(state["windows"].get(skill, []), maxlen=cfg.window) for skill in cfg.skills
     }
+    reward_windows = {
+        skill: deque(state["reward_windows"].get(skill, []), maxlen=cfg.window) for skill in cfg.skills
+    }
     while not _size_cleared(cfg, state, windows):
         updates = int(state.get("updates_this_size", 0))
+        if updates >= cfg.max_updates_per_size:
+            print(
+                f"[sandboxes] WARNING {size}x{size} hit max_updates_per_size="
+                f"{cfg.max_updates_per_size}; advancing"
+            )
+            logger.log({"size": size, "update": updates, "size_cap": 1.0})
+            state["size_capped"] = True
+            break
         if updates >= cfg.min_updates and _unclear_and_capped(cfg, state, windows):
             break
-        metrics = _one_mixed_update(cfg, state, size, policy, envs, rng, device, windows)
+        metrics = _one_mixed_update(
+            cfg, state, size, policy, envs, rng, device, windows, reward_windows
+        )
         updates += 1
         state["updates_this_size"] = updates
         state["windows"] = {skill: list(window) for skill, window in windows.items()}
+        state["reward_windows"] = {
+            skill: list(window) for skill, window in reward_windows.items()
+        }
+        for skill in cfg.skills:
+            state["reward_trace"].setdefault(skill, []).append(
+                float(metrics.get(f"{skill}/window_reward", 0.0))
+            )
+            state["value_trace"].setdefault(skill, []).append(
+                float(metrics.get(f"{skill}/value_loss", 0.0))
+            )
         record = {"size": size, "update": updates, **metrics}
         _append_history(cfg, record)
         parts = []
@@ -317,10 +411,17 @@ def _run_size(cfg, state, policy, envs, rng, device, logger):
         for skill in cfg.skills:
             rate = metrics.get(f"{skill}/success_rate", 0.0)
             reward = metrics.get(f"{skill}/mean_reward", 0.0)
-            filled = len(windows[skill])
-            parts.append(f"{skill} {rate:.2f}/{reward:.2f} ({filled}/{cfg.window})")
+            done = _drill_done(cfg, state, skill, windows[skill])
+            parts.append(
+                f"{skill} {'done' if done else 'open'} {rate:.2f}/{reward:.2f}"
+            )
             log_row[f"{skill}/success_rate"] = rate
             log_row[f"{skill}/mean_reward"] = reward
+            log_row[f"{skill}/window_reward"] = metrics.get(f"{skill}/window_reward", 0.0)
+            log_row[f"{skill}/plateau_gain"] = metrics.get(f"{skill}/plateau_gain", 1.0)
+            log_row[f"{skill}/value_loss"] = metrics.get(f"{skill}/value_loss", 0.0)
+            log_row[f"{skill}/value_plateau_gain"] = metrics.get(f"{skill}/value_plateau_gain", 1.0)
+            log_row[f"{skill}/gate"] = 1.0 if done else 0.0
             log_row[f"{skill}/return_scale"] = metrics.get(f"{skill}/return_scale", 1.0)
         print(
             f"[size {size}x{size} u{updates}] "
@@ -333,15 +434,14 @@ def _run_size(cfg, state, policy, envs, rng, device, logger):
             save_checkpoint(policy, cfg.run_dir / f"update_{updates}.pt", extra={"size": size})
         _save_state(cfg.run_dir / "state.json", state)
     unmet = []
+    forced = bool(state.get("size_capped"))
     for skill in cfg.skills:
         window = windows[skill]
         rate = (sum(window) / len(window)) if window else 0.0
-        gate_met = size_advances(
-            int(state["updates_this_size"]), window, cfg.window, cfg.success_threshold, cfg.min_updates
-        )
+        gate_met = _drill_done(cfg, state, skill, window)
         if not gate_met:
             unmet.append((skill, rate, int(state["episodes"].get(skill, 0))))
-        _record_size(state, skill, size, rate, gate_met=gate_met)
+        _record_size(state, skill, size, rate, gate_met=gate_met, capped=forced and not gate_met)
         save_checkpoint(
             policy,
             cfg.run_dir / skill / f"size_{size}.pt",
@@ -349,7 +449,7 @@ def _run_size(cfg, state, policy, envs, rng, device, logger):
         )
     save_checkpoint(policy, cfg.run_dir / "latest.pt", extra={"size": size, "skill_count": 0})
     _write_summary(cfg, state)
-    if unmet and not cfg.allow_unmet:
+    if unmet and not forced and not cfg.allow_unmet:
         skill, rate, episodes = unmet[0]
         state["reason"] = (
             f"{skill} {size}x{size} stopped at window {rate:.2f} "
@@ -358,11 +458,12 @@ def _run_size(cfg, state, policy, envs, rng, device, logger):
         print(f"[sandboxes] STOP {state['reason']}")
         return False, policy
     for skill, rate, _episodes in unmet:
-        print(f"[sandboxes] {skill} {size}x{size} missed the gate; allow_unmet advances")
+        if not forced:
+            print(f"[sandboxes] {skill} {size}x{size} missed the gate; allow_unmet advances")
     return True, policy
 
 
-def _one_mixed_update(cfg, state, focus_size, policy, envs, rng, device, windows):
+def _one_mixed_update(cfg, state, focus_size, policy, envs, rng, device, windows, reward_windows):
     """Equal decision budget per sandbox, rewards scaled per sandbox."""
     smaller = cfg.sizes[: state["size_index"]]
     budget = max(1, cfg.decisions_per_update // len(cfg.skills))
@@ -376,13 +477,10 @@ def _one_mixed_update(cfg, state, focus_size, policy, envs, rng, device, windows
         focus_hits: List[float] = []
         stats = state["return_stats"].setdefault(skill, {"mean": 0.0, "m2": 0.0, "count": 0})
         window = windows[skill]
-        already = size_advances(
-            int(state.get("updates_this_size", 0)),
-            window,
-            cfg.window,
-            cfg.success_threshold,
-            cfg.min_updates,
-        )
+        reward_window = reward_windows[skill]
+        squared = 0.0
+        valued = 0
+        already = _drill_done(cfg, state, skill, window)
         while decisions < budget and episodes < 32:
             _name, size, role = choose_mixed_episode(
                 rng,
@@ -414,18 +512,37 @@ def _one_mixed_update(cfg, state, focus_size, policy, envs, rng, device, windows
                 buffer.add(traj)
                 decisions += len(traj)
             raw_returns.append(raw)
+            if traj:
+                for tr in traj:
+                    squared += (tr.value - tr.ret) ** 2
+                    valued += 1
             ok = 1.0 if _succeeded(skill, env) else 0.0
             state["episodes"][skill] = int(state["episodes"].get(skill, 0)) + 1
             if role == "focus" and not already:
-                window.append(ok)
-                focus_hits.append(ok)
+                reward_window.append(raw)
+                if not _is_combat(skill):
+                    window.append(ok)
+                    focus_hits.append(ok)
             episodes += 1
             if episodes >= 1 and decisions >= budget:
                 break
         rate = (sum(window) / len(window)) if window else 0.0
+        window_reward = (sum(reward_window) / len(reward_window)) if reward_window else 0.0
         metrics[f"{skill}/success_rate"] = rate
         metrics[f"{skill}/mean_reward"] = (
             sum(raw_returns) / len(raw_returns) if raw_returns else 0.0
+        )
+        metrics[f"{skill}/window_reward"] = window_reward
+        metrics[f"{skill}/value_loss"] = (squared / valued) if valued else 0.0
+        metrics[f"{skill}/plateau_gain"] = relative_gain(
+            list(state["reward_trace"].get(skill, [])) + [window_reward],
+            cfg.plateau_updates,
+            higher_is_better=True,
+        )
+        metrics[f"{skill}/value_plateau_gain"] = relative_gain(
+            list(state["value_trace"].get(skill, [])) + [metrics[f"{skill}/value_loss"]],
+            cfg.plateau_updates,
+            higher_is_better=False,
         )
         metrics[f"{skill}/return_scale"] = return_scale(
             float(stats.get("mean", 0.0)), float(stats.get("m2", 0.0)), int(stats.get("count", 0))
@@ -500,9 +617,9 @@ def _load_or_new(cfg, state, device):
     return policy
 
 
-def _record_size(state, skill, size, rate, *, gate_met: bool) -> None:
+def _record_size(state, skill, size, rate, *, gate_met: bool, capped: bool = False) -> None:
     block = state["summary"].setdefault(skill, {"sizes": {}, "cleared": False})
-    block["sizes"][str(size)] = {"success_rate": rate, "gate_met": gate_met}
+    block["sizes"][str(size)] = {"success_rate": rate, "gate_met": gate_met, "capped": capped}
 
 
 def _write_summary(cfg, state) -> None:
@@ -535,6 +652,9 @@ def _fresh_state() -> Dict:
         "size_index": 0,
         "updates_this_size": 0,
         "windows": {},
+        "reward_windows": {},
+        "reward_trace": {},
+        "value_trace": {},
         "episodes": {},
         "return_stats": {},
         "episode_counter": 0,
@@ -549,12 +669,18 @@ def _ensure_runtime_state(state: Dict, cfg) -> None:
     state.setdefault("size_index", 0)
     state.setdefault("updates_this_size", 0)
     state.setdefault("windows", {})
+    state.setdefault("reward_windows", {})
+    state.setdefault("reward_trace", {})
+    state.setdefault("value_trace", {})
     state.setdefault("episodes", {})
     state.setdefault("return_stats", {})
     state.setdefault("episode_counter", 0)
     state.setdefault("summary", {})
     for skill in cfg.skills:
         state["windows"].setdefault(skill, [])
+        state["reward_windows"].setdefault(skill, [])
+        state["reward_trace"].setdefault(skill, [])
+        state["value_trace"].setdefault(skill, [])
         state["episodes"].setdefault(skill, 0)
         state["return_stats"].setdefault(skill, {"mean": 0.0, "m2": 0.0, "count": 0})
 
@@ -562,24 +688,39 @@ def _ensure_runtime_state(state: Dict, cfg) -> None:
 def _reset_size_progress(state: Dict, cfg) -> None:
     state["updates_this_size"] = 0
     state["windows"] = {skill: [] for skill in cfg.skills}
+    state["reward_windows"] = {skill: [] for skill in cfg.skills}
+    state["reward_trace"] = {skill: [] for skill in cfg.skills}
+    state["value_trace"] = {skill: [] for skill in cfg.skills}
     state["episodes"] = {skill: 0 for skill in cfg.skills}
+    state["size_capped"] = False
 
 
-def _size_cleared(cfg, state, windows) -> bool:
-    updates = int(state.get("updates_this_size", 0))
-    return all(
-        size_advances(updates, windows[skill], cfg.window, cfg.success_threshold, cfg.min_updates)
-        for skill in cfg.skills
+def _drill_done(cfg, state, skill: str, window) -> bool:
+    return drill_done(
+        skill,
+        updates=int(state.get("updates_this_size", 0)),
+        window=window,
+        episodes=int(state["episodes"].get(skill, 0)),
+        reward_trace=state["reward_trace"].get(skill, []),
+        value_trace=state["value_trace"].get(skill, []),
+        success_threshold=cfg.success_threshold,
+        need=cfg.window,
+        min_updates=cfg.min_updates,
+        plateau_updates=cfg.plateau_updates,
+        plateau_threshold=cfg.plateau_threshold,
+        combat_min_episodes=cfg.combat_min_episodes,
     )
 
 
+def _size_cleared(cfg, state, windows) -> bool:
+    return all(_drill_done(cfg, state, skill, windows[skill]) for skill in cfg.skills)
+
+
 def _unclear_and_capped(cfg, state, windows) -> bool:
-    updates = int(state.get("updates_this_size", 0))
     for skill in cfg.skills:
-        cleared = size_advances(
-            updates, windows[skill], cfg.window, cfg.success_threshold, cfg.min_updates
-        )
-        if not cleared and int(state["episodes"].get(skill, 0)) >= cfg.max_episodes_per_size:
+        if not _drill_done(cfg, state, skill, windows[skill]) and int(
+            state["episodes"].get(skill, 0)
+        ) >= cfg.max_episodes_per_size:
             return True
     return False
 

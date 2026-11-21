@@ -10,11 +10,10 @@ are sparse completion rewards (+1, then the episode ends):
   buy itself is the real ``BuildShipAction``.
 - landing: +1 when the landing ship captures the enemy home. No enemy ships.
   Sightings are the engine's real fog.
-- combat_<type>: +1 when the learner destroys a scripted enemy ship of the
-  same type. The scripted policy fights and moves that ship; its owner has
-  no cash, so it does not buy a second fleet. On small boards the enemy's
-  strength is scaled down (15% at 3×3, full strength at 10×10) so a shot can
-  actually kill. The reward is still only the kill. Sightings are real fog.
+- combat_<type>: a fixed number of turns against a scripted enemy of the
+  same type. The reward is the change in relative combat power, not a kill.
+  On small boards that enemy's strength is scaled down (15% at 3×3, full
+  strength at 10×10). Sightings are real fog.
 
 ``skill_index`` is the one-hot slot the shared policy conditions on.
 """
@@ -70,6 +69,40 @@ def enemy_strength_scale(width: int) -> float:
     t = (int(width) - 3) / 7.0
     t = min(1.0, max(0.0, t))
     return 0.15 + 0.85 * t
+
+
+def ship_combat_power(stats: ShipStats) -> float:
+    """Power of one live ship. A destroyed ship contributes 0.
+
+    ``strength`` is the engine kill-curve stat. Range and speed scale it.
+    No per-type constants: every hull uses the same product.
+
+    power = strength * (1 + attack_range) * speed
+    """
+    return float(stats.strength) * (1.0 + float(stats.attack_range)) * float(stats.speed)
+
+
+def side_power(engine, player_id: int) -> float:
+    total = 0.0
+    for sid in engine.players[player_id].owned_ship_ids:
+        ship = engine.ships.get(sid)
+        if ship is not None:
+            total += ship_combat_power(ship.stats)
+    return total
+
+
+def combat_outcome(my_start: float, enemy_start: float, my_end: float, enemy_end: float) -> float:
+    """Change in (own power - enemy power), divided by the starting total.
+
+    Unchanged fleets score 0. Killing the enemy and living is positive.
+    Dying while the enemy lives is negative.
+    """
+    denom = float(my_start) + float(enemy_start)
+    if denom <= 0.0:
+        return 0.0
+    start_edge = float(my_start) - float(enemy_start)
+    end_edge = float(my_end) - float(enemy_end)
+    return (end_edge - start_edge) / denom
 
 
 def weaken_strength(stats: ShipStats, scale: float) -> ShipStats:
@@ -517,7 +550,12 @@ class LandingSandbox(_Sandbox):
 
 
 class CombatSandbox(_Sandbox):
-    """One combat ship versus a scripted enemy of the same type. +1 on the kill."""
+    """One combat ship versus a scripted enemy of the same type.
+
+    The episode always lasts ``max_turns``. The only reward is
+    ``combat_outcome`` at that horizon. A kill does not end the episode
+    and does not add a bonus.
+    """
 
     def __init__(
         self,
@@ -535,6 +573,10 @@ class CombatSandbox(_Sandbox):
         self.ship_type = COMBAT_SHIPS[ship]
         self._killed = False
         self._target_id: Optional[int] = None
+        self._scored = False
+        self.episode_reward = 0.0
+        self._my0 = 0.0
+        self._en0 = 0.0
         super().__init__(map_json_path, width=width, height=height, max_turns=max_turns)
 
     @property
@@ -564,6 +606,8 @@ class CombatSandbox(_Sandbox):
         assert self.engine is not None
         self._rng = random.Random((seed or 0) + 3)
         self._killed = False
+        self._scored = False
+        self.episode_reward = 0.0
         lay = self._layout
         own = lay["learner_ship"]
         tgt = lay["enemy_ship"]
@@ -586,6 +630,8 @@ class CombatSandbox(_Sandbox):
         self.engine.turn = 0
         self.engine.winner = None
         self.engine._refresh_sightings()
+        self._my0 = side_power(self.engine, 0)
+        self._en0 = side_power(self.engine, 1)
         self._filter((MoveAction, AttackAction, EndTurnAction))
 
     def _capture_reward_state(self) -> Dict:
@@ -593,21 +639,22 @@ class CombatSandbox(_Sandbox):
 
     def _reward_after_step(self, agent, action, pre) -> Dict[str, float]:
         rewards = {a: 0.0 for a in self.agents}
-        if (
-            not self._killed
-            and self.engine is not None
-            and self._target_id is not None
-            and self._target_id not in self.engine.ships
-        ):
+        assert self.engine is not None
+        if self._target_id is not None and self._target_id not in self.engine.ships:
             self._killed = True
-            rewards[self._agent_name(0)] = 1.0
+        if not self._scored and self.engine.turn >= self.max_turns:
+            self.episode_reward = combat_outcome(
+                self._my0, self._en0, side_power(self.engine, 0), side_power(self.engine, 1)
+            )
+            self._scored = True
+            rewards[self._agent_name(0)] = self.episode_reward
         return rewards
 
     def _is_terminated(self) -> bool:
-        return self._killed
+        return False
 
     def _after_engine_step(self, agent, action) -> None:
-        self._pass_opponent(scripted=True, stop=lambda: self._killed)
+        self._pass_opponent(scripted=True, stop=lambda: False)
         if self.engine is not None:
             self.engine.players[1].cash = 0
 
@@ -632,9 +679,16 @@ def make_sandbox(skill: str, map_json_path: str, *, width: int, height: int, max
 
 
 def horizon(skill: str, size: int) -> Tuple[int, int]:
-    """(max_turns, max_steps) for a square board of this size."""
+    """(max_turns, max_steps) for a square board of this size.
+
+    Combat is a fixed fight: ``max(8, 3 * size)`` turns (9 on 3×3, 30 on 10×10).
+    The reward is paid at that horizon, not when a ship dies.
+    """
     if skill == "builder":
         return max(10, size * 4), max(36, size * 12)
     if skill == "merchant":
         return max(8, size * 4), max(24, size * 12)
+    if skill.startswith("combat_"):
+        turns = max(8, int(size) * 3)
+        return turns, max(24, turns * 8)
     return max(8, size * 3), max(16, size * 8)

@@ -22,8 +22,10 @@ from battleboats.envs.sandboxes import (
     LandingSandbox,
     MerchantSandbox,
     ShipBuildSandbox,
+    combat_outcome,
     enemy_strength_scale,
     make_sandbox,
+    side_power,
 )
 from battleboats.envs.skill_maps import write_two_home_map
 from battleboats.training.curriculum import ArchSpec
@@ -35,7 +37,9 @@ from battleboats.training.sandbox_curriculum import (
     SandboxRunConfig,
     choose_episode,
     choose_mixed_episode,
+    drill_done,
     load_sandbox_config,
+    plateaued,
     return_scale,
     run_sandboxes,
     scale_trajectory,
@@ -163,9 +167,9 @@ def test_landing_capture_is_the_only_reward(tmp_path: Path) -> None:
     far_env.close()
 
 
-def test_combat_scripted_enemy_is_weakened_and_killable(tmp_path: Path) -> None:
+def test_combat_reward_is_the_power_change_at_the_horizon(tmp_path: Path) -> None:
     path = write_two_home_map(tmp_path / "c.json", 3, 3)
-    env = CombatSandbox(str(path), ship="destroyer", width=3, height=3, max_turns=8)
+    env = CombatSandbox(str(path), ship="destroyer", width=3, height=3, max_turns=3)
     env.reset(seed=0)
     target = env.engine.ships[env._target_id]
     assert target.type is ShipType.DESTROYER
@@ -176,25 +180,20 @@ def test_combat_scripted_enemy_is_weakened_and_killable(tmp_path: Path) -> None:
     env.step(EndTurnAction())
     assert env.engine.current_player == 0
     assert env.engine.players[1].cash == 0
-    env.reset(seed=1)
-    killed = False
-    for _ in range(24):
+    assert env.terminations["player_0"] is False
+    assert env.rewards["player_0"] == 0.0
+    for _ in range(30):
         if env.terminations["player_0"] or env.truncations["player_0"]:
             break
-        legal = env.infos["player_0"]["legal_actions"]
-        attacks = [a for a in legal if isinstance(a, AttackAction)]
-        if attacks:
-            env.step(attacks[0])
-            if env.killed:
-                killed = True
-                break
-            continue
-        tgt = env.engine.ships.get(env._target_id)
-        if tgt is None:
-            break
-        _step_toward(env, tgt.position)
-    assert killed or env.killed
-    assert env.rewards["player_0"] == 1.0
+        env.step(EndTurnAction())
+    assert env.terminations["player_0"] is False
+    assert env.truncations["player_0"] is True
+    assert env.engine.turn >= 3
+    expected = combat_outcome(
+        env._my0, env._en0, side_power(env.engine, 0), side_power(env.engine, 1)
+    )
+    assert env.episode_reward == expected
+    assert env.rewards["player_0"] == expected
     env.close()
 
 
@@ -303,6 +302,69 @@ def test_return_scale_shrinks_only_the_larger_sandbox() -> None:
     assert large["mean"] == 50.0
 
 
+def test_combat_plateau_ignores_wins_and_the_update_cap_advances(tmp_path: Path) -> None:
+    flat = [0.2] * 10
+    assert plateaued(flat, 10, 0.02, higher_is_better=True)
+    assert plateaued([0.4] * 10, 10, 0.02, higher_is_better=False)
+    assert not plateaued([0.01 * i for i in range(1, 11)], 10, 0.02, higher_is_better=True)
+    assert not plateaued([1.0, 0.5], 2, 0.02, higher_is_better=False)
+    common = dict(
+        updates=10,
+        window=[0.0] * 64,
+        episodes=40,
+        success_threshold=0.8,
+        need=64,
+        min_updates=3,
+        plateau_updates=10,
+        plateau_threshold=0.02,
+        combat_min_episodes=32,
+    )
+    assert drill_done(
+        "combat_destroyer",
+        reward_trace=flat,
+        value_trace=[0.4] * 10,
+        **common,
+    )
+    assert not drill_done(
+        "combat_destroyer",
+        reward_trace=[0.01 * i for i in range(1, 11)],
+        value_trace=[0.4] * 10,
+        **common,
+    )
+    assert not drill_done(
+        "combat_destroyer",
+        reward_trace=flat,
+        value_trace=[0.4] * 10,
+        **{**common, "episodes": 10},
+    )
+    assert not drill_done("merchant", reward_trace=flat, value_trace=[0.4] * 10, **common)
+
+    cfg = SandboxRunConfig(
+        run_dir=tmp_path / "cap",
+        skills=["merchant"],
+        sizes=[3],
+        device="cpu",
+        success_threshold=0.99,
+        window=50,
+        max_episodes_per_size=100,
+        max_updates_per_size=1,
+        decisions_per_update=4,
+        rehearsal_frac=0.0,
+        size_mix_frac=0.0,
+        eval_episodes=0,
+        allow_unmet=False,
+        min_updates=5,
+        arch=ArchSpec(d_model=32, nhead=2, num_layers=1, dim_feedforward=64, dropout=0.0),
+        ppo=PPOHyper(epochs=1, minibatch_size=2, ent_coef=0.01),
+    )
+    result = run_sandboxes(cfg, resume=False)
+    assert result["ok"]
+    summary = json.loads((tmp_path / "cap" / "summary.json").read_text())
+    size = summary["skills"]["merchant"]["sizes"]["3"]
+    assert size["gate_met"] is False
+    assert size["capped"] is True
+
+
 def test_unknown_skill_rejected() -> None:
     try:
         skill_index("league")
@@ -322,6 +384,10 @@ def test_load_real_config() -> None:
     assert cfg.success_threshold == 0.8
     assert cfg.window == 64
     assert cfg.min_updates == 3
+    assert cfg.plateau_threshold == 0.02
+    assert cfg.plateau_updates == 10
+    assert cfg.combat_min_episodes == 32
+    assert cfg.max_updates_per_size == 40
     assert cfg.device == "cpu"
     assert cfg.wandb is False
     assert cfg.wandb_project == "battleboats-skill-pipeline"
