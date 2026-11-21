@@ -20,6 +20,7 @@ import torch
 import yaml
 
 from battleboats.envs.battleboats_aec import BattleboatsAEC
+from battleboats.envs.map_pool import PoolSize, build_map_pool, episode_limits
 from battleboats.envs.skill_maps import write_full_map
 from battleboats.training.checkpoints import frozen_copy, load_checkpoint, save_checkpoint
 from battleboats.training.curriculum import ArchSpec, _infer_token_dim, _new_policy
@@ -51,6 +52,13 @@ class SelfPlayConfig:
     random_opponent_frac: float = 0.15
     save_every: int = 10
     wandb: bool = False
+    # Random maps from core/config/generate_map.py. When set, width/height/
+    # map_count are ignored, each episode draws a map uniformly from the pool,
+    # and max_turns/max_steps are scaled per map by home distance over
+    # ref_home_distance (the 8x8 boards' 14).
+    map_pool: List[PoolSize] = field(default_factory=list)
+    land_fraction: float = 0.02
+    ref_home_distance: int = 14
 
     def __post_init__(self) -> None:
         self.run_dir = Path(self.run_dir)
@@ -82,6 +90,9 @@ def load_selfplay_config(path: Path) -> SelfPlayConfig:
         random_opponent_frac=float(raw.get("random_opponent_frac", 0.15)),
         save_every=int(raw.get("save_every", 10)),
         wandb=bool(raw.get("wandb", False)),
+        map_pool=[PoolSize(**entry) for entry in raw.get("map_pool") or []],
+        land_fraction=float(raw.get("land_fraction", 0.02)),
+        ref_home_distance=int(raw.get("ref_home_distance", 14)),
     )
 
 
@@ -142,10 +153,26 @@ def run_selfplay(cfg: SelfPlayConfig, *, resume: bool = True) -> Dict[str, Any]:
         state.update(json.loads(state_path.read_text()))
 
     map_dir = cfg.run_dir / "maps"
-    maps = [
-        write_full_map(map_dir / f"map_{i}.json", cfg.width, cfg.height, seed=cfg.seed + i)
-        for i in range(max(1, cfg.map_count))
-    ]
+    if cfg.map_pool:
+        maps = build_map_pool(map_dir, cfg.map_pool, seed=cfg.seed, land_fraction=cfg.land_fraction)
+    else:
+        maps = [
+            write_full_map(map_dir / f"map_{i}.json", cfg.width, cfg.height, seed=cfg.seed + i)
+            for i in range(max(1, cfg.map_count))
+        ]
+    map_info = []
+    for path in maps:
+        data = json.loads(Path(path).read_text())
+        if cfg.map_pool:
+            turns, steps = episode_limits(
+                data,
+                max_turns=cfg.max_turns,
+                max_steps=cfg.max_steps,
+                ref_home_distance=cfg.ref_home_distance,
+            )
+        else:
+            turns, steps = cfg.max_turns, cfg.max_steps
+        map_info.append({"size": f"{data['width']}x{data['height']}", "max_turns": turns, "max_steps": steps})
     env = BattleboatsAEC(maps[0], max_turns=cfg.max_turns)
     env.reset(seed=cfg.seed)
 
@@ -177,13 +204,29 @@ def run_selfplay(cfg: SelfPlayConfig, *, resume: bool = True) -> Dict[str, Any]:
     ep = int(state["episode"])
     print(
         f"[selfplay] device={device} updates={cfg.updates} pool={cfg.snapshot_pool} "
-        f"random_frac={cfg.random_opponent_frac} map={cfg.width}x{cfg.height}"
+        f"random_frac={cfg.random_opponent_frac} "
+        + (
+            f"map_pool={len(maps)} sizes={sorted({m['size'] for m in map_info})}"
+            if cfg.map_pool
+            else f"map={cfg.width}x{cfg.height}"
+        )
     )
 
+    def map_index(episode_index: int) -> int:
+        if cfg.map_pool:
+            # Seeded by episode so a resumed run draws the same sequence.
+            return random.Random(cfg.seed * 1_000_003 + episode_index).randrange(len(maps))
+        return episode_index % len(maps)
+
     def reset(episode_index: int) -> int:
-        env.map_json_path = maps[episode_index % len(maps)]
+        i = map_index(episode_index)
+        env.map_json_path = maps[i]
+        env.max_turns = map_info[i]["max_turns"]
         env.reset(seed=cfg.seed + episode_index)
         return episode_index % 2
+
+    def steps_for(episode_index: int) -> int:
+        return map_info[map_index(episode_index)]["max_steps"]
 
     def opponent_for(episode_index: int):
         if rng.random() < cfg.random_opponent_frac:
@@ -200,11 +243,12 @@ def run_selfplay(cfg: SelfPlayConfig, *, resume: bool = True) -> Dict[str, Any]:
             rng,
             target_decisions=cfg.rollout_decisions,
             hyper=cfg.ppo,
-            max_steps=cfg.max_steps,
+            max_steps=steps_for,
             reset=reset,
             opponent_for=opponent_for,
             use_env_reward=False,
             episode_start=ep,
+            annotate=lambda info, e: {**info, "map_size": f"{e.engine.map.width}x{e.engine.map.height}"},
         )
         metrics = apply_ppo(policy, optimizer, buffer, cfg.ppo, device)
         wins = sum(1 for info in infos if info.get("outcome", 0) > 0)
@@ -212,6 +256,12 @@ def run_selfplay(cfg: SelfPlayConfig, *, resume: bool = True) -> Dict[str, Any]:
         n = max(1, len(infos))
         turns = [int(info.get("turn", 0)) for info in infos]
         step_counts = [int(info.get("steps", 0)) for info in infos]
+        by_size: Dict[str, Dict[str, int]] = {}
+        for info in infos:
+            b = by_size.setdefault(info.get("map_size", "?"), {"games": 0, "wins": 0, "draws": 0})
+            b["games"] += 1
+            b["wins"] += int(info.get("outcome", 0) > 0)
+            b["draws"] += int(info.get("outcome", 0) == 0)
         row = {
             "update": update + 1,
             "win_rate": wins / n,
@@ -220,6 +270,7 @@ def run_selfplay(cfg: SelfPlayConfig, *, resume: bool = True) -> Dict[str, Any]:
             "max_turn": max(turns) if turns else 0,
             "mean_steps": (sum(step_counts) / len(step_counts)) if step_counts else 0.0,
             "pool": snapshots.names(),
+            "by_size": by_size,
             **{f"ppo_{k}": v for k, v in metrics.items()},
         }
         with history.open("a") as f:
@@ -230,11 +281,16 @@ def run_selfplay(cfg: SelfPlayConfig, *, resume: bool = True) -> Dict[str, Any]:
             f"games={row['games']} max_turn={row['max_turn']} "
             f"mean_steps={row['mean_steps']:.0f} pool={len(snapshots.paths)} "
             f"ent={metrics['entropy']:.3f}"
+            + (
+                " sizes=" + ",".join(f"{k}:{v['games']}" for k, v in sorted(by_size.items()))
+                if cfg.map_pool
+                else ""
+            )
         )
         if use_wandb:
             import wandb
 
-            wandb.log({k: v for k, v in row.items() if k != "pool"})
+            wandb.log({k: v for k, v in row.items() if k not in ("pool", "by_size")})
         save_checkpoint(policy, latest, extra={"update": update + 1})
         if cfg.save_every and (update + 1) % cfg.save_every == 0:
             save_checkpoint(policy, cfg.run_dir / f"update_{update + 1}.pt")
