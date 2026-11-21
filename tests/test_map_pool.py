@@ -80,3 +80,17 @@ def test_one_update_on_a_pool(tmp_path: Path) -> None:
     assert row["update"] == 1
     assert sum(v["games"] for v in row["by_size"].values()) == row["games"]
     assert set(row["by_size"]) <= {"8x4", "12x6"}
+    assert set(row["purchases"]) == {
+        "carrier",
+        "battleship",
+        "cruiser",
+        "destroyer",
+        "submarine",
+        "merchant",
+        "landing",
+        "builder",
+    }
+    assert row["purchases_cheap"] + row["purchases_expensive"] == sum(row["purchases"].values())
+    assert row["purchases_cheap"] == sum(
+        row["purchases"][k] for k in ("merchant", "destroyer", "submarine")
+    )

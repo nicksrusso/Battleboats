@@ -142,3 +142,44 @@ def test_snapshot_ring_drops_oldest(tmp_path: Path) -> None:
     sampled = fresh.sample(__import__("random").Random(0))
     assert sampled is not None
     save_checkpoint(sampled, tmp_path / "roundtrip.pt")
+
+
+def test_purchase_mix_splits_cheap_and_expensive_hulls() -> None:
+    from battleboats.core.shipyard.ship_type import ShipType
+    from battleboats.training.selfplay_purchases import (
+        aggregate_purchases,
+        format_purchase_line,
+        is_cheap_hull,
+        purchase_mix,
+        record_purchase,
+    )
+
+    cheap = {ship.name.lower() for ship in ShipType if is_cheap_hull(ship)}
+    expensive = {ship.name.lower() for ship in ShipType if not is_cheap_hull(ship)}
+    assert cheap == {"merchant", "destroyer", "submarine"}
+    assert expensive == {"cruiser", "battleship", "carrier", "landing", "builder"}
+
+    infos = [
+        {"purchases": {"merchant": 2, "cruiser": 1}},
+        {"purchases": {"destroyer": 3, "landing": 4, "builder": 1}},
+    ]
+    mix = purchase_mix(aggregate_purchases(infos))
+    assert mix["purchases"]["merchant"] == 2
+    assert mix["purchases"]["destroyer"] == 3
+    assert mix["purchases"]["cruiser"] == 1
+    assert mix["purchases"]["landing"] == 4
+    assert mix["purchases"]["builder"] == 1
+    assert mix["purchases"]["submarine"] == 0
+    assert mix["purchases_cheap"] == 5
+    assert mix["purchases_expensive"] == 6
+    line = format_purchase_line(mix)
+    assert "buys=" in line and "cheap=5" in line and "expensive=6" in line
+    assert "merchant:2" in line and "landing:4" in line
+
+    counts = {}
+    record_purchase(counts, ShipType.BATTLESHIP)
+    record_purchase(counts, ShipType.BATTLESHIP)
+    assert purchase_mix(counts)["purchases_expensive"] == 2
+    assert purchase_mix(counts)["purchases_cheap"] == 0
+    assert format_purchase_line(purchase_mix({})) == "buys=none cheap=0 expensive=0"
+

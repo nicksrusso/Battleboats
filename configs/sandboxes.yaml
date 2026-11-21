@@ -1,10 +1,13 @@
 # Sandbox warm-up for the full-game pointer net. skill_count is 0: no skill
 # one-hot and no skill embedding. Ship type is the ordinary observation token.
 # Every sandbox is sampled in the same update, with an equal decision budget.
-# build_<type> is one drill per buildable hull (see ShipType). Cash starts
-# one income tick below that cost. The cue is a visible enemy ship of that
-# type, because several hulls share a price. The haul-then-buy builder drill
-# stays. build_* uses the same 0.80 / 64 success window as the other goal drills.
+# build_<type> is a typed-build drill (see ShipType). Cash starts one income
+# tick below that cost. The cue is a visible enemy ship of that type, because
+# several hulls share a price. This curriculum keeps the cheap typed builds
+# (merchant, destroyer, submarine) and the haul-then-buy builder drill, and
+# omits the expensive typed builds (cruiser, battleship, carrier, landing,
+# builder) that collapsed after gating on 4x4. build_* uses the same 0.80 /
+# 64 success window as the other goal drills.
 # Every drill's reward decays linearly with the game turn (not the action
 # count): 1 at turn 0, `reward_decay.floor` at `reward_decay.horizon` turns.
 # horizon 0 uses that drill's own max_turns. `drills` can override one skill.
@@ -90,13 +93,8 @@ skills:
   - combat_battleship
   - combat_carrier
   - build_merchant
-  - build_landing
   - build_destroyer
   - build_submarine
-  - build_cruiser
-  - build_battleship
-  - build_carrier
-  - build_builder
 
 arch:
   d_model: 64
