@@ -54,6 +54,7 @@ def chat_payload(prompt: str, temperature: float, model: str, max_tokens: int) -
         "temperature": temperature,
         "max_tokens": max_tokens,
         "stream": False,
+        "cache_prompt": True,
     }
 
 

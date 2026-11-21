@@ -6,14 +6,17 @@ import json
 import random
 from pathlib import Path
 
-from battleboats.core.actions import AttackAction, EndTurnAction
+from battleboats.core.actions import (AttackAction, BuildShipAction,
+                                      EndTurnAction)
 from battleboats.core.gameEngine import gameEngine
+from battleboats.core.shipyard.ship_data import BASE_STATS
 from battleboats.core.shipyard.ship_type import ShipType
 from battleboats.envs.battleboats_aec import BattleboatsAEC
 from battleboats.envs.skill_maps import write_two_home_map
 from battleboats.llm.play import (chat_completions_url, chat_payload,
                                   choose_move, parse_choice, play_env)
-from battleboats.llm.prompt import FORMAT_VERSION, build_view, render_prompt
+from battleboats.llm.prompt import (FORMAT_VERSION, STATIC_PREFIX, build_view,
+                                    render_prompt)
 
 
 def _write_map(path: Path, data: dict) -> str:
@@ -78,12 +81,17 @@ def test_prompt_sections_and_interactions(tmp_path: Path) -> None:
     view = build_view(engine, 0, legal, horizon=4, max_edges=20)
     prompt = render_prompt(view)
 
-    for section in ("FORMAT 1", "ENTITIES", "GRID", "FACTS", "EDGES", "MOVES"):
+    for section in ("FORMAT 2", "ENTITIES", "GRID", "FACTS", "EDGES", "MOVES"):
         assert section in prompt
-    assert view["format_version"] == FORMAT_VERSION
+    assert view["format_version"] == FORMAT_VERSION == 2
+    assert prompt.startswith(STATIC_PREFIX)
     assert render_prompt(view) == prompt
     assert "424242" not in prompt
-    assert "250" in prompt
+    assert "gold 250" in prompt
+    assert all(ent.get("kind") not in ("gold", "turn") for ent in view["entities"])
+    assert '"cargo":0' not in prompt
+    assert '"moved"' not in prompt
+    assert '"attacked"' not in prompt
 
     ids = {ent.get("id") for ent in view["entities"]}
     assert f"s{sub.id}" not in ids
@@ -93,8 +101,19 @@ def test_prompt_sections_and_interactions(tmp_path: Path) -> None:
     )
     assert cruiser_ent["owner"] == "enemy"
     assert cruiser_ent["pos"] == [6, 2]
-    assert cruiser_ent["fresh"] is True
+    assert "fresh" not in cruiser_ent
+    assert "seen" not in cruiser_ent
     assert "cargo" not in cruiser_ent
+    merchant_ent = next(
+        ent for ent in view["entities"] if ent.get("id") == f"s{merchant.id}"
+    )
+    assert merchant_ent["cargo"] == 40
+    home = next(ent for ent in view["entities"] if ent.get("id") == "p0_0")
+    assert home["home"] is True
+    assert "stock" not in home
+    stocked = next(ent for ent in view["entities"] if ent.get("id") == "p0_5")
+    assert stocked["stock"] == 50
+    assert "home" not in stocked
     assert _cell(view["grid"], 7, 0, 6) == "."
     assert _cell(view["grid"], 6, 2, 6) == "r"
     assert _cell(view["grid"], 3, 2, 6) == "D"
@@ -147,6 +166,29 @@ def test_prompt_sections_and_interactions(tmp_path: Path) -> None:
     )
     assert view["moves"][end_i] == "End"
     assert view["legal"][end_i] == {"type": "end"}
+
+    build_lines = [line for line in prompt.splitlines() if line.startswith("B@")]
+    assert len(build_lines) == 2
+    assert "\n13 Build" not in prompt
+    seen_builds = 0
+    for line in build_lines:
+        for part in line.split(": ", 1)[1].split(" | "):
+            idx_s, type_name, cost_s = part.split()
+            action = legal[int(idx_s)]
+            assert isinstance(action, BuildShipAction)
+            assert action.ship_type.value == type_name
+            assert BASE_STATS[action.ship_type].cost == int(cost_s)
+            seen_builds += 1
+    assert seen_builds == sum(isinstance(a, BuildShipAction) for a in legal)
+
+    engine.players[0].cash = 100
+    poor = render_prompt(build_view(engine, 0, engine.enumerate_legal(0)))
+    assert poor.startswith(STATIC_PREFIX)
+    poor_moves = poor.split("\nMOVES\n", 1)[1]
+    for banned in ("Carrier", "Battleship", "Cruiser", "Landing", "Builder"):
+        assert banned not in poor_moves
+    for kept in ("Destroyer 100", "Submarine 100", "Merchant 100"):
+        assert kept in poor_moves
 
 
 def test_stale_sighting_hides_true_position(tmp_path: Path) -> None:
@@ -264,6 +306,7 @@ def test_chat_payload_shape() -> None:
     assert payload["temperature"] == 0.3
     assert payload["max_tokens"] == 48
     assert payload["stream"] is False
+    assert payload["cache_prompt"] is True
 
 
 class _EndTurnClient:
@@ -317,8 +360,9 @@ def test_fake_llm_plays_a_short_game(tmp_path: Path) -> None:
         if row["type"] != "decision":
             continue
         prompt = row["prompt"]
-        for section in ("FORMAT 1", "ENTITIES", "GRID", "FACTS", "EDGES", "MOVES"):
+        for section in ("FORMAT 2", "ENTITIES", "GRID", "FACTS", "EDGES", "MOVES"):
             assert section in prompt
+        assert prompt.startswith(STATIC_PREFIX)
         assert row["fallback"] is False
         assert row["action"] == {"type": "end"}
         assert row["reasoning"] == "ending the turn"

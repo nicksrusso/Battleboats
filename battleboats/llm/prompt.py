@@ -1,4 +1,4 @@
-"""Text view of one seat's decision, format version 1.
+"""Text view of one seat's decision, format version 2.
 
 The prompt is built only from what that seat can know: own ships and ports
 are read from the engine, enemy ships and ports only from sightings (fresh
@@ -23,7 +23,25 @@ from battleboats.core.shipyard.ship_data import BASE_STATS
 from battleboats.core.shipyard.ship_stats import ShipStats
 from battleboats.core.shipyard.ship_type import ShipType
 
-FORMAT_VERSION = 1
+FORMAT_VERSION = 2
+
+# Byte-stable prefix of every prompt. llama-server cache_prompt reuses it.
+# Nothing in here may depend on the seat, the board, or the turn.
+STATIC_PREFIX = (
+    "FORMAT 2\n"
+    "Reply with one MOVES number then one short sentence.\n"
+    "hp=strength (one hit kills). turns 0=this turn. "
+    "Hidden: enemy cargo, enemy gold, unspotted units. "
+    "Threats assume a full enemy move and no attack yet.\n"
+    "Omitted when default: cargo 0, moved 0, stock 0, attacked false, home false. "
+    "A fresh contact omits fresh and seen. A stale one has fresh=false and seen=turn.\n"
+    "Grid: .=water #=land H/P=my home/port h/p=sighted enemy home/port. "
+    "Ship upper=me lower=enemy. C carrier B battleship R cruiser D destroyer "
+    "S sub M merchant L landing U builder. Top row=high y, x right.\n"
+    "Sections: ENTITIES GRID FACTS(home_turns,cargo_turns,in_range) "
+    "EDGES(from,to,kind,turns) MOVES. "
+    "Builds: B@(x,y): n Type cost | n Type cost.\n"
+)
 
 Pos = Tuple[int, int]
 _CARDINAL: Tuple[Pos, ...] = ((1, 0), (-1, 0), (0, 1), (0, -1))
@@ -39,12 +57,6 @@ _LETTER = {
     ShipType.LANDING: "L",
     ShipType.BUILDER: "U",
 }
-
-_LEGEND = (
-    "legend: .=water #=land H/P=my home/port h/p=sighted enemy home/port "
-    "upper=my ship lower=enemy Ccarrier Bbattleship Rcruiser Ddestroyer "
-    "Ssub Mmerchant Llanding Ubuilder. Row 0 is the top (high y); x increases right."
-)
 
 
 def _whole(value: float) -> int | float:
@@ -94,14 +106,13 @@ def build_view(
 
 
 def render_prompt(view: dict) -> str:
-    """Exact user message for one decision. Compact on purpose (slow CPU inference)."""
+    """Exact user message. ``STATIC_PREFIX`` is identical on every call."""
+    width, height = view["board"]
     lines = [
-        f"FORMAT {view['format_version']}",
-        (f"You are {view['seat']}. Reply with a MOVES number and one short sentence."),
+        STATIC_PREFIX.rstrip("\n"),
         (
-            f"board {view['board'][0]}x{view['board'][1]} turn {view['turn']} "
-            f"gold {view['gold']}. hp=strength (ships die in one hit). "
-            "turns 0=this turn. Hidden: enemy cargo, enemy gold, unspotted units."
+            f"seat {view['seat']} board {width}x{height} "
+            f"turn {view['turn']} gold {view['gold']}"
         ),
         "ENTITIES",
     ]
@@ -109,19 +120,45 @@ def render_prompt(view: dict) -> str:
         lines.append(_compact(ent))
     lines.append("GRID")
     lines.extend(view["grid"])
-    lines.append(_LEGEND)
     lines.append("FACTS")
     for fact in view["facts"]:
         lines.append(_compact(fact))
-    lines.append(f"EDGES horizon={view['horizon']}")
-    lines.append("threats assume the enemy still has a full move and has not attacked.")
+    lines.append(f"EDGES h={view['horizon']}")
     for edge in view["edges"]:
         lines.append(_compact(edge))
     lines.append("MOVES")
-    for i, label in enumerate(view["moves"]):
-        lines.append(f"{i} {label}")
-    lines.append("Reply with the move number and one short sentence.")
+    lines.extend(menu_lines(view))
     return "\n".join(lines)
+
+
+def menu_lines(view: dict) -> List[str]:
+    """Numbered menu. Builds at one port share a line; other actions stay one each.
+
+    Numbers are indexes into ``view["legal"]``. Types the seat cannot afford
+    are absent, because they are absent from the legal list.
+    """
+    legal = view["legal"]
+    moves = view["moves"]
+    lines: List[str] = []
+    i = 0
+    n = len(legal)
+    while i < n:
+        if legal[i].get("type") == "build_ship":
+            port = tuple(legal[i]["port"])
+            bits = []
+            while (
+                i < n
+                and legal[i].get("type") == "build_ship"
+                and tuple(legal[i]["port"]) == port
+            ):
+                cost = BASE_STATS[ShipType(legal[i]["ship_type"])].cost
+                bits.append(f"{i} {legal[i]['ship_type']} {cost}")
+                i += 1
+            lines.append(f"B@({port[0]},{port[1]}): " + " | ".join(bits))
+        else:
+            lines.append(f"{i} {moves[i]}")
+            i += 1
+    return lines
 
 
 def render_grid(engine: gameEngine, player_id: int) -> List[str]:
@@ -379,61 +416,63 @@ def _entities(engine: gameEngine, player_id: int) -> List[dict]:
     out: List[dict] = []
     for sid in sorted(player.owned_ship_ids):
         ship = engine.ships[sid]
-        out.append(
-            {
-                "id": ship_id(ship.id),
-                "owner": "me",
-                "type": ship.type.value,
-                "pos": list(ship.position),
-                "hp": _whole(ship.stats.strength),
-                "cargo": ship.cargo,
-                "speed": ship.stats.speed,
-                "range": ship.stats.attack_range,
-                "moved": ship.tiles_moved_this_turn,
-                "attacked": ship.has_attacked,
-            }
-        )
+        ent = {
+            "id": ship_id(ship.id),
+            "owner": "me",
+            "type": ship.type.value,
+            "pos": list(ship.position),
+            "hp": _whole(ship.stats.strength),
+            "speed": ship.stats.speed,
+            "range": ship.stats.attack_range,
+        }
+        if ship.cargo:
+            ent["cargo"] = ship.cargo
+        if ship.tiles_moved_this_turn:
+            ent["moved"] = ship.tiles_moved_this_turn
+        if ship.has_attacked:
+            ent["attacked"] = True
+        out.append(ent)
     for pos in sorted(player.owned_port_positions):
         port = engine.ports[pos]
-        out.append(
-            {
-                "id": port_id(pos),
-                "kind": "port",
-                "owner": "me",
-                "pos": list(pos),
-                "home": port.is_home or pos == player.home_port,
-                "stock": port.stockpile,
-            }
-        )
+        ent = {
+            "id": port_id(pos),
+            "kind": "port",
+            "owner": "me",
+            "pos": list(pos),
+        }
+        if port.is_home or pos == player.home_port:
+            ent["home"] = True
+        if port.stockpile:
+            ent["stock"] = port.stockpile
+        out.append(ent)
     for sight in sorted(player.sightings.values(), key=lambda s: s.ship_id):
         stats = BASE_STATS[sight.type]
-        out.append(
-            {
-                "id": ship_id(sight.ship_id),
-                "owner": "enemy",
-                "type": sight.type.value,
-                "pos": list(sight.position),
-                "hp": _whole(stats.strength),
-                "speed": stats.speed,
-                "range": stats.attack_range,
-                "fresh": sight.fresh,
-                "seen": sight.turn_seen,
-            }
-        )
+        ent = {
+            "id": ship_id(sight.ship_id),
+            "owner": "enemy",
+            "type": sight.type.value,
+            "pos": list(sight.position),
+            "hp": _whole(stats.strength),
+            "speed": stats.speed,
+            "range": stats.attack_range,
+        }
+        if not sight.fresh:
+            ent["fresh"] = False
+            ent["seen"] = sight.turn_seen
+        out.append(ent)
     for sight in sorted(player.port_sightings.values(), key=lambda s: s.position):
-        out.append(
-            {
-                "id": port_id(sight.position),
-                "kind": "port",
-                "owner": "enemy",
-                "pos": list(sight.position),
-                "home": sight.is_home,
-                "fresh": sight.fresh,
-                "seen": sight.turn_seen,
-            }
-        )
-    out.append({"kind": "gold", "owner": "me", "amount": player.cash})
-    out.append({"kind": "turn", "n": engine.turn})
+        ent = {
+            "id": port_id(sight.position),
+            "kind": "port",
+            "owner": "enemy",
+            "pos": list(sight.position),
+        }
+        if sight.is_home:
+            ent["home"] = True
+        if not sight.fresh:
+            ent["fresh"] = False
+            ent["seen"] = sight.turn_seen
+        out.append(ent)
     return out
 
 
