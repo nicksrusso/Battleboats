@@ -1,5 +1,6 @@
-# Short 3x3 run of the harder sandboxes. Advances after min_updates once the
-# window clears 0.5, otherwise allow_unmet hands the checkpoint on.
+# Short 3x3 run. Merchant, builder, and landing advance after min_updates once
+# the window clears 0.5. Combat advances only if the window mean reaches the
+# scripted power baseline; otherwise allow_unmet hands the checkpoint on.
 #
 # poetry run python scripts/train_sandboxes.py --config configs/sandboxes_smoke.yaml
 
@@ -29,6 +30,9 @@ skills:
   - combat_cruiser
   - combat_battleship
   - combat_carrier
+  - combat_merchant
+  - combat_landing
+  - combat_builder
 
 arch:
   d_model: 32

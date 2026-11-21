@@ -1,7 +1,7 @@
 """Sandboxes cut down from the real engine, not a second simulator.
 
 Each one is a 1-player episode on a freshly randomized map. The opponent seat
-is auto-end-turned, except combat, where it plays ``scripted_action``. Rewards
+is auto-end-turned, except combat, where it plays ``combat_scripted_action``. Rewards
 are sparse completion rewards (+1, then the episode ends):
 
 - merchant: +1 only after the ship has loaded cargo and then unloaded it at home
@@ -10,11 +10,11 @@ are sparse completion rewards (+1, then the episode ends):
   buy itself is the real ``BuildShipAction``.
 - landing: +1 when the landing ship captures the enemy home. No enemy ships.
   Sightings are the engine's real fog.
-- combat_<type>: +1 when the learner destroys a scripted enemy ship of the
-  same type. The scripted policy fights and moves that ship; its owner has
-  no cash, so it does not buy a second fleet. On small boards the enemy's
-  strength is scaled down (15% at 3×3, full strength at 10×10) so a shot can
-  actually kill. The reward is still only the kill. Sightings are real fog.
+- combat_<learner>: fixed-length fight against a scripted ship of a random
+  type (every learner type vs every enemy type, including merchant, landing,
+  and builder). Reward is the change in relative combat power at the horizon,
+  not a kill flag. Sightings are real fog. The scripted opponent attacks when
+  it is at least as strong and runs when it is weaker.
 
 ``skill_index`` is the one-hot slot the shared policy conditions on.
 """
@@ -27,7 +27,6 @@ import random
 import tempfile
 from typing import Dict, List, Optional, Sequence, Tuple
 
-from battleboats.agents.scripted import scripted_action
 from battleboats.core.actions import (
     Action,
     AttackAction,
@@ -49,39 +48,105 @@ from battleboats.training.sandbox_skills import SKILL_INDEX
 _CARDINALS: Tuple[Tuple[int, int], ...] = ((1, 0), (-1, 0), (0, 1), (0, -1))
 Pos = Tuple[int, int]
 
-COMBAT_SHIPS = {
-    "destroyer": ShipType.DESTROYER,
-    "submarine": ShipType.SUBMARINE,
-    "cruiser": ShipType.CRUISER,
-    "battleship": ShipType.BATTLESHIP,
-    "carrier": ShipType.CARRIER,
-}
+COMBAT_SHIPS = {ship.value.lower(): ship for ship in ShipType}
 
 
-def combat_reach(ship_type: ShipType) -> int:
-    """Tiles at which this ship can both see and hit another of the same type."""
-    me = BASE_STATS[ship_type]
-    detect = me.scouting * me.visibility
-    return max(1, int(min(me.attack_range, detect)))
+def ship_combat_power(stats: ShipStats) -> float:
+    """Combat power of one live ship. A destroyed ship contributes 0.
+
+    ``strength`` is the engine's kill-curve stat (there is no separate HP).
+    ``cost`` keeps a merchant, landing ship, or builder from being worth
+    nothing, so surviving while weaker is better than dying. Range and speed
+    scale the strength term: a ship that cannot reach or catch anyone is
+    worth less in a fight of a fixed number of turns.
+
+    power = cost + strength * (1 + attack_range) * (speed / 3)
+
+    3 is the speed of the non-combat hulls, so their strength term stays 0.
+    """
+    return float(stats.cost) + float(stats.strength) * (1.0 + stats.attack_range) * (stats.speed / 3.0)
 
 
-def enemy_strength_scale(width: int) -> float:
-    """0.15 at 3×3, 1.0 at 10×10. Linear in board width."""
-    t = (int(width) - 3) / 7.0
-    t = min(1.0, max(0.0, t))
-    return 0.15 + 0.85 * t
+def combat_outcome(my_start: float, enemy_start: float, my_end: float, enemy_end: float) -> float:
+    """Change in (my power - enemy power), divided by the starting total.
+
+    Both fleets unchanged -> 0. Killing the enemy and living -> positive.
+    Dying while the enemy lives -> negative. Result is in [-1, 1] when power
+    only goes down (ships are not created in this sandbox).
+    """
+    denom = float(my_start) + float(enemy_start)
+    if denom <= 0.0:
+        return 0.0
+    start_edge = float(my_start) - float(enemy_start)
+    end_edge = float(my_end) - float(enemy_end)
+    return (end_edge - start_edge) / denom
 
 
-def weaken_strength(stats: ShipStats, scale: float) -> ShipStats:
-    """Copy of ``stats`` with strength multiplied by ``scale`` (at least 1)."""
-    return ShipStats(
-        speed=stats.speed,
-        cost=stats.cost,
-        strength=max(1.0, float(stats.strength) * float(scale)),
-        attack_range=stats.attack_range,
-        visibility=stats.visibility,
-        scouting=stats.scouting,
-    )
+def side_power(engine, player_id: int) -> float:
+    total = 0.0
+    for sid in engine.players[player_id].owned_ship_ids:
+        ship = engine.ships.get(sid)
+        if ship is not None:
+            total += ship_combat_power(ship.stats)
+    return total
+
+
+def combat_turn_count(size: int, *, turns_min: int = 6, turns_pad: int = 2) -> int:
+    """Fixed episode length. 3×3 -> 6 turns, 10×10 -> 12, unless the floor is higher."""
+    return max(int(turns_min), int(size) + int(turns_pad))
+
+
+def pair_reach(learner: ShipType, enemy: ShipType) -> int:
+    """How close the learner must start on a trivial board to be able to act."""
+    me = BASE_STATS[learner]
+    them = BASE_STATS[enemy]
+    detect = me.scouting * them.visibility
+    reach = min(me.attack_range, detect) if me.attack_range > 0 else 1
+    return max(1, int(reach))
+
+
+def combat_scripted_action(engine, player_id: int, rng: random.Random) -> Action:
+    """Attack when this side is at least as strong; otherwise run away.
+
+    Full information, same power function as the reward. One legal action.
+    """
+    legal = engine.enumerate_legal(player_id)
+    if not legal:
+        return EndTurnAction()
+    me = side_power(engine, player_id)
+    them = side_power(engine, 1 - player_id)
+    attacks = [a for a in legal if isinstance(a, AttackAction)]
+    moves = [a for a in legal if isinstance(a, MoveAction)]
+    ends = [a for a in legal if isinstance(a, EndTurnAction)]
+    foes = [
+        engine.ships[sid]
+        for sid in engine.players[1 - player_id].owned_ship_ids
+        if sid in engine.ships
+    ]
+    if me >= them and attacks and foes:
+        return max(attacks, key=lambda a: ship_combat_power(engine.ships[a.target_id].stats))
+    if not foes or not moves:
+        return ends[0] if ends else legal[-1]
+
+    def closest(pos) -> int:
+        return min(abs(pos[0] - f.position[0]) + abs(pos[1] - f.position[1]) for f in foes)
+
+    best = None
+    best_key = None
+    for move in moves:
+        ship = engine.ships.get(move.ship_id)
+        if ship is None:
+            continue
+        before = closest(ship.position)
+        after = closest(move.destination)
+        gain = (before - after) if me >= them else (after - before)
+        key = (gain, -after)
+        if best_key is None or key > best_key:
+            best = move
+            best_key = key
+    if best is not None and best_key is not None and best_key[0] > 0:
+        return best
+    return ends[0] if ends else rng.choice(legal)
 
 
 def _water_neighbor(land: set, w: int, h: int, pos: Pos) -> bool:
@@ -268,7 +333,7 @@ class _Sandbox(BattleboatsBaseAEC):
             and guard < limit
         ):
             if scripted:
-                action = scripted_action(self.engine, self.engine.current_player, self._rng)
+                action = combat_scripted_action(self.engine, self.engine.current_player, self._rng)
             else:
                 action = EndTurnAction()
             self.engine.step(action)
@@ -517,7 +582,11 @@ class LandingSandbox(_Sandbox):
 
 
 class CombatSandbox(_Sandbox):
-    """One combat ship versus a scripted enemy of the same type. +1 on the kill."""
+    """Learner ship vs one scripted enemy ship for a fixed number of turns.
+
+    The enemy type is drawn uniformly from every ship type each episode.
+    Reward is ``combat_outcome`` once ``engine.turn`` reaches ``max_turns``.
+    """
 
     def __init__(
         self,
@@ -533,25 +602,28 @@ class CombatSandbox(_Sandbox):
         self.ship = ship
         self.skill_name = f"combat_{ship}"
         self.ship_type = COMBAT_SHIPS[ship]
-        self._killed = False
+        self.force_enemy: Optional[ShipType] = None
+        self.enemy_type = ShipType.DESTROYER
         self._target_id: Optional[int] = None
+        self._scored = False
+        self.episode_reward = 0.0
+        self._my0 = 0.0
+        self._en0 = 0.0
         super().__init__(map_json_path, width=width, height=height, max_turns=max_turns)
-
-    @property
-    def killed(self) -> bool:
-        return self._killed
 
     def reset(self, seed: Optional[int] = None, options=None) -> None:
         if (options or {}).get("scenario"):
             super().reset(seed=seed, options=options)
             return
-        reach = combat_reach(self.ship_type)
+        rng = random.Random(seed)
+        self.enemy_type = self.force_enemy or rng.choice(list(ShipType))
+        reach = pair_reach(self.ship_type, self.enemy_type)
         close = self.width <= 4
         last_error: Optional[BaseException] = None
         for attempt in range(20):
-            rng = random.Random((seed or 0) + attempt * 17)
+            layout_rng = random.Random((seed or 0) + attempt * 17)
             try:
-                self._layout = combat_layout(rng, self.width, self.height, reach, close)
+                self._layout = combat_layout(layout_rng, self.width, self.height, reach, close)
                 lay = self._layout
                 self._write_map([lay["home"], lay["opp"]], [lay["home"]], [lay["opp"]])
                 super().reset(seed=seed, options=options)
@@ -563,7 +635,8 @@ class CombatSandbox(_Sandbox):
     def _configure_scenario(self, seed, options) -> None:
         assert self.engine is not None
         self._rng = random.Random((seed or 0) + 3)
-        self._killed = False
+        self._scored = False
+        self.episode_reward = 0.0
         lay = self._layout
         own = lay["learner_ship"]
         tgt = lay["enemy_ship"]
@@ -571,21 +644,17 @@ class CombatSandbox(_Sandbox):
         if m.terrain[own] != WATER or m.terrain[tgt] != WATER or own == tgt:
             raise RuntimeError("CombatSandbox: spawn tiles are not water")
         hunter = self.engine._spawn_ship(0, self.ship_type, own)
-        target = self.engine._spawn_ship(1, self.ship_type, tgt)
-        full = BASE_STATS[self.ship_type].strength
-        scale = enemy_strength_scale(self.width)
-        target.stats = weaken_strength(BASE_STATS[self.ship_type], scale)
-        self._strength_scale = scale
-        if target.stats.strength >= full and scale < 1.0:
-            raise RuntimeError("CombatSandbox: enemy strength was not reduced")
-        # No cash: the scripted policy fights this ship instead of buying more.
-        self.engine.players[1].cash = 0
+        target = self.engine._spawn_ship(1, self.enemy_type, tgt)
         self._hunter_id = hunter.id
         self._target_id = target.id
+        self.engine.players[0].cash = 0
+        self.engine.players[1].cash = 0
         self.engine.current_player = 0
         self.engine.turn = 0
         self.engine.winner = None
         self.engine._refresh_sightings()
+        self._my0 = side_power(self.engine, 0)
+        self._en0 = side_power(self.engine, 1)
         self._filter((MoveAction, AttackAction, EndTurnAction))
 
     def _capture_reward_state(self) -> Dict:
@@ -593,22 +662,25 @@ class CombatSandbox(_Sandbox):
 
     def _reward_after_step(self, agent, action, pre) -> Dict[str, float]:
         rewards = {a: 0.0 for a in self.agents}
-        if (
-            not self._killed
-            and self.engine is not None
-            and self._target_id is not None
-            and self._target_id not in self.engine.ships
-        ):
-            self._killed = True
-            rewards[self._agent_name(0)] = 1.0
+        assert self.engine is not None
+        if not self._scored and self.engine.turn >= self.max_turns:
+            self.episode_reward = combat_outcome(
+                self._my0, self._en0, side_power(self.engine, 0), side_power(self.engine, 1)
+            )
+            self._scored = True
+            rewards[self._agent_name(0)] = self.episode_reward
         return rewards
 
     def _is_terminated(self) -> bool:
-        return self._killed
+        return False
+
+    def _is_truncated(self) -> bool:
+        return self.engine is not None and self.engine.turn >= self.max_turns
 
     def _after_engine_step(self, agent, action) -> None:
-        self._pass_opponent(scripted=True, stop=lambda: self._killed)
+        self._pass_opponent(scripted=True, stop=lambda: False)
         if self.engine is not None:
+            self.engine.players[0].cash = 0
             self.engine.players[1].cash = 0
 
 
@@ -631,10 +703,23 @@ def make_sandbox(skill: str, map_json_path: str, *, width: int, height: int, max
     raise ValueError(f"unknown sandbox {skill!r}")
 
 
-def horizon(skill: str, size: int) -> Tuple[int, int]:
-    """(max_turns, max_steps) for a square board of this size."""
+def horizon(
+    skill: str,
+    size: int,
+    *,
+    combat_turns_min: int = 6,
+    combat_turns_pad: int = 2,
+) -> Tuple[int, int]:
+    """(max_turns, max_steps) for a square board of this size.
+
+    Combat episodes last ``combat_turn_count`` turns. The step cap is large
+    enough for a ship to move its speed and still end the turn.
+    """
     if skill == "builder":
         return max(10, size * 4), max(36, size * 12)
     if skill == "merchant":
         return max(8, size * 4), max(24, size * 12)
+    if skill.startswith("combat_"):
+        turns = combat_turn_count(size, turns_min=combat_turns_min, turns_pad=combat_turns_pad)
+        return turns, max(24, turns * 12)
     return max(8, size * 3), max(16, size * 8)
