@@ -433,17 +433,17 @@ def test_combat_plateau_uses_a_moving_average_and_stays_passed(tmp_path: Path) -
         ppo=PPOHyper(epochs=1, minibatch_size=2, ent_coef=0.01),
     )
     result = run_sandboxes(cfg, resume=False)
-    assert result["ok"]
+    assert result["ok"] is False
+    assert "stopped" in result["reason"]
     summary = json.loads((tmp_path / "cap" / "summary.json").read_text())
     size = summary["skills"]["merchant"]["sizes"]["3"]
     assert size["gate_met"] is False
     assert size["capped"] is True
 
 
-def test_episode_cap_advances_instead_of_stopping(tmp_path: Path) -> None:
-    # A skill can burn max_episodes_per_size in a few updates when episodes
-    # are short. That cap should advance the size, like max_updates_per_size,
-    # not abort the whole run.
+def test_episode_cap_stops_when_allow_unmet_is_false(tmp_path: Path) -> None:
+    # Short episodes can burn max_episodes_per_size in a few updates.
+    # With allow_unmet false, that cap must stop the run, not advance.
     cfg = SandboxRunConfig(
         run_dir=tmp_path / "epcap",
         skills=["merchant"],
@@ -463,8 +463,36 @@ def test_episode_cap_advances_instead_of_stopping(tmp_path: Path) -> None:
         ppo=PPOHyper(epochs=1, minibatch_size=2, ent_coef=0.01),
     )
     result = run_sandboxes(cfg, resume=False)
-    assert result["ok"]
+    assert result["ok"] is False
+    assert "stopped" in result["reason"]
     summary = json.loads((tmp_path / "epcap" / "summary.json").read_text())
+    size = summary["skills"]["merchant"]["sizes"]["3"]
+    assert size["gate_met"] is False
+    assert size["capped"] is True
+
+
+def test_episode_cap_advances_when_allow_unmet_is_true(tmp_path: Path) -> None:
+    cfg = SandboxRunConfig(
+        run_dir=tmp_path / "epcap_ok",
+        skills=["merchant"],
+        sizes=[3],
+        device="cpu",
+        success_threshold=0.99,
+        window=50,
+        max_episodes_per_size=4,
+        max_updates_per_size=50,
+        decisions_per_update=4,
+        rehearsal_frac=0.0,
+        size_mix_frac=0.0,
+        eval_episodes=0,
+        allow_unmet=True,
+        min_updates=1,
+        arch=ArchSpec(d_model=32, nhead=2, num_layers=1, dim_feedforward=64, dropout=0.0),
+        ppo=PPOHyper(epochs=1, minibatch_size=2, ent_coef=0.01),
+    )
+    result = run_sandboxes(cfg, resume=False)
+    assert result["ok"]
+    summary = json.loads((tmp_path / "epcap_ok" / "summary.json").read_text())
     size = summary["skills"]["merchant"]["sizes"]["3"]
     assert size["gate_met"] is False
     assert size["capped"] is True
@@ -515,7 +543,9 @@ def test_load_real_config() -> None:
     assert cfg.plateau_smooth == "mean"
     assert cfg.plateau_smooth_span == 8
     assert cfg.combat_min_episodes == 32
-    assert cfg.max_updates_per_size == 150
+    assert cfg.max_updates_per_size == 750
+    assert cfg.max_episodes_per_size == 2000
+    assert cfg.allow_unmet is False
     assert cfg.device == "cpu"
     assert cfg.wandb is False
     assert cfg.wandb_project == "battleboats-skill-pipeline"

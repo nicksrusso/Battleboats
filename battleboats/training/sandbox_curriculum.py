@@ -495,20 +495,22 @@ def _run_size(cfg, state, policy, envs, rng, device, logger):
     while not _size_cleared(cfg, state, windows):
         updates = int(state.get("updates_this_size", 0))
         if updates >= cfg.max_updates_per_size:
-            print(
-                f"[sandboxes] WARNING {size}x{size} hit max_updates_per_size="
-                f"{cfg.max_updates_per_size}; advancing"
-            )
-            logger.log({"size": size, "update": updates, "size_cap": 1.0})
             state["size_capped"] = True
+            logger.log({"size": size, "update": updates, "size_cap": 1.0})
+            if cfg.allow_unmet:
+                print(
+                    f"[sandboxes] WARNING {size}x{size} hit max_updates_per_size="
+                    f"{cfg.max_updates_per_size}; advancing"
+                )
             break
         if updates >= cfg.min_updates and _unclear_and_capped(cfg, state, windows):
-            print(
-                f"[sandboxes] WARNING {size}x{size} hit max_episodes_per_size="
-                f"{cfg.max_episodes_per_size}; advancing"
-            )
-            logger.log({"size": size, "update": updates, "episode_cap": 1.0})
             state["size_capped"] = True
+            logger.log({"size": size, "update": updates, "episode_cap": 1.0})
+            if cfg.allow_unmet:
+                print(
+                    f"[sandboxes] WARNING {size}x{size} hit max_episodes_per_size="
+                    f"{cfg.max_episodes_per_size}; advancing"
+                )
             break
         metrics = _one_mixed_update(
             cfg, state, size, policy, envs, rng, device, windows, reward_windows
@@ -576,7 +578,7 @@ def _run_size(cfg, state, policy, envs, rng, device, logger):
         )
     save_checkpoint(policy, cfg.run_dir / "latest.pt", extra={"size": size, "skill_count": 0})
     _write_summary(cfg, state)
-    if unmet and not forced and not cfg.allow_unmet:
+    if unmet and not cfg.allow_unmet:
         skill, rate, episodes = unmet[0]
         state["reason"] = (
             f"{skill} {size}x{size} stopped at window {rate:.2f} "
