@@ -65,6 +65,11 @@ def window_cleared(window: Sequence[float], need: int, threshold: float) -> bool
     return (sum(window) / len(window)) >= threshold
 
 
+def size_advances(updates: int, window: Sequence[float], need: int, threshold: float, min_updates: int) -> bool:
+    """A size clears only after enough updates and a full successful window."""
+    return updates >= min_updates and window_cleared(window, need, threshold)
+
+
 def _succeeded(skill: str, env) -> bool:
     if skill == "merchant":
         return bool(env.hauled)
@@ -82,8 +87,9 @@ class SandboxRunConfig:
     sizes: List[int]
     device: str = "cpu"
     seed: int = 0
-    success_threshold: float = 0.7
-    window: int = 24
+    success_threshold: float = 0.8
+    window: int = 64
+    min_updates: int = 3
     max_episodes_per_size: int = 400
     decisions_per_update: int = 512
     rehearsal_frac: float = 0.15
@@ -109,6 +115,8 @@ class SandboxRunConfig:
             skill_index(name)
         if self.window < 1:
             raise ValueError("window must be >= 1")
+        if self.min_updates < 1:
+            raise ValueError("min_updates must be >= 1")
 
 
 def load_sandbox_config(path: Path) -> SandboxRunConfig:
@@ -122,8 +130,9 @@ def load_sandbox_config(path: Path) -> SandboxRunConfig:
         sizes=list(raw.get("sizes", [3, 4, 5, 6, 8, 10])),
         device=raw.get("device", "auto"),
         seed=int(raw.get("seed", 0)),
-        success_threshold=float(raw.get("success_threshold", 0.7)),
-        window=int(raw.get("window", 24)),
+        success_threshold=float(raw.get("success_threshold", 0.8)),
+        window=int(raw.get("window", 64)),
+        min_updates=int(raw.get("min_updates", 3)),
         max_episodes_per_size=int(raw.get("max_episodes_per_size", 400)),
         decisions_per_update=int(raw.get("decisions_per_update", 512)),
         rehearsal_frac=float(raw.get("rehearsal_frac", 0.15)),
@@ -192,7 +201,9 @@ def _run_skill(cfg, state, skill, policy, envs, rng, device, logger):
         episodes = int(state.get("episodes_this_size", 0))
         updates = int(state.get("updates_this_size", 0))
         cleared = False
-        while episodes < cfg.max_episodes_per_size and not cleared:
+        while not cleared:
+            if episodes >= cfg.max_episodes_per_size and updates >= cfg.min_updates:
+                break
             batch_eps, metrics = _one_update(
                 cfg, state, skill, size, policy, envs, rng, device, window
             )
@@ -230,7 +241,7 @@ def _run_skill(cfg, state, skill, policy, envs, rng, device, logger):
             if cfg.save_every and updates % cfg.save_every == 0:
                 save_checkpoint(policy, cfg.run_dir / skill / f"update_{updates}.pt")
             _save_state(cfg.run_dir / "state.json", state)
-            if window_cleared(window, cfg.window, cfg.success_threshold):
+            if size_advances(updates, window, cfg.window, cfg.success_threshold, cfg.min_updates):
                 cleared = True
         rate = (sum(window) / len(window)) if window else 0.0
         gate_met = cleared

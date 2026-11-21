@@ -101,7 +101,7 @@ Open the printed URL (`http://127.0.0.1:8765` by default). Fog of war applies to
 
 # Sandbox curriculum
 
-One shared policy with a skill one-hot. Sandboxes are the real engine with a smaller map and a sparse completion reward: merchant (load, then unload at home), builder (buy a ship), landing (capture the enemy home; the enemy has no ships), then one combat ship type at a time against a scripted enemy merchant. Each sandbox starts at 3×3 and advances to 10×10 when a rolling success-rate window clears. Later sandboxes mix in about 15% fresh episodes of earlier ones.
+One shared policy with a skill one-hot. Sandboxes are the real engine on a randomized map with a sparse completion reward: merchant (load, then unload at home), builder (deliver cash with a merchant, then buy a ship), landing (capture the enemy home under real fog; the enemy has no ships), then one combat ship type at a time against a scripted enemy of the same type. Small boards weaken that enemy; 10×10 uses full strength. A size advances from 3×3 toward 10×10 when 64 on-size episodes are at least 0.80, and only after 3 updates. Later sandboxes mix in about 15% fresh episodes of earlier ones. Default device is cpu.
 
 ```bash
 poetry run python scripts/train_sandboxes.py --config configs/sandboxes.yaml
