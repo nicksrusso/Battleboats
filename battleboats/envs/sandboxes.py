@@ -1,0 +1,593 @@
+"""Sandboxes cut down from the real engine, not a second simulator.
+
+Each one is a 1-player episode on a freshly randomized map. The opponent seat
+is auto-end-turned, except combat, where it plays ``scripted_action``. Rewards
+are sparse completion rewards (+1, then the episode ends):
+
+- merchant: +1 only after the ship has loaded cargo and then unloaded it at home
+- builder: +1 when a ship is bought at a port
+- landing: +1 when the landing ship captures the enemy home (no enemy ships)
+- combat_<type>: +1 when the learner's combat ship destroys the scripted enemy
+  merchant. The target is a merchant because strength 0 means a hit is a kill,
+  so a trivial board is reachable by random actions. The merchant is still
+  driven by the scripted policy (it will walk toward its own satellite).
+
+No distance shaping. The enemy home (landing) and the enemy ship (combat) are
+re-injected into sightings each step so the skill is "go to the thing you can
+see", including on a 10×10 board where port vision does not reach the far corner.
+
+``skill_index`` is the one-hot slot the shared policy conditions on.
+"""
+
+from __future__ import annotations
+
+import json
+import os
+import random
+import tempfile
+from typing import Dict, List, Optional, Sequence, Tuple
+
+from battleboats.agents.scripted import scripted_action
+from battleboats.core.actions import (
+    Action,
+    AttackAction,
+    BuildShipAction,
+    CapturePortAction,
+    EndTurnAction,
+    MerchantLoadAction,
+    MerchantUnloadAction,
+    MoveAction,
+)
+from battleboats.core.map.Map import WATER
+from battleboats.core.shipyard.ship_data import BASE_STATS
+from battleboats.core.shipyard.ship_type import ShipType
+from battleboats.core.sighting import PortSighting, Sighting
+from battleboats.envs.base_aec import BattleboatsBaseAEC
+from battleboats.training.sandbox_skills import SKILL_INDEX
+
+_CARDINALS: Tuple[Tuple[int, int], ...] = ((1, 0), (-1, 0), (0, 1), (0, -1))
+Pos = Tuple[int, int]
+
+COMBAT_SHIPS = {
+    "destroyer": ShipType.DESTROYER,
+    "submarine": ShipType.SUBMARINE,
+    "cruiser": ShipType.CRUISER,
+    "battleship": ShipType.BATTLESHIP,
+    "carrier": ShipType.CARRIER,
+}
+
+
+def combat_reach(ship_type: ShipType) -> int:
+    """Tiles at which this ship can both see and hit a merchant."""
+    me = BASE_STATS[ship_type]
+    them = BASE_STATS[ShipType.MERCHANT]
+    return int(min(me.attack_range, me.scouting * them.visibility))
+
+
+def _water_neighbor(land: set, w: int, h: int, pos: Pos) -> bool:
+    for dx, dy in _CARDINALS:
+        q = (pos[0] + dx, pos[1] + dy)
+        if 0 <= q[0] < w and 0 <= q[1] < h and q not in land:
+            return True
+    return False
+
+
+def _land_neighbor(pos: Pos, w: int, h: int, banned: set) -> Optional[Pos]:
+    for dx, dy in _CARDINALS:
+        q = (pos[0] + dx, pos[1] + dy)
+        if 0 <= q[0] < w and 0 <= q[1] < h and q not in banned:
+            return q
+    return None
+
+
+def combat_layout(rng: random.Random, w: int, h: int, reach: int, close: bool) -> dict:
+    """Ship tiles first, then a land neighbor for each home.
+
+    On a trivial board (``close``) the two ships start within attack/detection
+    range so a random shot can land. Larger boards may place them anywhere.
+    """
+    cells = [(x, y) for x in range(w) for y in range(h)]
+    rng.shuffle(cells)
+    for a in cells:
+        for b in cells:
+            if a == b:
+                continue
+            dist = abs(a[0] - b[0]) + abs(a[1] - b[1])
+            if close and not (1 <= dist <= max(1, reach)):
+                continue
+            banned = {a, b}
+            home = _land_neighbor(a, w, h, banned)
+            if home is None:
+                continue
+            opp = _land_neighbor(b, w, h, banned | {home})
+            if opp is None or opp == home:
+                continue
+            rest = [p for p in cells if p not in {a, b, home, opp}]
+            if not rest:
+                continue
+            return {
+                "learner_ship": a,
+                "enemy_ship": b,
+                "home": home,
+                "opp": opp,
+                "satellite": rest[0],
+            }
+    raise RuntimeError(f"no combat layout on {w}x{h} reach={reach} close={close}")
+
+
+def _neighbors(pos: Pos, w: int, h: int) -> List[Pos]:
+    out = []
+    for dx, dy in _CARDINALS:
+        q = (pos[0] + dx, pos[1] + dy)
+        if 0 <= q[0] < w and 0 <= q[1] < h:
+            out.append(q)
+    return out
+
+
+def _ports_connected(land: set, w: int, h: int, start: Pos, goal: Pos) -> bool:
+    """Some water tile next to ``start`` can reach some water tile next to ``goal``."""
+    waters = {(x, y) for x in range(w) for y in range(h) if (x, y) not in land}
+    goals = {p for p in _neighbors(goal, w, h) if p in waters}
+    stack = [p for p in _neighbors(start, w, h) if p in waters]
+    seen = set()
+    while stack:
+        pos = stack.pop()
+        if pos in seen:
+            continue
+        seen.add(pos)
+        if pos in goals:
+            return True
+        for nxt in _neighbors(pos, w, h):
+            if nxt in waters:
+                stack.append(nxt)
+    return False
+
+
+def _sample_lands(rng: random.Random, w: int, h: int, n: int) -> List[Pos]:
+    """n land tiles that each have a water neighbor."""
+    for _ in range(40):
+        tiles = [(x, y) for x in range(w) for y in range(h)]
+        rng.shuffle(tiles)
+        if len(tiles) < n:
+            break
+        chosen = tiles[:n]
+        land = set(chosen)
+        if all(_water_neighbor(land, w, h, p) for p in chosen):
+            return chosen
+    raise RuntimeError(f"no land layout for {w}x{h} with {n} ports")
+
+
+class _Sandbox(BattleboatsBaseAEC):
+    """Shared bookkeeping: one learner, randomized map, optional verb filter."""
+
+    skill_name = ""
+
+    def __init__(self, map_json_path: str, *, width: int, height: int, max_turns: int) -> None:
+        self.width = int(width)
+        self.height = int(height)
+        self.learner_id = 0
+        self.skill_index = SKILL_INDEX[self.skill_name]
+        self._rng = random.Random(0)
+        self._tmp: Optional[str] = None
+        super().__init__(map_json_path=map_json_path, max_turns=max_turns)
+        fd, self._tmp = tempfile.mkstemp(suffix=".json", prefix="sandbox_")
+        os.close(fd)
+
+    def _possible_agents(self) -> List[str]:
+        return [self._agent_name(self.learner_id)]
+
+    def close(self) -> None:
+        if self._tmp and os.path.exists(self._tmp):
+            try:
+                os.remove(self._tmp)
+            except OSError:
+                pass
+
+    def _write_map(self, land: Sequence[Pos], ports0: Sequence[Pos], ports1: Sequence[Pos]) -> None:
+        layout = {
+            "width": self.width,
+            "height": self.height,
+            "seed": 0,
+            "land": [list(p) for p in land],
+            "ports": {"0": [list(p) for p in ports0], "1": [list(p) for p in ports1]},
+        }
+        with open(self._tmp, "w") as f:
+            json.dump(layout, f)
+        self.map_json_path = self._tmp
+
+    def _filter(self, verbs: Tuple[type, ...]) -> None:
+        assert self.engine is not None
+        raw = self.engine.enumerate_legal
+
+        def enumerate_legal(player_id: int, _raw=raw) -> List[Action]:
+            return [a for a in _raw(player_id) if isinstance(a, verbs)]
+
+        self.engine.enumerate_legal = enumerate_legal
+
+    def _spawn_reaching(self, home: Pos, goal: Pos) -> Optional[Pos]:
+        assert self.engine is not None
+        m = self.engine.map
+        w, h = m.width, m.height
+        waters = {(x, y) for x in range(w) for y in range(h) if m.is_water((x, y))}
+        goals = {p for p in _neighbors(goal, w, h) if p in waters}
+        for start in _neighbors(home, w, h):
+            if start not in waters or m.is_occupied(start):
+                continue
+            seen = set()
+            stack = [start]
+            while stack:
+                pos = stack.pop()
+                if pos in seen:
+                    continue
+                seen.add(pos)
+                if pos in goals:
+                    return start
+                for nxt in _neighbors(pos, w, h):
+                    if nxt in waters:
+                        stack.append(nxt)
+        return None
+
+    def _adjacent_water(self, pos: Pos) -> Optional[Pos]:
+        assert self.engine is not None
+        m = self.engine.map
+        for dx, dy in _CARDINALS:
+            q = (pos[0] + dx, pos[1] + dy)
+            if m.in_bounds(q) and m.terrain[q] == WATER and not m.is_occupied(q):
+                return q
+        return None
+
+    def _pass_opponent(self, *, scripted: bool, stop) -> None:
+        assert self.engine is not None
+        guard = 0
+        limit = 48 if scripted else 8
+        while (
+            self.engine.current_player != self.learner_id
+            and self.engine.winner is None
+            and not stop()
+            and self.engine.turn < self.max_turns
+            and guard < limit
+        ):
+            if scripted:
+                action = scripted_action(self.engine, self.engine.current_player, self._rng)
+            else:
+                action = EndTurnAction()
+            self.engine.step(action)
+            guard += 1
+
+    def _is_truncated(self) -> bool:
+        return self.engine is not None and self.engine.turn >= self.max_turns
+
+
+class MerchantSandbox(_Sandbox):
+    """Load at a resource port, then unload at home. +1 on that unload."""
+
+    skill_name = "merchant"
+
+    def __init__(self, map_json_path: str, *, width: int, height: int, max_turns: int = 40) -> None:
+        self._hauled = False
+        self._loaded = False
+        super().__init__(map_json_path, width=width, height=height, max_turns=max_turns)
+
+    @property
+    def hauled(self) -> bool:
+        return self._hauled
+
+    def reset(self, seed: Optional[int] = None, options=None) -> None:
+        if not (options or {}).get("scenario"):
+            rng = random.Random(seed)
+            placed = False
+            for _ in range(40):
+                home, satellite, opp = _sample_lands(rng, self.width, self.height, 3)
+                land = {home, satellite, opp}
+                if _ports_connected(land, self.width, self.height, home, satellite):
+                    self._write_map([home, satellite, opp], [home, satellite], [opp])
+                    placed = True
+                    break
+            if not placed:
+                raise RuntimeError("MerchantSandbox: no route from home to the satellite")
+        super().reset(seed=seed, options=options)
+
+    def _configure_scenario(self, seed, options) -> None:
+        assert self.engine is not None
+        self._rng = random.Random((seed or 0) + 1)
+        self._hauled = False
+        self._loaded = False
+        learner = self.engine.players[0]
+        satellite = next(p for p in learner.owned_port_positions if p != learner.home_port)
+        self.engine.ports[satellite].stockpile = 500
+        spawn = self._spawn_reaching(learner.home_port, satellite)
+        if spawn is None:
+            raise RuntimeError("MerchantSandbox: no water next to home")
+        self.engine._spawn_ship(0, ShipType.MERCHANT, spawn)
+        self.engine.current_player = 0
+        self.engine.turn = 0
+        self.engine.winner = None
+        self.engine._refresh_sightings()
+        self._filter((MoveAction, MerchantLoadAction, MerchantUnloadAction, EndTurnAction))
+
+    def _capture_reward_state(self) -> Dict:
+        assert self.engine is not None
+        cargo = 0
+        for sid in self.engine.players[0].owned_ship_ids:
+            ship = self.engine.ships[sid]
+            if ship.type is ShipType.MERCHANT:
+                cargo += ship.cargo
+        return {"cargo": int(cargo)}
+
+    def _reward_after_step(self, agent, action, pre) -> Dict[str, float]:
+        rewards = {a: 0.0 for a in self.agents}
+        assert self.engine is not None
+        cargo = 0
+        for sid in self.engine.players[0].owned_ship_ids:
+            ship = self.engine.ships[sid]
+            if ship.type is ShipType.MERCHANT:
+                cargo += ship.cargo
+        before = int(pre.get("cargo", 0))
+        if cargo > before:
+            self._loaded = True
+        if self._loaded and cargo < before and not self._hauled:
+            self._hauled = True
+            rewards[self._agent_name(0)] = 1.0
+        return rewards
+
+    def _is_terminated(self) -> bool:
+        return self._hauled
+
+    def _after_engine_step(self, agent, action) -> None:
+        self._pass_opponent(scripted=False, stop=lambda: self._hauled)
+
+
+class ShipBuildSandbox(_Sandbox):
+    """Empty fleet, cash on hand. +1 when any ship is bought."""
+
+    skill_name = "builder"
+
+    def __init__(self, map_json_path: str, *, width: int, height: int, max_turns: int = 6) -> None:
+        self._built = False
+        super().__init__(map_json_path, width=width, height=height, max_turns=max_turns)
+
+    @property
+    def built(self) -> bool:
+        return self._built
+
+    def reset(self, seed: Optional[int] = None, options=None) -> None:
+        if not (options or {}).get("scenario"):
+            rng = random.Random(seed)
+            home, opp = _sample_lands(rng, self.width, self.height, 2)
+            self._write_map([home, opp], [home], [opp])
+        super().reset(seed=seed, options=options)
+
+    def _configure_scenario(self, seed, options) -> None:
+        assert self.engine is not None
+        self._built = False
+        self.engine.current_player = 0
+        self.engine.turn = 0
+        self.engine.winner = None
+        self.engine._refresh_sightings()
+        self._filter((BuildShipAction, EndTurnAction))
+
+    def _capture_reward_state(self) -> Dict:
+        return {}
+
+    def _reward_after_step(self, agent, action, pre) -> Dict[str, float]:
+        rewards = {a: 0.0 for a in self.agents}
+        assert self.engine is not None
+        if not self._built and self.engine.players[0].owned_ship_ids:
+            self._built = True
+            rewards[self._agent_name(0)] = 1.0
+        return rewards
+
+    def _is_terminated(self) -> bool:
+        return self._built
+
+    def _after_engine_step(self, agent, action) -> None:
+        self._pass_opponent(scripted=False, stop=lambda: self._built)
+
+
+class LandingSandbox(_Sandbox):
+    """One landing ship, one enemy home, no enemy ships. +1 on capture."""
+
+    skill_name = "landing"
+
+    def __init__(self, map_json_path: str, *, width: int, height: int, max_turns: int = 30) -> None:
+        self._captured = False
+        super().__init__(map_json_path, width=width, height=height, max_turns=max_turns)
+
+    @property
+    def captured(self) -> bool:
+        return self._captured
+
+    def reset(self, seed: Optional[int] = None, options=None) -> None:
+        if not (options or {}).get("scenario"):
+            rng = random.Random(seed)
+            placed = False
+            for _ in range(40):
+                home, opp = _sample_lands(rng, self.width, self.height, 2)
+                if _ports_connected({home, opp}, self.width, self.height, home, opp):
+                    self._write_map([home, opp], [home], [opp])
+                    placed = True
+                    break
+            if not placed:
+                raise RuntimeError("LandingSandbox: no route to the enemy home")
+        super().reset(seed=seed, options=options)
+
+    def _configure_scenario(self, seed, options) -> None:
+        assert self.engine is not None
+        self._captured = False
+        spawn = self._spawn_reaching(
+            self.engine.players[0].home_port, self.engine.players[1].home_port
+        )
+        if spawn is None:
+            raise RuntimeError("LandingSandbox: no water next to home")
+        self.engine._spawn_ship(0, ShipType.LANDING, spawn)
+        self.engine.current_player = 0
+        self.engine.turn = 0
+        self.engine.winner = None
+        self.engine._refresh_sightings()
+        self._reveal_home()
+        self._filter((MoveAction, CapturePortAction, EndTurnAction))
+
+    def _reveal_home(self) -> None:
+        assert self.engine is not None
+        home = self.engine.players[1].home_port
+        port = self.engine.ports[home]
+        if port.owner == 0:
+            return
+        self.engine.players[0].port_sightings[home] = PortSighting(
+            position=home,
+            last_known_owner=port.owner,
+            is_home=True,
+            turn_seen=self.engine.turn,
+            fresh=True,
+        )
+
+    def _capture_reward_state(self) -> Dict:
+        return {}
+
+    def _reward_after_step(self, agent, action, pre) -> Dict[str, float]:
+        rewards = {a: 0.0 for a in self.agents}
+        if not self._captured and self.engine is not None and self.engine.winner == 0:
+            self._captured = True
+            rewards[self._agent_name(0)] = 1.0
+        return rewards
+
+    def _is_terminated(self) -> bool:
+        return self._captured
+
+    def _after_engine_step(self, agent, action) -> None:
+        self._pass_opponent(scripted=False, stop=lambda: self._captured)
+        self._reveal_home()
+
+
+class CombatSandbox(_Sandbox):
+    """One combat ship versus a scripted enemy merchant. +1 when it is destroyed."""
+
+    def __init__(
+        self,
+        map_json_path: str,
+        *,
+        ship: str,
+        width: int,
+        height: int,
+        max_turns: int = 30,
+    ) -> None:
+        if ship not in COMBAT_SHIPS:
+            raise ValueError(f"unknown combat ship {ship!r}")
+        self.ship = ship
+        self.skill_name = f"combat_{ship}"
+        self.ship_type = COMBAT_SHIPS[ship]
+        self._killed = False
+        self._target_id: Optional[int] = None
+        super().__init__(map_json_path, width=width, height=height, max_turns=max_turns)
+
+    @property
+    def killed(self) -> bool:
+        return self._killed
+
+    def reset(self, seed: Optional[int] = None, options=None) -> None:
+        if (options or {}).get("scenario"):
+            super().reset(seed=seed, options=options)
+            return
+        reach = combat_reach(self.ship_type)
+        close = self.width <= 4
+        last_error: Optional[BaseException] = None
+        for attempt in range(20):
+            rng = random.Random((seed or 0) + attempt * 17)
+            try:
+                self._layout = combat_layout(rng, self.width, self.height, reach, close)
+                lay = self._layout
+                self._write_map(
+                    [lay["home"], lay["opp"], lay["satellite"]],
+                    [lay["home"]],
+                    [lay["opp"], lay["satellite"]],
+                )
+                super().reset(seed=seed, options=options)
+                return
+            except RuntimeError as exc:
+                last_error = exc
+        raise RuntimeError(f"CombatSandbox: {last_error}")
+
+    def _configure_scenario(self, seed, options) -> None:
+        assert self.engine is not None
+        self._rng = random.Random((seed or 0) + 3)
+        self._killed = False
+        lay = self._layout
+        own = lay["learner_ship"]
+        tgt = lay["enemy_ship"]
+        m = self.engine.map
+        if m.terrain[own] != WATER or m.terrain[tgt] != WATER or own == tgt:
+            raise RuntimeError("CombatSandbox: spawn tiles are not water")
+        hunter = self.engine._spawn_ship(0, self.ship_type, own)
+        target = self.engine._spawn_ship(1, ShipType.MERCHANT, tgt)
+        self._hunter_id = hunter.id
+        self._target_id = target.id
+        self.engine.current_player = 0
+        self.engine.turn = 0
+        self.engine.winner = None
+        self.engine._refresh_sightings()
+        self._reveal_target()
+        self._filter((MoveAction, AttackAction, EndTurnAction))
+
+    def _reveal_target(self) -> None:
+        if self.engine is None or self._target_id is None:
+            return
+        ship = self.engine.ships.get(self._target_id)
+        if ship is None:
+            return
+        self.engine.players[0].sightings[ship.id] = Sighting(
+            ship_id=ship.id,
+            type=ship.type,
+            position=ship.position,
+            turn_seen=self.engine.turn,
+            fresh=True,
+        )
+
+    def _capture_reward_state(self) -> Dict:
+        return {}
+
+    def _reward_after_step(self, agent, action, pre) -> Dict[str, float]:
+        rewards = {a: 0.0 for a in self.agents}
+        if (
+            not self._killed
+            and self.engine is not None
+            and self._target_id is not None
+            and self._target_id not in self.engine.ships
+        ):
+            self._killed = True
+            rewards[self._agent_name(0)] = 1.0
+        return rewards
+
+    def _is_terminated(self) -> bool:
+        return self._killed
+
+    def _after_engine_step(self, agent, action) -> None:
+        self._pass_opponent(scripted=True, stop=lambda: self._killed)
+        self._reveal_target()
+
+
+def make_sandbox(skill: str, map_json_path: str, *, width: int, height: int, max_turns: int):
+    """Build the sandbox named by ``skill`` (see ``SKILL_NAMES``)."""
+    if skill == "merchant":
+        return MerchantSandbox(map_json_path, width=width, height=height, max_turns=max_turns)
+    if skill == "builder":
+        return ShipBuildSandbox(map_json_path, width=width, height=height, max_turns=max_turns)
+    if skill == "landing":
+        return LandingSandbox(map_json_path, width=width, height=height, max_turns=max_turns)
+    if skill.startswith("combat_"):
+        return CombatSandbox(
+            map_json_path,
+            ship=skill.split("_", 1)[1],
+            width=width,
+            height=height,
+            max_turns=max_turns,
+        )
+    raise ValueError(f"unknown sandbox {skill!r}")
+
+
+def horizon(skill: str, size: int) -> Tuple[int, int]:
+    """(max_turns, max_steps) for a square board of this size."""
+    if skill == "builder":
+        return 4, 8
+    if skill == "merchant":
+        return max(8, size * 4), max(24, size * 12)
+    return max(8, size * 3), max(16, size * 8)

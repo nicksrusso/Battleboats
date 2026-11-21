@@ -142,6 +142,7 @@ def collate_transitions(
         "value_old": value_old,
         "advantage": advantage,
         "ret": ret,
+        "skill_idx": torch.tensor([int(getattr(tr, "skill_idx", 0)) for tr in transitions]),
     }
 
     if device is not None:

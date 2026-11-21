@@ -213,9 +213,15 @@ class PolicyNetwork(nn.Module):
         num_layers: int = 2,
         dim_feedforward: int = 128,
         dropout: float = 0.1,
+        skill_count: int = 0,
     ):
         super().__init__()
         self.d_model = d_model
+        # One-hot skill / unit type, consumed as an embedding added to the
+        # pooled context. 0 keeps the old network (no skill input).
+        self.skill_count = int(skill_count)
+        if self.skill_count > 0:
+            self.skill_embed = nn.Embedding(self.skill_count, d_model)
 
         # --- Encoder (identical recipe to TransformerValueModel) ---
         self.proj = nn.Linear(token_dim, d_model)
@@ -264,6 +270,20 @@ class PolicyNetwork(nn.Module):
         pooled = summed / counts  # take mean of embedded tokens
         return x, pooled
 
+    def _with_skill(self, context: torch.Tensor, skill_idx, batch: int) -> torch.Tensor:
+        """Add the skill one-hot (as an embedding) to the pooled context."""
+        if self.skill_count <= 0:
+            return context
+        if skill_idx is None:
+            idx = torch.zeros(batch, dtype=torch.long, device=context.device)
+        elif isinstance(skill_idx, int):
+            idx = torch.full((batch,), int(skill_idx), dtype=torch.long, device=context.device)
+        else:
+            idx = skill_idx.to(device=context.device, dtype=torch.long).view(-1)
+            if idx.numel() == 1 and batch > 1:
+                idx = idx.expand(batch)
+        return context + self.skill_embed(idx)
+
     def value(self, context: torch.Tensor) -> torch.Tensor:
         """context: (B, d_model) -> V(s): (B,) in [-1, 1].
 
@@ -282,7 +302,7 @@ class PolicyNetwork(nn.Module):
 
     # --- Rollout (sequential sampling) -----------------------------------------
     @torch.no_grad()
-    def act(self, tokens: torch.Tensor, pad_mask: torch.Tensor, masks):
+    def act(self, tokens: torch.Tensor, pad_mask: torch.Tensor, masks, skill_idx=None):
         """One action for ONE state (rollout). `masks` carries the engine's
         legality info; suggested contract (an object/dict the env builds):
             masks.asset            : (1, N) bool  — selectable assets (Head A)
@@ -335,6 +355,7 @@ class PolicyNetwork(nn.Module):
         # (the pointer head scores these) and the pooled board summary `context`
         # (the categorical + value heads consume this). Never re-encode mid-action.
         embeddings, context = self.encode(tokens, pad_mask)
+        context = self._with_skill(context, skill_idx, B)
 
         # ----- Factor 1: ASSET — "which of my entities acts?" --------------------
         # Pointer head scores every entity by q·eᵢ; masks.asset sets illegal ones to
@@ -407,6 +428,7 @@ class PolicyNetwork(nn.Module):
         verb_idx: torch.Tensor,
         target_idx: torch.Tensor,
         masks,
+        skill_idx=None,
     ):
         """Re-score a BATCH of stored (asset, verb, target) triples under the
         CURRENT policy. Returns (joint_logprob (B,), entropy (B,), value (B,)).
@@ -435,6 +457,7 @@ class PolicyNetwork(nn.Module):
         """
         B = tokens.shape[0]
         embeddings, context = self.encode(tokens, pad_mask)
+        context = self._with_skill(context, skill_idx, B)
 
         # --- Asset factor: score the batch, then read off the STORED idx's log-prob
         # (and entropy). No sampling — the action already happened during rollout.
