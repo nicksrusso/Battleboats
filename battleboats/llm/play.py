@@ -73,6 +73,8 @@ class LlamaClient:
         self.model = model
         self.timeout = timeout
         self.max_tokens = max_tokens
+        self.last_usage = None
+        self.last_timings = None
 
     def __call__(self, prompt: str, temperature: float) -> str:
         payload = chat_payload(prompt, temperature, self.model, self.max_tokens)
@@ -93,21 +95,58 @@ class LlamaClient:
             raise RuntimeError(
                 f"llama-server unreachable at {self.url}: {exc.reason}"
             ) from exc
+        self.last_usage = body.get("usage")
+        self.last_timings = body.get("timings")
         return message_text(body)
 
 
-def message_text(body: dict) -> str:
-    message = body["choices"][0]["message"]
-    content = message.get("content") or message.get("reasoning_content") or ""
-    if isinstance(content, list):
+def _field_text(value) -> str:
+    if not value:
+        return ""
+    if isinstance(value, list):
         parts = []
-        for part in content:
+        for part in value:
             if isinstance(part, str):
                 parts.append(part)
             elif isinstance(part, dict):
                 parts.append(str(part.get("text") or ""))
         return "".join(parts).strip()
-    return str(content).strip()
+    return str(value).strip()
+
+
+def message_text(body: dict) -> str:
+    message = body["choices"][0]["message"]
+    content = _field_text(message.get("content"))
+    reasoning = _field_text(message.get("reasoning_content"))
+    if reasoning and content:
+        return f"[Start thinking]\n{reasoning}\n[End thinking]\n{content}"
+    if content:
+        return content
+    if reasoning:
+        return f"[Start thinking]\n{reasoning}\n[End thinking]\n"
+    return ""
+
+
+_THINK_BLOCKS = (
+    re.compile(r"(?is)\[Start thinking\].*?\[End thinking\]"),
+    re.compile(r"(?is)<think>.*?</think>"),
+    re.compile(r"(?is)<\|content_thinking\|>.*?(?:<\|end_message\|>|<\|content_text\|>)"),
+)
+
+
+def _strip_thinking(text: str) -> str:
+    visible = text
+    for pat in _THINK_BLOCKS:
+        visible = pat.sub("", visible)
+    for start, end in (
+        ("[Start thinking]", "[End thinking]"),
+        ("<think>", "</think>"),
+        ("<|content_thinking|>", "<|end_message|>"),
+    ):
+        idx = visible.find(start)
+        if idx != -1 and end not in visible[idx:]:
+            visible = visible[:idx]
+    return visible.strip()
 
 
 def parse_choice(text: str, n_legal: int) -> Optional[Tuple[int, str]]:
@@ -115,8 +154,12 @@ def parse_choice(text: str, n_legal: int) -> Optional[Tuple[int, str]]:
 
     A leading integer wins. Otherwise the first integer that is not part of
     a negative number. Out of range is a failure (caller retries).
+    Numbers inside a thinking block are ignored.
     """
     if not text or n_legal <= 0:
+        return None
+    text = _strip_thinking(text)
+    if not text:
         return None
     match = _LEADING_NUM.match(text)
     if match is None:
@@ -284,6 +327,10 @@ def play_env(
                 "fallback": picked["fallback"],
                 "latency_s": picked["latency_s"],
             }
+            if getattr(complete, "last_usage", None) is not None:
+                record["usage"] = complete.last_usage
+            if getattr(complete, "last_timings", None) is not None:
+                record["timings"] = complete.last_timings
             if picked["retry_prompt"] is not None:
                 record["retry_prompt"] = picked["retry_prompt"]
             handle.write(json.dumps(record) + "\n")
