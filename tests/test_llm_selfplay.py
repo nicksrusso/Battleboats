@@ -14,7 +14,8 @@ from battleboats.core.shipyard.ship_type import ShipType
 from battleboats.envs.battleboats_aec import BattleboatsAEC
 from battleboats.envs.skill_maps import write_two_home_map
 from battleboats.llm.play import (chat_completions_url, chat_payload,
-                                  choose_move, parse_choice, play_env)
+                                  choose_move, message_text, parse_choice,
+                                  play_env)
 from battleboats.llm.prompt import (FORMAT_VERSION, STATIC_PREFIX, build_view,
                                     render_prompt)
 
@@ -309,6 +310,45 @@ def test_chat_payload_shape() -> None:
     assert payload["cache_prompt"] is True
 
 
+def test_thinking_blocks_do_not_choose_a_move() -> None:
+    both = {
+        "choices": [
+            {
+                "message": {
+                    "content": "4 I close on the cruiser.",
+                    "reasoning_content": "maybe 9, or 1",
+                }
+            }
+        ]
+    }
+    text = message_text(both)
+    assert text == (
+        "[Start thinking]\nmaybe 9, or 1\n[End thinking]\n4 I close on the cruiser."
+    )
+    assert parse_choice(text, 10) == (4, "I close on the cruiser")
+
+    listed = {
+        "choices": [
+            {"message": {"content": [{"type": "text", "text": "2 "}, "go"], "reasoning_content": None}}
+        ]
+    }
+    assert message_text(listed) == "2 go"
+    assert parse_choice(message_text(listed), 5) == (2, "go")
+
+    reasoning_only = {
+        "choices": [{"message": {"content": "", "reasoning_content": "3 sail"}}]
+    }
+    assert message_text(reasoning_only) == "[Start thinking]\n3 sail\n[End thinking]\n"
+    assert parse_choice(message_text(reasoning_only), 5) is None
+
+    assert parse_choice("<think>99</think>\n2 go", 5) == (2, "go")
+    assert parse_choice("[Start thinking]\n7\n[End thinking]\n1 north", 5) == (1, "north")
+    assert parse_choice("<|content_thinking|>8<|content_text|>0 end", 3) == (0, "end")
+    assert parse_choice("[Start thinking]\n4 I pick this", 10) is None
+    assert parse_choice("<think>3", 5) is None
+    assert parse_choice("<|content_thinking|>1 never closed", 4) is None
+
+
 class _EndTurnClient:
     """First reply is garbage; the retry picks End from the menu."""
 
@@ -411,3 +451,51 @@ def test_fallback_random_still_finishes(tmp_path: Path) -> None:
         assert row["action"]["type"] == "end"
         assert row["choice"] == 0
         assert "ENTITIES" in row["prompt"]
+        assert "usage" not in row
+        assert "timings" not in row
+
+
+class _UsageClient:
+    """Ends the turn and stamps llama-server usage on each call."""
+
+    def __init__(self) -> None:
+        self.last_usage = None
+        self.last_timings = None
+        self.n = 0
+
+    def __call__(self, prompt: str, temperature: float) -> str:
+        self.n += 1
+        self.last_usage = {"prompt_tokens": 1000 + self.n, "completion_tokens": 4}
+        self.last_timings = {"prompt_ms": 12.5, "predicted_n": 4}
+        for line in prompt.splitlines():
+            parts = line.split()
+            if len(parts) >= 2 and parts[1] == "End":
+                return f"{parts[0]} ending the turn"
+        raise AssertionError("menu has no End")
+
+
+def test_decision_log_records_usage(tmp_path: Path) -> None:
+    map_path = write_two_home_map(tmp_path / "tiny.json", 6, 4)
+    env = BattleboatsAEC(map_json_path=map_path, max_turns=1)
+    env.reset(seed=0)
+    client = _UsageClient()
+    result = play_env(
+        env,
+        client,
+        path=tmp_path / "usage.jsonl",
+        seed=0,
+        game_index=0,
+        temperature=0.0,
+        horizon=4,
+        max_edges=20,
+        map_path=map_path,
+    )
+    assert result["steps"] == 2
+    decisions = [
+        json.loads(line)
+        for line in (tmp_path / "usage.jsonl").read_text().splitlines()
+        if json.loads(line)["type"] == "decision"
+    ]
+    assert [row["usage"]["prompt_tokens"] for row in decisions] == [1001, 1002]
+    assert all(row["timings"]["prompt_ms"] == 12.5 for row in decisions)
+    assert all(row["fallback"] is False for row in decisions)
