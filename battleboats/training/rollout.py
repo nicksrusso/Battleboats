@@ -22,8 +22,10 @@ import torch
 
 from battleboats.agents.heuristics import heuristic_eval
 from battleboats.agents.random_agent import random_action
+from battleboats.core.actions import BuildShipAction
 from battleboats.envs.action_masks import ActionMasks
 from battleboats.training.policy import VERB_NAMES, VERBS_WITH_TARGET, PolicyNetwork
+from battleboats.training.selfplay_purchases import empty_purchase_counts, record_purchase
 
 
 @dataclass
@@ -123,9 +125,11 @@ def collect_trajectory(
 
     Returns:
         ``(transitions, info)`` where ``info`` carries "winner", "outcome",
-        "steps", "n_decisions", "truncated", and "reward_sum" (episode return).
+        "steps", "n_decisions", "truncated", "reward_sum" (episode return),
+        and "purchases" (per-hull BuildShip counts for the learning seat).
     """
     transitions = []
+    purchases = empty_purchase_counts()
     steps = 0
     # Build masks on the policy's device so net.act() (which pulls masks mid-
     # forward) stays single-device. Opponent snapshot is on the same device.
@@ -186,7 +190,10 @@ def collect_trajectory(
             )
 
         # apply action to env
-        env.step(masks.to_action(asset_idx=a_idx, verb_idx=v_idx, target_idx=t_idx))
+        action = masks.to_action(asset_idx=a_idx, verb_idx=v_idx, target_idx=t_idx)
+        if pid == agent_pid and isinstance(action, BuildShipAction):
+            record_purchase(purchases, action.ship_type)
+        env.step(action)
         steps += 1
         # Dense-reward skills: the reward for this decision is what the env
         # settled after the step (env.rewards is per-step in the AEC).
@@ -207,6 +214,7 @@ def collect_trajectory(
         "n_decisions": len(transitions),
         "truncated": winner is None,
         "reward_sum": sum(t.reward for t in transitions),
+        "purchases": purchases,
     }
 
 

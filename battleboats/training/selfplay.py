@@ -27,6 +27,11 @@ from battleboats.training.curriculum import ArchSpec, _infer_token_dim, _new_pol
 from battleboats.training.device import resolve_device
 from battleboats.training.loop import PPOHyper, apply_ppo, collect_episodes
 from battleboats.training.policy import PolicyNetwork
+from battleboats.training.selfplay_purchases import (
+    aggregate_purchases,
+    format_purchase_line,
+    purchase_mix,
+)
 
 
 @dataclass
@@ -271,6 +276,7 @@ def run_selfplay(cfg: SelfPlayConfig, *, resume: bool = True) -> Dict[str, Any]:
             "mean_steps": (sum(step_counts) / len(step_counts)) if step_counts else 0.0,
             "pool": snapshots.names(),
             "by_size": by_size,
+            **purchase_mix(aggregate_purchases(infos)),
             **{f"ppo_{k}": v for k, v in metrics.items()},
         }
         with history.open("a") as f:
@@ -286,11 +292,13 @@ def run_selfplay(cfg: SelfPlayConfig, *, resume: bool = True) -> Dict[str, Any]:
                 if cfg.map_pool
                 else ""
             )
+            + " "
+            + format_purchase_line(row)
         )
         if use_wandb:
             import wandb
 
-            wandb.log({k: v for k, v in row.items() if k not in ("pool", "by_size")})
+            wandb.log({k: v for k, v in row.items() if k not in ("pool", "by_size", "purchases")})
         save_checkpoint(policy, latest, extra={"update": update + 1})
         if cfg.save_every and (update + 1) % cfg.save_every == 0:
             save_checkpoint(policy, cfg.run_dir / f"update_{update + 1}.pt")

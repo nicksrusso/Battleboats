@@ -627,12 +627,27 @@ def test_load_real_config() -> None:
     assert cfg.window == 64
     assert cfg.min_updates == 3
     assert cfg.skills[3] == "scouting"
-    assert "builder" in cfg.skills and "build_builder" in cfg.skills
-    build_skills = [name for name in SKILL_NAMES if name.startswith("build_")]
-    assert build_skills == [name for name in cfg.skills if name.startswith("build_")]
-    assert len(build_skills) == len(ShipType)
+    # The registry still names a typed-build drill per hull, but the
+    # training curriculum omits the expensive ones that collapsed on 4x4.
+    cheap_builds = ["build_merchant", "build_destroyer", "build_submarine"]
+    expensive_builds = [
+        "build_landing",
+        "build_cruiser",
+        "build_battleship",
+        "build_carrier",
+        "build_builder",
+    ]
+    assert "builder" in cfg.skills
+    assert [name for name in cfg.skills if name.startswith("build_")] == cheap_builds
+    for name in cheap_builds:
+        assert name in SKILL_NAMES
+    for name in expensive_builds:
+        assert name in SKILL_NAMES
+        assert name not in cfg.skills
+    all_builds = [name for name in SKILL_NAMES if name.startswith("build_")]
+    assert len(all_builds) == len(ShipType)
     smoke = load_sandbox_config(root / "configs" / "sandboxes_smoke.yaml")
-    assert [name for name in smoke.skills if name.startswith("build_")] == build_skills
+    assert [name for name in smoke.skills if name.startswith("build_")] == all_builds
     assert cfg.plateau_threshold == 0.02
     assert cfg.plateau_updates == 10
     assert cfg.plateau_smooth == "mean"
