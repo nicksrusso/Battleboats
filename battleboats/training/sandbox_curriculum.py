@@ -503,6 +503,12 @@ def _run_size(cfg, state, policy, envs, rng, device, logger):
             state["size_capped"] = True
             break
         if updates >= cfg.min_updates and _unclear_and_capped(cfg, state, windows):
+            print(
+                f"[sandboxes] WARNING {size}x{size} hit max_episodes_per_size="
+                f"{cfg.max_episodes_per_size}; advancing"
+            )
+            logger.log({"size": size, "update": updates, "episode_cap": 1.0})
+            state["size_capped"] = True
             break
         metrics = _one_mixed_update(
             cfg, state, size, policy, envs, rng, device, windows, reward_windows
