@@ -1,0 +1,54 @@
+# Full-game PPO on random maps from core/config/generate_map.py at three
+# sizes. Each episode draws one map uniformly from the pool. Warm-starts from
+# v0.0.1 (trained on 8x8; the encoder normalizes positions by board size, so
+# the same weights load on any board).
+#
+# max_turns / max_steps below are the caps for homes ref_home_distance apart. Each map scales both
+# by (home-to-home Manhattan distance / ref_home_distance), never below 1x.
+# The 8x8 boards had homes 14 apart and played to an 80-turn cap in 3000 steps
+# (~37 engine steps a turn, both seats). On the bigger boards ships sail at
+# full speed for longer, and a pace run measured 45-80 steps a turn, so
+# 3000/80 cut games before their turn cap. max_steps here is 100 a turn: a
+# safety net, so the per-map turn cap is what ends a game.
+#
+# poetry run python scripts/train_selfplay.py --config configs/selfplay_bigmaps.yaml
+
+run_dir: runs/selfplay_bigmaps
+device: cpu
+seed: 0
+init_checkpoint: runs/checkpoints/v0.0.1_8f0a942.pt
+map_pool:
+  - {width: 16, height: 8, count: 30, ports: 2}
+  - {width: 32, height: 16, count: 30, ports: 3}
+  - {width: 48, height: 24, count: 30, ports: 4}
+land_fraction: 0.02
+ref_home_distance: 14
+# ~47 s an update on Nick's 16-core CPU in a 13-update pace run, so 700 is ~9 h.
+updates: 700
+rollout_decisions: 2048
+max_turns: 80
+max_steps: 8000
+snapshot_every: 5
+snapshot_pool: 4
+random_opponent_frac: 0.15
+save_every: 10
+wandb: false
+
+# Must match the v0.0.1 checkpoint (only used if init_checkpoint is missing).
+arch:
+  d_model: 64
+  nhead: 4
+  num_layers: 2
+  dim_feedforward: 128
+  dropout: 0.1
+
+ppo:
+  lr: 0.0003
+  gamma: 0.99
+  lam: 0.95
+  clip_eps: 0.2
+  vf_coef: 0.5
+  ent_coef: 0.01
+  epochs: 4
+  minibatch_size: 256
+  max_grad_norm: 0.5

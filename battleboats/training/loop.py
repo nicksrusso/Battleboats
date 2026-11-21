@@ -40,7 +40,7 @@ def collect_episodes(
     *,
     target_decisions: int,
     hyper: PPOHyper,
-    max_steps: int,
+    max_steps: int | Callable[[int], int],
     reset: Callable[[int], int],
     opponent_for: Callable[[int], Tuple[Optional[PolicyNetwork], Optional[Callable]]],
     use_env_reward: bool,
@@ -50,8 +50,9 @@ def collect_episodes(
     """Fill a buffer. ``reset(ep)`` resets the env and returns the learner seat.
 
     ``opponent_for(ep)`` returns ``(opponent_policy, opponent_action)``. A
-    policy of None with no callable is uniform random. Stops once the buffer
-    holds ``target_decisions`` or a safety cap of episodes is hit.
+    policy of None with no callable is uniform random. ``max_steps`` is an
+    int or ``max_steps(ep)`` for per-map caps. Stops once the buffer holds
+    ``target_decisions`` or a safety cap of episodes is hit.
     """
     buffer = RolloutBuffer()
     infos: List[Dict[str, Any]] = []
@@ -67,7 +68,7 @@ def collect_episodes(
             env,
             agent_pid,
             rng,
-            max_steps=max_steps,
+            max_steps=max_steps(ep) if callable(max_steps) else max_steps,
             use_env_reward=use_env_reward,
             opponent_action=opponent_action,
         )
