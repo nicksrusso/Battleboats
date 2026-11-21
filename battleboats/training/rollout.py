@@ -90,7 +90,7 @@ def collect_trajectory(
     env,
     agent_pid: int,
     rng,
-    max_steps: int = 400,
+    max_steps: int = 3000,
     use_env_reward: bool = False,
     opponent_action=None,
 ) -> Tuple[List[Transition], Dict[str, Any]]:
@@ -106,7 +106,9 @@ def collect_trajectory(
     -1 loss / 0 draw), attached to the last recorded decision.
 
     The env must already be reset by the caller (the scenario/seed are the
-    caller's choice). ``max_steps`` caps total engine steps, not turns;
+    caller's choice). ``max_steps`` caps total engine steps, not turns.
+    The default matches full-game self-play so an omitted argument does not
+    revive the old 400-step cut. Callers that pass their own budget are unchanged.
     ``agent_pid`` lets the caller alternate the learning seat across games so
     the policy learns both sides of the first-player advantage.
 
@@ -199,6 +201,7 @@ def collect_trajectory(
         "winner": winner,
         "outcome": outcome,
         "steps": steps,
+        "turn": int(env.engine.turn) if env.engine is not None else 0,
         "n_decisions": len(transitions),
         "truncated": winner is None,
         "reward_sum": sum(t.reward for t in transitions),

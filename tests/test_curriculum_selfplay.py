@@ -50,6 +50,8 @@ def test_load_real_configs() -> None:
     selfplay = load_selfplay_config(root / "configs" / "selfplay.yaml")
     assert selfplay.snapshot_pool == 4
     assert selfplay.random_opponent_frac == 0.15
+    assert selfplay.max_turns == 80
+    assert selfplay.max_steps == 3000
 
 
 def test_unknown_skill_rejected(tmp_path: Path) -> None:

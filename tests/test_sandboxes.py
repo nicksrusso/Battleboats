@@ -18,18 +18,28 @@ from battleboats.core.actions import (
 from battleboats.core.shipyard.ship_data import BASE_STATS
 from battleboats.core.shipyard.ship_type import ShipType
 from battleboats.envs.base_aec import BattleboatsBaseAEC
+from battleboats.envs.observation import (
+    OWNER_OFFSET,
+    SHIP_TYPE_INDEX,
+    STATS_OFFSET,
+    COST_SCALE,
+)
 from battleboats.envs.sandboxes import (
     CombatSandbox,
+    HOME_TURN_INCOME,
     LandingSandbox,
     MerchantSandbox,
     ScoutingSandbox,
     ShipBuildSandbox,
+    TypedBuildSandbox,
     combat_outcome,
     enemy_strength_scale,
     make_sandbox,
+    opening_cash,
     scouting_find_reward,
     ship_detection_range,
     side_power,
+    typed_build_reward,
 )
 from battleboats.envs.skill_maps import write_two_home_map
 from battleboats.training.curriculum import ArchSpec
@@ -452,6 +462,12 @@ def test_load_real_config() -> None:
     assert cfg.window == 64
     assert cfg.min_updates == 3
     assert cfg.skills[3] == "scouting"
+    assert "builder" in cfg.skills and "build_builder" in cfg.skills
+    build_skills = [name for name in SKILL_NAMES if name.startswith("build_")]
+    assert build_skills == [name for name in cfg.skills if name.startswith("build_")]
+    assert len(build_skills) == len(ShipType)
+    smoke = load_sandbox_config(root / "configs" / "sandboxes_smoke.yaml")
+    assert [name for name in smoke.skills if name.startswith("build_")] == build_skills
     assert cfg.plateau_threshold == 0.02
     assert cfg.plateau_updates == 10
     assert cfg.plateau_smooth == "mean"
@@ -650,3 +666,172 @@ def test_scouting_update_logs_the_drill_and_wandb_state(tmp_path: Path, capsys) 
     for key in ("success_rate", "mean_reward", "gate", "return_scale", "reward_smooth"):
         assert f"scouting/{key}" in row
     assert init_wandb(False, project="battleboats-skill-pipeline", config={}).enabled is False
+
+
+def _builds(env, ship_type=None):
+    legal = env.infos["player_0"]["legal_actions"]
+    found = [a for a in legal if isinstance(a, BuildShipAction)]
+    if ship_type is None:
+        return found
+    return [a for a in found if a.ship_type is ship_type]
+
+
+def _cue_token(env, ship_type):
+    tokens = env.observe("player_0")["entity_tokens"]
+    hot = SHIP_TYPE_INDEX[ship_type]
+    rows = [
+        row
+        for row in tokens
+        if row[OWNER_OFFSET + 1] == 1.0 and row[hot] == 1.0
+    ]
+    assert len(rows) == 1
+    return rows[0]
+
+
+def test_typed_build_waits_then_pays_only_the_cued_hull(tmp_path: Path) -> None:
+    assert typed_build_reward(0, 6) == 1.0
+    assert abs(typed_build_reward(1, 6) - 5.0 / 6.0) < 1e-9
+    assert typed_build_reward(6, 6) == 0.0
+    income = HOME_TURN_INCOME
+    assert income == 50
+    for ship in ShipType:
+        cash = opening_cash(BASE_STATS[ship].cost)
+        assert 0 <= cash < BASE_STATS[ship].cost
+        assert cash == max(0, BASE_STATS[ship].cost - income)
+
+    path = write_two_home_map(tmp_path / "build.json", 3, 3)
+    for ship in ShipType:
+        env = TypedBuildSandbox(str(path), ship=ship.name.lower(), width=3, height=3, max_turns=6)
+        env.reset(seed=0)
+        cost = BASE_STATS[ship].cost
+        assert env.engine.players[0].cash == opening_cash(cost)
+        assert env.engine.players[0].cash < cost
+        assert _builds(env, ship) == []
+        cue = _cue_token(env, ship)
+        assert abs(float(cue[STATS_OFFSET + 5]) - cost / COST_SCALE) < 1e-6
+        assert env.skill_index == skill_index(f"build_{ship.name.lower()}")
+        env.step(EndTurnAction())
+        assert env.engine.turn == 1
+        assert env.engine.players[0].cash == cost
+        assert _builds(env, ship)
+        # A second income tick must not unlock a dearer hull.
+        env.step(EndTurnAction())
+        assert env.engine.players[0].cash == cost
+        assert all(BASE_STATS[a.ship_type].cost <= cost for a in _builds(env))
+        env.close()
+
+    # Same price as a destroyer. Buying the destroyer is legal and pays nothing.
+    merchant = TypedBuildSandbox(str(path), ship="merchant", width=3, height=3, max_turns=6)
+    merchant.reset(seed=1)
+    merchant.step(EndTurnAction())
+    wrong = _builds(merchant, ShipType.DESTROYER)
+    assert wrong and not merchant.built_target
+    merchant.step(wrong[0])
+    assert merchant.built_target is False
+    assert merchant.rewards["player_0"] == 0.0
+    assert merchant.terminations["player_0"] is True
+    merchant.close()
+
+    # Immediate buy of the cued hull, on the turn it becomes affordable.
+    prompt = TypedBuildSandbox(str(path), ship="merchant", width=3, height=3, max_turns=6)
+    prompt.reset(seed=2)
+    prompt.step(EndTurnAction())
+    prompt.step(_builds(prompt, ShipType.MERCHANT)[0])
+    assert prompt.built_target is True
+    assert prompt.rewards["player_0"] == 1.0
+    assert prompt.terminations["player_0"] is True
+    prompt.close()
+
+    # One extra EndTurn after it is affordable pays strictly less.
+    late = TypedBuildSandbox(str(path), ship="merchant", width=3, height=3, max_turns=6)
+    late.reset(seed=2)
+    late.step(EndTurnAction())
+    late.step(EndTurnAction())
+    late.step(_builds(late, ShipType.MERCHANT)[0])
+    assert late.built_target is True
+    assert abs(late.episode_reward - 5.0 / 6.0) < 1e-9
+    late.close()
+
+    # Cheaper hulls are legal before a battleship is. Buying one does not pay,
+    # and waiting never makes a carrier legal.
+    early = TypedBuildSandbox(str(path), ship="battleship", width=3, height=3, max_turns=6)
+    early.reset(seed=3)
+    assert early.engine.players[0].cash < BASE_STATS[ShipType.BATTLESHIP].cost
+    cheaper = _builds(early, ShipType.CRUISER)
+    assert cheaper and _builds(early, ShipType.BATTLESHIP) == []
+    early.step(cheaper[0])
+    assert early.built_target is False
+    assert early.rewards["player_0"] == 0.0
+    assert early.terminations["player_0"] is True
+    early.close()
+
+    capped = TypedBuildSandbox(str(path), ship="battleship", width=3, height=3, max_turns=8)
+    capped.reset(seed=4)
+    for _ in range(4):
+        if capped.terminations["player_0"] or capped.truncations["player_0"]:
+            break
+        capped.step(EndTurnAction())
+    assert capped.engine.players[0].cash == BASE_STATS[ShipType.BATTLESHIP].cost
+    assert _builds(capped, ShipType.BATTLESHIP)
+    assert _builds(capped, ShipType.CARRIER) == []
+    capped.close()
+
+    # Home-port sight of a submarine is 4 tiles. This cue sits 17 away, so the
+    # token is there only because the drill keeps the sighting. That token is
+    # the same enemy-ship channel the full game already uses.
+    wide = write_two_home_map(tmp_path / "wide.json", 10, 10)
+    far = TypedBuildSandbox(str(wide), ship="submarine", width=10, height=10, max_turns=6)
+    far._layout = {"home": (0, 0), "opp": (9, 9), "cue": (9, 8)}
+    far._write_map([(0, 0), (9, 9)], [(0, 0)], [(9, 9)])
+    BattleboatsBaseAEC.reset(far, seed=0)
+    cue_ship = far.engine.ships[far._cue_id]
+    dist = abs(cue_ship.position[0]) + abs(cue_ship.position[1])
+    assert dist > 4
+    _cue_token(far, ShipType.SUBMARINE)
+    far.step(EndTurnAction())
+    _cue_token(far, ShipType.SUBMARINE)
+    far.close()
+
+    common = dict(
+        updates=3,
+        episodes=64,
+        reward_trace=[0.2] * 20,
+        value_trace=[0.4] * 20,
+        success_threshold=0.8,
+        need=64,
+        min_updates=3,
+        plateau_updates=10,
+        plateau_threshold=0.02,
+        combat_min_episodes=32,
+    )
+    assert drill_done("build_landing", window=[1.0] * 64, **common)
+    assert not drill_done("build_landing", window=[0.0] * 64, **common)
+    assert not drill_done("build_merchant", window=[], **common)
+
+    cfg = SandboxRunConfig(
+        run_dir=tmp_path / "buy",
+        skills=["build_landing"],
+        sizes=[3],
+        device="cpu",
+        success_threshold=0.0,
+        window=1,
+        max_updates_per_size=1,
+        max_episodes_per_size=4,
+        decisions_per_update=4,
+        rehearsal_frac=0.0,
+        size_mix_frac=0.0,
+        eval_episodes=0,
+        allow_unmet=True,
+        min_updates=1,
+        wandb=False,
+        arch=ArchSpec(d_model=32, nhead=2, num_layers=1, dim_feedforward=64, dropout=0.0),
+        ppo=PPOHyper(epochs=1, minibatch_size=2, ent_coef=0.01),
+    )
+    result = run_sandboxes(cfg, resume=False)
+    assert result["ok"]
+    row = json.loads((tmp_path / "buy" / "history.jsonl").read_text().splitlines()[0])
+    for key in ("success_rate", "mean_reward", "gate", "return_scale"):
+        assert f"build_landing/{key}" in row
+    loaded, model_config = load_checkpoint(tmp_path / "buy" / "latest.pt", torch.device("cpu"))
+    assert model_config["skill_count"] == 0
+    assert loaded.skill_count == 0
