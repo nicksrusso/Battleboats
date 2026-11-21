@@ -48,15 +48,17 @@ min_updates: 3
 # reward and of value loss, not on a win rate and not on the raw per-update
 # mean. plateau_smooth is "mean" (trailing window) or "ema". The gain of
 # that average over plateau_updates must stay below plateau_threshold, after
-# combat_min_episodes. A pass stays passed for that size. max_updates_per_size
-# advances the size anyway.
+# combat_min_episodes. A pass stays passed for that size. With
+# allow_unmet: false, hitting max_updates_per_size or max_episodes_per_size
+# with an unmet gate stops the run instead of advancing. Budgets are 5x
+# the earlier 150 / 400 so a size has more room to clear the window.
 plateau_threshold: 0.02
 plateau_updates: 10
 plateau_smooth: mean
 plateau_smooth_span: 8
 combat_min_episodes: 32
-max_updates_per_size: 150
-max_episodes_per_size: 400
+max_updates_per_size: 750
+max_episodes_per_size: 2000
 decisions_per_update: 512
 rehearsal_frac: 0.15
 size_mix_frac: 0.20

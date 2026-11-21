@@ -5,7 +5,7 @@ engine state. The observation is consumed by the policy network's encoder
 (transformer over entity tokens + small MLP over globals).
 
 Token schema (per docs/policy_architecture.md):
-    type_onehot | position | owner | stats | ship_state | port_state | sighting_state
+    type_onehot | abs_fourier_pos | home_rel_fourier | owner | stats | ship_state | port_state | sighting_state | board_size
 
 Variable-length token list — pointer heads handle the variable cardinality
 natively, so no max-N padding is needed at this layer. (Batching may pad
@@ -18,7 +18,8 @@ Fog-of-war discipline (load-bearing):
     Coastline tiles → static map property; safe to read from engine.map.
 """
 
-from typing import TYPE_CHECKING, Any, Dict, List, Tuple
+import math
+from typing import TYPE_CHECKING, Any, Dict, List, Sequence, Tuple
 
 import numpy as np
 
@@ -35,17 +36,25 @@ if TYPE_CHECKING:
 # ----------------------------------------------------------------------------
 
 TOKEN_TYPE_ONEHOT_DIM: int = 10  # one for each ship type plus ports and land
-TOKEN_POSITION_DIM: int = 2  # x/y position
+# Absolute and home-relative positions are sinusoidal features of raw cell
+# coordinates (sin/cos at geometric wavelengths), not x/width or x/256.
+# 8 frequencies x 2 axes x (sin, cos) for absolute; 4 frequencies for
+# home-relative, to keep the token width reasonable.
+POSITION_FREQS: int = 8
+HOME_REL_FREQS: int = 4
+TOKEN_POSITION_DIM: int = POSITION_FREQS * 2 * 2
+TOKEN_HOME_REL_DIM: int = HOME_REL_FREQS * 2 * 2
 TOKEN_OWNER_DIM: int = 2  # is_friendly, is_enemy (relative to observer)
 TOKEN_STATS_DIM: int = 6  # one for each ship stat
 TOKEN_SHIP_STATE_DIM: int = 3  # cargo carried, has_attacked, tiles moved this turn
 TOKEN_PORT_STATE_DIM: int = 3  # mats in stockpile, is home, home-port cash
 TOKEN_SIGHTING_STATE_DIM: int = 2  # fresh, staleness
-TOKEN_BOARD_SIZE_DIM: int = 2  # board width, height (same scale as position)
+TOKEN_BOARD_SIZE_DIM: int = 2  # board width, height (width/256, height/256)
 
 TOKEN_DIM: int = (
     TOKEN_TYPE_ONEHOT_DIM
     + TOKEN_POSITION_DIM
+    + TOKEN_HOME_REL_DIM
     + TOKEN_OWNER_DIM
     + TOKEN_STATS_DIM
     + TOKEN_SHIP_STATE_DIM
@@ -59,9 +68,29 @@ TOKEN_DIM: int = (
 CASH_SCALE: float = 1500
 STOCKPILE_SCALE: float = 1500
 MAX_TURNS_SCALE: int = 500
-# Cell coordinates and board size share this scale so a tile is the same
-# fraction on every map, including boards much larger than 48x24 later.
+# Board width/height still use this coarse scale. Cell coordinates no longer do;
+# they use the sinusoidal wavelengths below.
 POSITION_SCALE: float = 256
+POSITION_MIN_WAVELENGTH: float = 2.0
+POSITION_MAX_WAVELENGTH: float = 4096.0
+
+
+def _geometric_wavelengths(count: int, shortest: float, longest: float) -> Tuple[float, ...]:
+    if count < 1:
+        raise ValueError("need at least one wavelength")
+    if count == 1:
+        return (float(shortest),)
+    log_lo, log_hi = math.log(shortest), math.log(longest)
+    step = (log_hi - log_lo) / (count - 1)
+    return tuple(math.exp(log_lo + i * step) for i in range(count))
+
+
+POSITION_WAVELENGTHS: Tuple[float, ...] = _geometric_wavelengths(
+    POSITION_FREQS, POSITION_MIN_WAVELENGTH, POSITION_MAX_WAVELENGTH
+)
+HOME_REL_WAVELENGTHS: Tuple[float, ...] = _geometric_wavelengths(
+    HOME_REL_FREQS, POSITION_MIN_WAVELENGTH, POSITION_MAX_WAVELENGTH
+)
 
 # Ship-stat scales derived from BASE_STATS so they auto-track CSV retunes.
 # Each scale is the max value of that stat across all ship types, so dividing
@@ -83,7 +112,8 @@ COASTLINE_TYPE_INDEX: int = PORT_TYPE_INDEX + 1  # 9
 # Use as: row[STATS_OFFSET + i] = ... rather than counting dims yourself.
 TYPE_OFFSET: int = 0
 POSITION_OFFSET: int = TYPE_OFFSET + TOKEN_TYPE_ONEHOT_DIM
-OWNER_OFFSET: int = POSITION_OFFSET + TOKEN_POSITION_DIM
+HOME_REL_OFFSET: int = POSITION_OFFSET + TOKEN_POSITION_DIM
+OWNER_OFFSET: int = HOME_REL_OFFSET + TOKEN_HOME_REL_DIM
 STATS_OFFSET: int = OWNER_OFFSET + TOKEN_OWNER_DIM
 SHIP_STATE_OFFSET: int = STATS_OFFSET + TOKEN_STATS_DIM
 PORT_STATE_OFFSET: int = SHIP_STATE_OFFSET + TOKEN_SHIP_STATE_DIM
@@ -152,18 +182,19 @@ def build_entity_tokens(engine: "gameEngine", player_id: int) -> np.ndarray:
     its kind. The per-kind _write_*_token helpers handle the field population.
     """
     tokens: List[np.ndarray] = []
+    home = engine.players[player_id].home_port
     for kind, payload in _ordered_entities(engine, player_id):
         row = np.zeros(TOKEN_DIM, dtype=np.float32)
         if kind == "friendly_ship":
-            _write_friendly_ship_token(row, payload, engine)
+            _write_friendly_ship_token(row, payload, engine, home)
         elif kind == "friendly_port":
-            _write_friendly_port_token(row, payload, engine)
+            _write_friendly_port_token(row, payload, engine, home)
         elif kind == "enemy_ship":
-            _write_enemy_ship_sighting_token(row, payload, engine)
+            _write_enemy_ship_sighting_token(row, payload, engine, home)
         elif kind == "enemy_port":
-            _write_enemy_port_sighting_token(row, payload, engine)
+            _write_enemy_port_sighting_token(row, payload, engine, home)
         elif kind == "coastline":
-            _write_coastline_token(row, payload, engine)
+            _write_coastline_token(row, payload, engine, home)
         _write_board_size(row, engine)
         tokens.append(row)
 
@@ -244,9 +275,25 @@ def build_globals(engine: "gameEngine", player_id: int) -> np.ndarray:
 # ============================================================================
 
 
-def _write_position(row: np.ndarray, x: float, y: float) -> None:
-    row[POSITION_OFFSET] = x / POSITION_SCALE
-    row[POSITION_OFFSET + 1] = y / POSITION_SCALE
+def _fourier_axis(
+    coord: float, wavelengths: Sequence[float], row: np.ndarray, offset: int
+) -> None:
+    for i, wavelength in enumerate(wavelengths):
+        angle = 2.0 * math.pi * (coord / wavelength)
+        row[offset + 2 * i] = math.sin(angle)
+        row[offset + 2 * i + 1] = math.cos(angle)
+
+
+def _write_position(row: np.ndarray, x: float, y: float, home: Tuple[int, int]) -> None:
+    hx, hy = home
+    x_off = POSITION_OFFSET
+    y_off = POSITION_OFFSET + 2 * len(POSITION_WAVELENGTHS)
+    _fourier_axis(x, POSITION_WAVELENGTHS, row, x_off)
+    _fourier_axis(y, POSITION_WAVELENGTHS, row, y_off)
+    hx_off = HOME_REL_OFFSET
+    hy_off = HOME_REL_OFFSET + 2 * len(HOME_REL_WAVELENGTHS)
+    _fourier_axis(x - hx, HOME_REL_WAVELENGTHS, row, hx_off)
+    _fourier_axis(y - hy, HOME_REL_WAVELENGTHS, row, hy_off)
 
 
 def _write_board_size(row: np.ndarray, engine: "gameEngine") -> None:
@@ -277,7 +324,7 @@ def _coastline_tiles(engine: "gameEngine") -> List[Tuple[int, int]]:
     return out
 
 
-def _write_friendly_ship_token(row: np.ndarray, ship, engine: "gameEngine") -> None:
+def _write_friendly_ship_token(row: np.ndarray, ship, engine: "gameEngine", home: Tuple[int, int]) -> None:
     """Populate `row` (shape (TOKEN_DIM,)) for a friendly Ship.
 
     Caller is expected to have zero-initialized the row (np.zeros). We only
@@ -286,9 +333,9 @@ def _write_friendly_ship_token(row: np.ndarray, ship, engine: "gameEngine") -> N
     # Type one-hot
     row[SHIP_TYPE_INDEX[ship.type]] = 1.0
 
-    # Position, normalized to [0, 1]
+    # Position: sinusoidal features of raw cell coords and home-relative offset
     x, y = ship.position
-    _write_position(row, x, y)
+    _write_position(row, x, y, home)
 
     # Owner — is_friendly=1, is_enemy=0
     row[OWNER_OFFSET] = 1.0
@@ -308,7 +355,7 @@ def _write_friendly_ship_token(row: np.ndarray, ship, engine: "gameEngine") -> N
     row[SHIP_STATE_OFFSET + 2] = ship.tiles_moved_this_turn / s.speed
 
 
-def _write_friendly_port_token(row: np.ndarray, port, engine: "gameEngine") -> None:
+def _write_friendly_port_token(row: np.ndarray, port, engine: "gameEngine", home: Tuple[int, int]) -> None:
     """Populate `row` for a friendly Port.
 
     Stats and ship_state stay zero (ports aren't ships). Sighting_state stays
@@ -317,9 +364,9 @@ def _write_friendly_port_token(row: np.ndarray, port, engine: "gameEngine") -> N
     # Type one-hot — the dedicated port slot
     row[PORT_TYPE_INDEX] = 1.0
 
-    # Position, normalized
+    # Position: sinusoidal features of raw cell coords and home-relative offset
     x, y = port.position
-    _write_position(row, x, y)
+    _write_position(row, x, y, home)
 
     # Owner — is_friendly=1
     row[OWNER_OFFSET] = 1.0
@@ -334,7 +381,7 @@ def _write_friendly_port_token(row: np.ndarray, port, engine: "gameEngine") -> N
         row[PORT_STATE_OFFSET + 2] = engine.players[port.owner].cash / CASH_SCALE
 
 
-def _write_enemy_ship_sighting_token(row: np.ndarray, sighting, engine: "gameEngine") -> None:
+def _write_enemy_ship_sighting_token(row: np.ndarray, sighting, engine: "gameEngine", home: Tuple[int, int]) -> None:
     """Populate `row` for an enemy Sighting (fresh or stale).
 
     Stats come from BASE_STATS[sighting.type] — ship types are public knowledge
@@ -347,7 +394,7 @@ def _write_enemy_ship_sighting_token(row: np.ndarray, sighting, engine: "gameEng
     # Position — last-known location (current if fresh, frozen at last
     # observation if stale)
     x, y = sighting.position
-    _write_position(row, x, y)
+    _write_position(row, x, y, home)
 
     # Owner — is_enemy=1 (is_friendly stays 0 from zero-init)
     row[OWNER_OFFSET + 1] = 1.0
@@ -366,7 +413,7 @@ def _write_enemy_ship_sighting_token(row: np.ndarray, sighting, engine: "gameEng
     row[SIGHTING_STATE_OFFSET + 1] = (engine.turn - sighting.turn_seen) / MAX_TURNS_SCALE
 
 
-def _write_enemy_port_sighting_token(row: np.ndarray, port_sighting, engine: "gameEngine") -> None:
+def _write_enemy_port_sighting_token(row: np.ndarray, port_sighting, engine: "gameEngine", home: Tuple[int, int]) -> None:
     """Populate `row` for an enemy PortSighting (fresh or stale).
 
     Stockpile stays zero — private operational info even when the port is
@@ -380,7 +427,7 @@ def _write_enemy_port_sighting_token(row: np.ndarray, port_sighting, engine: "ga
     # the port's tile; the freshness flag tells the network whether our
     # ownership record is current).
     x, y = port_sighting.position
-    _write_position(row, x, y)
+    _write_position(row, x, y, home)
 
     # Owner — is_enemy=1 (is_friendly stays 0 from zero-init)
     row[OWNER_OFFSET + 1] = 1.0
@@ -393,7 +440,7 @@ def _write_enemy_port_sighting_token(row: np.ndarray, port_sighting, engine: "ga
     row[SIGHTING_STATE_OFFSET + 1] = (engine.turn - port_sighting.turn_seen) / MAX_TURNS_SCALE
 
 
-def _write_coastline_token(row: np.ndarray, position: Tuple[int, int], engine: "gameEngine") -> None:
+def _write_coastline_token(row: np.ndarray, position: Tuple[int, int], engine: "gameEngine", home: Tuple[int, int]) -> None:
     """Populate `row` for a coastline tile.
 
     Coastline tiles are static map features — candidates for build_port
@@ -402,4 +449,4 @@ def _write_coastline_token(row: np.ndarray, position: Tuple[int, int], engine: "
     """
     row[COASTLINE_TYPE_INDEX] = 1.0
     x, y = position
-    _write_position(row, x, y)
+    _write_position(row, x, y, home)
