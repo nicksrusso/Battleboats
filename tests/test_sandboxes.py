@@ -54,9 +54,11 @@ from battleboats.training.sandbox_curriculum import (
     DecaySpec,
     SandboxRunConfig,
     _drill_done,
+    _size_cleared,
     choose_episode,
     choose_mixed_episode,
     drill_done,
+    format_stop_reason,
     full_smooth,
     load_sandbox_config,
     plateaued,
@@ -464,12 +466,105 @@ def test_episode_cap_stops_when_allow_unmet_is_false(tmp_path: Path) -> None:
     )
     result = run_sandboxes(cfg, resume=False)
     assert result["ok"] is False
-    assert "stopped" in result["reason"]
+    assert "merchant 3x3 stopped" in result["reason"]
+    assert "max_episodes_per_size=4" in result["reason"]
     summary = json.loads((tmp_path / "epcap" / "summary.json").read_text())
     size = summary["skills"]["merchant"]["sizes"]["3"]
     assert size["gate_met"] is False
     assert size["capped"] is True
 
+
+
+def test_goal_gate_reopens_when_the_live_window_drops(tmp_path: Path) -> None:
+    cfg = SandboxRunConfig(
+        run_dir=tmp_path / "live",
+        skills=["build_landing", "merchant"],
+        sizes=[3],
+        success_threshold=0.80,
+        window=4,
+        min_updates=1,
+    )
+    state = {
+        "updates_this_size": 5,
+        "episodes": {"build_landing": 20, "merchant": 20},
+        "reward_trace": {"build_landing": [], "merchant": []},
+        "value_trace": {"build_landing": [], "merchant": []},
+        "combat_passed": {},
+    }
+    windows = {
+        "build_landing": [1.0, 1.0, 1.0, 1.0],
+        "merchant": [1.0, 1.0, 1.0, 1.0],
+    }
+    assert _drill_done(cfg, state, "build_landing", windows["build_landing"])
+    assert _size_cleared(cfg, state, windows)
+    # New on-size failures must be able to reopen a drill that already passed,
+    # and the size must not advance until every live window clears again.
+    windows["build_landing"] = [1.0, 1.0, 0.0, 0.0]
+    assert not _drill_done(cfg, state, "build_landing", windows["build_landing"])
+    assert not _size_cleared(cfg, state, windows)
+    windows["build_landing"] = [1.0, 1.0, 1.0, 1.0]
+    assert _size_cleared(cfg, state, windows)
+
+
+def test_stop_reason_names_the_skill_that_hit_the_episode_cap(tmp_path: Path) -> None:
+    cfg = SandboxRunConfig(
+        run_dir=tmp_path / "stop",
+        skills=["merchant", "build_landing", "build_cruiser"],
+        sizes=[5],
+        success_threshold=0.80,
+        window=64,
+        max_episodes_per_size=2000,
+        max_updates_per_size=750,
+    )
+    # The 5x5 globals run stopped with merchant first in the unmet list, but
+    # the cap was the expensive build_* drills at 2000 episodes.
+    unmet = [
+        ("merchant", 0.50, 137),
+        ("build_landing", 0.00, 2007),
+        ("build_cruiser", 0.00, 2012),
+    ]
+    capped = [("build_landing", 0.00, 2007), ("build_cruiser", 0.00, 2012)]
+    reason = format_stop_reason(cfg, 5, unmet, cap_kind="episodes", capped_skills=capped)
+    assert reason.startswith("build_landing 5x5 stopped at window 0.00")
+    assert "after 2007 episodes" in reason
+    assert "build_cruiser window 0.00 after 2012 episodes" in reason
+    assert "max_episodes_per_size=2000" in reason
+    assert not reason.startswith("merchant")
+    update_reason = format_stop_reason(cfg, 5, unmet[:1], cap_kind="updates")
+    assert "merchant 5x5 stopped at window 0.50" in update_reason
+    assert "max_updates_per_size=750" in update_reason
+
+
+
+def test_episode_cap_stop_names_the_capped_skill_not_the_first_unmet(tmp_path: Path) -> None:
+    # build_* episodes are short, so they hit max_episodes_per_size while
+    # merchant still has a short unmet window. The stop text must name the
+    # capped build drill, not just merchant (first in the skills list).
+    cfg = SandboxRunConfig(
+        run_dir=tmp_path / "capname",
+        skills=["merchant", "build_landing"],
+        sizes=[3],
+        device="cpu",
+        success_threshold=0.99,
+        window=50,
+        max_episodes_per_size=8,
+        max_updates_per_size=50,
+        decisions_per_update=8,
+        rehearsal_frac=0.0,
+        size_mix_frac=0.0,
+        eval_episodes=0,
+        allow_unmet=False,
+        min_updates=1,
+        arch=ArchSpec(d_model=32, nhead=2, num_layers=1, dim_feedforward=64, dropout=0.0),
+        ppo=PPOHyper(epochs=1, minibatch_size=2, ent_coef=0.01),
+    )
+    result = run_sandboxes(cfg, resume=False)
+    assert result["ok"] is False
+    reason = result["reason"]
+    assert "build_landing 3x3 stopped" in reason
+    assert "max_episodes_per_size=8" in reason
+    # merchant may also be unmet, but it must not be reported as the cap.
+    assert not reason.startswith("merchant")
 
 def test_episode_cap_advances_when_allow_unmet_is_true(tmp_path: Path) -> None:
     cfg = SandboxRunConfig(

@@ -13,10 +13,12 @@
 # the terminal ±1.
 # Rewards are divided by that sandbox's running return scale (max of 1, the
 # absolute mean, and the std of discounted returns) so a larger return cannot
-# own the gradient. A size advances when every sandbox's window clears
-# success_threshold, and only after min_updates. Scouting uses that same
-# bar (detection, not a win). rehearsal_frac and size_mix_frac are smaller
-# boards of that same sandbox.
+# own the gradient. A size advances when every sandbox's live window
+# currently clears success_threshold, and only after min_updates. Goal
+# drills keep appending on-size episodes after they pass; a drop below
+# the bar reopens the drill. Combat keeps a passed flag for the rest of
+# that size. Scouting uses the same success bar (detection, not a win).
+# rehearsal_frac and size_mix_frac are smaller boards of that same sandbox.
 #
 # poetry run python scripts/train_sandboxes.py --config configs/sandboxes.yaml --device cpu
 #
@@ -48,10 +50,11 @@ min_updates: 3
 # reward and of value loss, not on a win rate and not on the raw per-update
 # mean. plateau_smooth is "mean" (trailing window) or "ema". The gain of
 # that average over plateau_updates must stay below plateau_threshold, after
-# combat_min_episodes. A pass stays passed for that size. With
+# combat_min_episodes. A combat pass stays passed for that size. With
 # allow_unmet: false, hitting max_updates_per_size or max_episodes_per_size
-# with an unmet gate stops the run instead of advancing. Budgets are 5x
-# the earlier 150 / 400 so a size has more room to clear the window.
+# with an unmet gate stops the run instead of advancing; the stop message
+# names the skill that hit the cap. Budgets are 5x the earlier 150 / 400
+# so a size has more room to clear the window.
 plateau_threshold: 0.02
 plateau_updates: 10
 plateau_smooth: mean

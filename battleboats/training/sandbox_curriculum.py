@@ -1,14 +1,16 @@
 """Size curriculum over sandboxes, one shared policy, no skill input.
 
 Every sandbox is in the batch together. An update gives each sandbox the
-same decision budget, then a size advances only once every sandbox's own
-gate has cleared. Merchant, builder, landing, scouting, and each
-``build_<type>`` drill clear on a success window. Combat clears on a
-plateau of smoothed reward and value loss, and a combat pass stays passed
-for that size. A fraction of each sandbox's episodes are smaller boards it
-has already cleared (rehearsal and size mix). Rewards are divided by that
-sandbox's running return scale so a drill with a larger return cannot own
-the gradient.
+same decision budget, then a size advances only when every sandbox's own
+gate currently clears (a fresh check). Merchant, builder, landing,
+scouting, and each ``build_<type>`` drill clear on a live success window:
+on-size episodes keep appending after a pass, and a drop below the
+threshold reopens the drill. Combat clears on a plateau of smoothed
+reward and value loss, and a combat pass stays passed for that size.
+A fraction of each sandbox's episodes are smaller boards it has already
+cleared (rehearsal and size mix). Rewards are divided by that sandbox's
+running return scale so a drill with a larger return cannot own the
+gradient.
 
 The network is the full-game pointer net (``skill_count=0``). Ship type
 comes from the ordinary observation tokens, not a task id. ``latest.pt``
@@ -486,6 +488,8 @@ def _run_size(cfg, state, policy, envs, rng, device, logger):
     """Train every sandbox at the current board size. Returns (cleared, policy)."""
     size = cfg.sizes[state["size_index"]]
     state["size_capped"] = False
+    state["cap_kind"] = ""
+    state["capped_skills"] = []
     windows = {
         skill: deque(state["windows"].get(skill, []), maxlen=cfg.window) for skill in cfg.skills
     }
@@ -496,6 +500,7 @@ def _run_size(cfg, state, policy, envs, rng, device, logger):
         updates = int(state.get("updates_this_size", 0))
         if updates >= cfg.max_updates_per_size:
             state["size_capped"] = True
+            state["cap_kind"] = "updates"
             logger.log({"size": size, "update": updates, "size_cap": 1.0})
             if cfg.allow_unmet:
                 print(
@@ -503,8 +508,11 @@ def _run_size(cfg, state, policy, envs, rng, device, logger):
                     f"{cfg.max_updates_per_size}; advancing"
                 )
             break
-        if updates >= cfg.min_updates and _unclear_and_capped(cfg, state, windows):
+        capped = _capped_unmet_skills(cfg, state, windows)
+        if updates >= cfg.min_updates and capped:
             state["size_capped"] = True
+            state["cap_kind"] = "episodes"
+            state["capped_skills"] = capped
             logger.log({"size": size, "update": updates, "episode_cap": 1.0})
             if cfg.allow_unmet:
                 print(
@@ -579,10 +587,12 @@ def _run_size(cfg, state, policy, envs, rng, device, logger):
     save_checkpoint(policy, cfg.run_dir / "latest.pt", extra={"size": size, "skill_count": 0})
     _write_summary(cfg, state)
     if unmet and not cfg.allow_unmet:
-        skill, rate, episodes = unmet[0]
-        state["reason"] = (
-            f"{skill} {size}x{size} stopped at window {rate:.2f} "
-            f"< {cfg.success_threshold:.2f} after {episodes} episodes"
+        state["reason"] = format_stop_reason(
+            cfg,
+            size,
+            unmet,
+            cap_kind=str(state.get("cap_kind") or ""),
+            capped_skills=list(state.get("capped_skills") or []),
         )
         print(f"[sandboxes] STOP {state['reason']}")
         return False, policy
@@ -609,7 +619,6 @@ def _one_mixed_update(cfg, state, focus_size, policy, envs, rng, device, windows
         reward_window = reward_windows[skill]
         squared = 0.0
         valued = 0
-        already = _drill_done(cfg, state, skill, window)
         while decisions < budget and episodes < 32:
             _name, size, role = choose_mixed_episode(
                 rng,
@@ -647,7 +656,10 @@ def _one_mixed_update(cfg, state, focus_size, policy, envs, rng, device, windows
                     valued += 1
             ok = 1.0 if _succeeded(skill, env) else 0.0
             state["episodes"][skill] = int(state["episodes"].get(skill, 0)) + 1
-            if role == "focus" and not already:
+            # Goal-drill windows stay live after a pass so a collapse can
+            # reopen the gate. Combat has no success window; its plateau
+            # latch is separate (combat_passed).
+            if role == "focus":
                 reward_window.append(raw)
                 if not _is_combat(skill):
                     window.append(ok)
@@ -839,6 +851,8 @@ def _reset_size_progress(state: Dict, cfg) -> None:
     state["combat_passed"] = {skill: False for skill in cfg.skills}
     state["episodes"] = {skill: 0 for skill in cfg.skills}
     state["size_capped"] = False
+    state["cap_kind"] = ""
+    state["capped_skills"] = []
 
 
 def _smooth_gain(series: Sequence[float], cfg, *, higher_is_better: bool) -> Tuple[float, float]:
@@ -876,13 +890,59 @@ def _size_cleared(cfg, state, windows) -> bool:
     return all(_drill_done(cfg, state, skill, windows[skill]) for skill in cfg.skills)
 
 
-def _unclear_and_capped(cfg, state, windows) -> bool:
+def _window_rate(window) -> float:
+    return (sum(window) / len(window)) if window else 0.0
+
+
+def _capped_unmet_skills(cfg, state, windows):
+    """Unmet drills that have reached ``max_episodes_per_size``."""
+    hit = []
     for skill in cfg.skills:
-        if not _drill_done(cfg, state, skill, windows[skill]) and int(
-            state["episodes"].get(skill, 0)
-        ) >= cfg.max_episodes_per_size:
-            return True
-    return False
+        window = windows[skill]
+        if _drill_done(cfg, state, skill, window):
+            continue
+        episodes = int(state["episodes"].get(skill, 0))
+        if episodes >= cfg.max_episodes_per_size:
+            hit.append((skill, _window_rate(window), episodes))
+    return hit
+
+
+def format_stop_reason(cfg, size, unmet, cap_kind: str = "", capped_skills=None) -> str:
+    """Name the skill that hit the cap, not just the first unmet drill.
+
+    On an episode cap this is every unmet skill at ``max_episodes_per_size``.
+    On an update cap it is every skill that still fails its gate.
+    """
+    if cap_kind == "episodes" and capped_skills:
+        rows = list(capped_skills)
+        cap_name, cap_val = "max_episodes_per_size", cfg.max_episodes_per_size
+    else:
+        rows = list(unmet)
+        cap_name = "max_updates_per_size" if cap_kind == "updates" else (
+            "max_episodes_per_size" if cap_kind == "episodes" else "cap"
+        )
+        cap_val = (
+            cfg.max_episodes_per_size
+            if cap_kind == "episodes"
+            else cfg.max_updates_per_size
+        )
+    if not rows:
+        return f"{size}x{size} stopped (hit {cap_name}={cap_val})"
+    parts = []
+    for i, (skill, rate, episodes) in enumerate(rows):
+        if i == 0:
+            parts.append(
+                f"{skill} {size}x{size} stopped at window {rate:.2f} "
+                f"< {cfg.success_threshold:.2f} after {episodes} episodes"
+            )
+        else:
+            parts.append(f"{skill} window {rate:.2f} after {episodes} episodes")
+    return "; ".join(parts) + f" (hit {cap_name}={cap_val})"
+
+
+def _unclear_and_capped(cfg, state, windows) -> bool:
+    """True when an unmet drill has hit the per-size episode cap."""
+    return bool(_capped_unmet_skills(cfg, state, windows))
 
 
 def _load_state(path: Path) -> Dict:
