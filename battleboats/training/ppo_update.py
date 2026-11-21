@@ -71,7 +71,13 @@ def ppo_update(
     for epoch in range(epochs):
         for batch, masks in buffer.iter_minibatches(minibatch_size, device=device):
             logp_new, entropy, value = policy.evaluate_actions(
-                batch["tokens"], batch["pad_mask"], batch["asset_idx"], batch["verb_idx"], batch["target_idx"], masks
+                batch["tokens"],
+                batch["pad_mask"],
+                batch["asset_idx"],
+                batch["verb_idx"],
+                batch["target_idx"],
+                masks,
+                skill_idx=batch.get("skill_idx"),
             )
             adv = batch["advantage"]
             # Population std (unbiased=False): a size-1 minibatch — which happens

@@ -31,6 +31,7 @@ def model_config_of(policy: PolicyNetwork) -> Dict[str, Any]:
         "num_layers": len(policy.encoder.layers),
         "dim_feedforward": int(layer.linear1.out_features),
         "dropout": float(layer.dropout.p),
+        "skill_count": int(getattr(policy, "skill_count", 0)),
     }
 
 

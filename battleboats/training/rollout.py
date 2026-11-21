@@ -47,6 +47,7 @@ class Transition:
     reward: float = 0.0  # sparse: 0 except the terminal decision (±1), set post-game
     advantage: float = 0.0  # filled by GAE
     ret: float = 0.0  # value target = advantage + value, filled by GAE
+    skill_idx: int = 0  # which sandbox / unit type conditioned the policy
 
 
 def heuristic_action(engine, pid: int, rng, eps: float = 1e-9):
@@ -149,9 +150,12 @@ def collect_trajectory(
 
         masks = ActionMasks(engine, pid, device=device)
         net = policy if pid == agent_pid else opponent_policy
+        skill_idx = int(getattr(env, "skill_index", 0))
 
         # sample an action
-        a_idx, v_idx, t_idx, logp, value = net.act(masks.tokens, masks.pad_mask, masks)
+        a_idx, v_idx, t_idx, logp, value = net.act(
+            masks.tokens, masks.pad_mask, masks, skill_idx=skill_idx
+        )
 
         if pid == agent_pid:
             verb_name = VERB_NAMES[int(v_idx)]
@@ -173,6 +177,7 @@ def collect_trajectory(
                     target_idx=-1 if t_idx is None else int(t_idx),  # -1 sentinel = no target
                     logp=float(logp),
                     value=float(value),
+                    skill_idx=skill_idx,
                 )
             )
 

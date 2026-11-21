@@ -99,6 +99,17 @@ poetry run python scripts/play_vs_agent.py --checkpoint-dir runs --port 8765
 
 Open the printed URL (`http://127.0.0.1:8765` by default). Fog of war applies to the human. The scripted opponent is labeled as full information. A checkpoint uses the same masked policy as training. `--device auto` picks the ROCm GPU when the wheel can see it.
 
+# Sandbox curriculum
+
+One shared policy with a skill one-hot. Sandboxes are the real engine with a smaller map and a sparse completion reward: merchant (load, then unload at home), builder (buy a ship), landing (capture the enemy home; the enemy has no ships), then one combat ship type at a time against a scripted enemy merchant. Each sandbox starts at 3×3 and advances to 10×10 when a rolling success-rate window clears. Later sandboxes mix in about 15% fresh episodes of earlier ones.
+
+```bash
+poetry run python scripts/train_sandboxes.py --config configs/sandboxes.yaml
+poetry run python scripts/train_sandboxes.py --config configs/sandboxes_smoke.yaml
+```
+
+Checkpoints: `runs/sandboxes/<skill>/size_<N>.pt`, `runs/sandboxes/<skill>/final.pt`, and `runs/sandboxes/latest.pt`. Rates: `runs/sandboxes/summary.json`. `wandb: true` or `BATTLEBOATS_WANDB=1` logs to project `battleboats-skill-pipeline`. A missing wandb install or login does not stop training.
+
 # Skill pipeline
 
 One policy, the same observation and action heads as the full game. Sandboxes cover move, merchant haul, buying a ship, combat, landing/capture, building a port, and an opening that buys a landing ship and captures the enemy home from an empty fleet. An update interleaves all of them (equal decisions, advantages normalized per task) so a later skill cannot erase an earlier one. The full-game stages keep mixing those episodes in and score wins against a random opponent and the scripted baseline. A stage promotes only when its measured rates clear the config thresholds.
