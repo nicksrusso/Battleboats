@@ -9,7 +9,9 @@ the gradient.
 
 The network is the full-game pointer net (``skill_count=0``). Ship type
 comes from the ordinary observation tokens, not a task id. ``latest.pt``
-loads in self-play with no shape change.
+loads in self-play with no shape change. Combat plateaus compare a moving
+average of the per-update reward and of value loss. A combat pass stays
+passed for that board size.
 
 Checkpoints:
     ``<run_dir>/<skill>/size_<N>.pt`` when that size clears
@@ -158,29 +160,85 @@ def _is_combat(skill: str) -> bool:
     return skill.startswith("combat_")
 
 
-def plateaued(history: Sequence[float], n: int, threshold: float, *, higher_is_better: bool) -> bool:
-    """True when ``history`` has not improved by ``threshold`` over the last ``n`` points.
+def smooth_series(history: Sequence[float], window: int, kind: str) -> List[float]:
+    """Trailing mean, or an EMA with ``alpha = 2 / (window + 1)``.
+
+    Window 1 leaves the series unchanged. A short prefix uses however many
+    points exist, so the smoothed series has the same length as ``history``.
+    """
+    if window < 1:
+        raise ValueError("smooth window must be >= 1")
+    values = [float(v) for v in history]
+    if not values:
+        return []
+    mode = str(kind).lower()
+    if mode == "mean":
+        out: List[float] = []
+        total = 0.0
+        for i, value in enumerate(values):
+            total += value
+            if i >= window:
+                total -= values[i - window]
+            out.append(total / float(min(i + 1, window)))
+        return out
+    if mode == "ema":
+        alpha = 2.0 / (window + 1.0)
+        acc = values[0]
+        out = [acc]
+        for value in values[1:]:
+            acc = alpha * value + (1.0 - alpha) * acc
+            out.append(acc)
+        return out
+    raise ValueError(f"plateau_smooth must be 'mean' or 'ema', got {kind!r}")
+
+
+def relative_gain(
+    history: Sequence[float],
+    n: int,
+    *,
+    higher_is_better: bool,
+    smooth_window: int = 1,
+    smooth: str = "mean",
+) -> float:
+    """Signed improvement of the smoothed series over the last ``n`` points.
+
+    1.0 until that span exists. The comparison is between moving averages,
+    not the raw per-update values.
+    """
+    series = smooth_series(history, smooth_window, smooth)
+    if n < 1 or len(series) < n:
+        return 1.0
+    older = float(series[-n])
+    newer = float(series[-1])
+    base = max(abs(older), 1e-6)
+    return (newer - older) / base if higher_is_better else (older - newer) / base
+
+
+def plateaued(
+    history: Sequence[float],
+    n: int,
+    threshold: float,
+    *,
+    higher_is_better: bool,
+    smooth_window: int = 1,
+    smooth: str = "mean",
+) -> bool:
+    """True when the smoothed series has not improved by ``threshold`` over ``n`` points.
 
     Improvement is ``(newer - older) / max(|older|, 1e-6)`` when higher is
     better, and the opposite for a loss. A short history is not a plateau.
+    A downward wiggle counts as no improvement.
     """
-    if n < 1 or len(history) < n:
-        return False
-    older = float(history[-n])
-    newer = float(history[-1])
-    base = max(abs(older), 1e-6)
-    gain = (newer - older) / base if higher_is_better else (older - newer) / base
-    return gain < threshold
-
-
-def relative_gain(history: Sequence[float], n: int, *, higher_is_better: bool) -> float:
-    """Signed improvement over the last ``n`` points. 1.0 until that span exists."""
-    if n < 1 or len(history) < n:
-        return 1.0
-    older = float(history[-n])
-    newer = float(history[-1])
-    base = max(abs(older), 1e-6)
-    return (newer - older) / base if higher_is_better else (older - newer) / base
+    return (
+        relative_gain(
+            history,
+            n,
+            higher_is_better=higher_is_better,
+            smooth_window=smooth_window,
+            smooth=smooth,
+        )
+        < threshold
+    )
 
 
 def drill_done(
@@ -197,21 +255,36 @@ def drill_done(
     plateau_updates: int,
     plateau_threshold: float,
     combat_min_episodes: int,
+    smooth_window: int = 1,
+    smooth: str = "mean",
 ) -> bool:
-    """Goal drills use the success window. Combat drills use a plateau.
+    """Goal drills use the success window. Combat drills use a smoothed plateau.
 
-    Combat is done when the mean raw reward and the value loss have each
-    improved by less than ``plateau_threshold`` across the last
-    ``plateau_updates`` updates, and the size has seen
-    ``combat_min_episodes``. Wins are not an input.
+    Merchant, builder, landing, and scouting clear on ``success_threshold``
+    over the episode window. Scouting's bit is "fresh sighting", not a win.
+    Combat is done when the smoothed per-update reward and the smoothed
+    value loss have each improved by less than ``plateau_threshold`` across
+    the last ``plateau_updates`` updates, and the size has seen
+    ``combat_min_episodes``. Wins are not an input. Latching a pass so it
+    cannot flap back open is the caller's job (``combat_passed``).
     """
     if _is_combat(skill):
         if episodes < combat_min_episodes:
             return False
         return plateaued(
-            reward_trace, plateau_updates, plateau_threshold, higher_is_better=True
+            reward_trace,
+            plateau_updates,
+            plateau_threshold,
+            higher_is_better=True,
+            smooth_window=smooth_window,
+            smooth=smooth,
         ) and plateaued(
-            value_trace, plateau_updates, plateau_threshold, higher_is_better=False
+            value_trace,
+            plateau_updates,
+            plateau_threshold,
+            higher_is_better=False,
+            smooth_window=smooth_window,
+            smooth=smooth,
         )
     return size_advances(updates, window, need, success_threshold, min_updates)
 
@@ -223,6 +296,8 @@ def _succeeded(skill: str, env) -> bool:
         return bool(env.built)
     if skill == "landing":
         return bool(env.captured)
+    if skill == "scouting":
+        return bool(env.found)
     return False
 
 
@@ -238,8 +313,10 @@ class SandboxRunConfig:
     min_updates: int = 3
     plateau_threshold: float = 0.02
     plateau_updates: int = 10
+    plateau_smooth: str = "mean"
+    plateau_smooth_window: int = 10
     combat_min_episodes: int = 32
-    max_updates_per_size: int = 40
+    max_updates_per_size: int = 150
     max_episodes_per_size: int = 400
     decisions_per_update: int = 512
     rehearsal_frac: float = 0.15
@@ -267,6 +344,11 @@ class SandboxRunConfig:
             raise ValueError("window must be >= 1")
         if self.min_updates < 1:
             raise ValueError("min_updates must be >= 1")
+        if self.plateau_smooth_window < 1:
+            raise ValueError("plateau_smooth_window must be >= 1")
+        if str(self.plateau_smooth).lower() not in ("mean", "ema"):
+            raise ValueError("plateau_smooth must be 'mean' or 'ema'")
+        self.plateau_smooth = str(self.plateau_smooth).lower()
 
 
 def load_sandbox_config(path: Path) -> SandboxRunConfig:
@@ -285,8 +367,10 @@ def load_sandbox_config(path: Path) -> SandboxRunConfig:
         min_updates=int(raw.get("min_updates", 3)),
         plateau_threshold=float(raw.get("plateau_threshold", 0.02)),
         plateau_updates=int(raw.get("plateau_updates", 10)),
+        plateau_smooth=str(raw.get("plateau_smooth", "mean")),
+        plateau_smooth_window=int(raw.get("plateau_smooth_window", 10)),
         combat_min_episodes=int(raw.get("combat_min_episodes", 32)),
-        max_updates_per_size=int(raw.get("max_updates_per_size", 40)),
+        max_updates_per_size=int(raw.get("max_updates_per_size", 150)),
         max_episodes_per_size=int(raw.get("max_episodes_per_size", 400)),
         decisions_per_update=int(raw.get("decisions_per_update", 512)),
         rehearsal_frac=float(raw.get("rehearsal_frac", 0.15)),
@@ -398,8 +482,9 @@ def _run_size(cfg, state, policy, envs, rng, device, logger):
             skill: list(window) for skill, window in reward_windows.items()
         }
         for skill in cfg.skills:
+            # Raw per-update means. The plateau reads a moving average of these.
             state["reward_trace"].setdefault(skill, []).append(
-                float(metrics.get(f"{skill}/window_reward", 0.0))
+                float(metrics.get(f"{skill}/mean_reward", 0.0))
             )
             state["value_trace"].setdefault(skill, []).append(
                 float(metrics.get(f"{skill}/value_loss", 0.0))
@@ -418,8 +503,10 @@ def _run_size(cfg, state, policy, envs, rng, device, logger):
             log_row[f"{skill}/success_rate"] = rate
             log_row[f"{skill}/mean_reward"] = reward
             log_row[f"{skill}/window_reward"] = metrics.get(f"{skill}/window_reward", 0.0)
+            log_row[f"{skill}/reward_smooth"] = metrics.get(f"{skill}/reward_smooth", 0.0)
             log_row[f"{skill}/plateau_gain"] = metrics.get(f"{skill}/plateau_gain", 1.0)
             log_row[f"{skill}/value_loss"] = metrics.get(f"{skill}/value_loss", 0.0)
+            log_row[f"{skill}/value_smooth"] = metrics.get(f"{skill}/value_smooth", 0.0)
             log_row[f"{skill}/value_plateau_gain"] = metrics.get(f"{skill}/value_plateau_gain", 1.0)
             log_row[f"{skill}/gate"] = 1.0 if done else 0.0
             log_row[f"{skill}/return_scale"] = metrics.get(f"{skill}/return_scale", 1.0)
@@ -534,15 +621,26 @@ def _one_mixed_update(cfg, state, focus_size, policy, envs, rng, device, windows
         )
         metrics[f"{skill}/window_reward"] = window_reward
         metrics[f"{skill}/value_loss"] = (squared / valued) if valued else 0.0
+        mean_reward = metrics[f"{skill}/mean_reward"]
+        reward_series = list(state["reward_trace"].get(skill, [])) + [mean_reward]
+        value_series = list(state["value_trace"].get(skill, [])) + [metrics[f"{skill}/value_loss"]]
+        reward_smooth = smooth_series(reward_series, cfg.plateau_smooth_window, cfg.plateau_smooth)
+        value_smooth = smooth_series(value_series, cfg.plateau_smooth_window, cfg.plateau_smooth)
+        metrics[f"{skill}/reward_smooth"] = reward_smooth[-1] if reward_smooth else 0.0
+        metrics[f"{skill}/value_smooth"] = value_smooth[-1] if value_smooth else 0.0
         metrics[f"{skill}/plateau_gain"] = relative_gain(
-            list(state["reward_trace"].get(skill, [])) + [window_reward],
+            reward_series,
             cfg.plateau_updates,
             higher_is_better=True,
+            smooth_window=cfg.plateau_smooth_window,
+            smooth=cfg.plateau_smooth,
         )
         metrics[f"{skill}/value_plateau_gain"] = relative_gain(
-            list(state["value_trace"].get(skill, [])) + [metrics[f"{skill}/value_loss"]],
+            value_series,
             cfg.plateau_updates,
             higher_is_better=False,
+            smooth_window=cfg.plateau_smooth_window,
+            smooth=cfg.plateau_smooth,
         )
         metrics[f"{skill}/return_scale"] = return_scale(
             float(stats.get("mean", 0.0)), float(stats.get("m2", 0.0)), int(stats.get("count", 0))
@@ -655,6 +753,7 @@ def _fresh_state() -> Dict:
         "reward_windows": {},
         "reward_trace": {},
         "value_trace": {},
+        "combat_passed": {},
         "episodes": {},
         "return_stats": {},
         "episode_counter": 0,
@@ -672,6 +771,7 @@ def _ensure_runtime_state(state: Dict, cfg) -> None:
     state.setdefault("reward_windows", {})
     state.setdefault("reward_trace", {})
     state.setdefault("value_trace", {})
+    state.setdefault("combat_passed", {})
     state.setdefault("episodes", {})
     state.setdefault("return_stats", {})
     state.setdefault("episode_counter", 0)
@@ -691,12 +791,17 @@ def _reset_size_progress(state: Dict, cfg) -> None:
     state["reward_windows"] = {skill: [] for skill in cfg.skills}
     state["reward_trace"] = {skill: [] for skill in cfg.skills}
     state["value_trace"] = {skill: [] for skill in cfg.skills}
+    state["combat_passed"] = {skill: False for skill in cfg.skills}
     state["episodes"] = {skill: 0 for skill in cfg.skills}
     state["size_capped"] = False
 
 
 def _drill_done(cfg, state, skill: str, window) -> bool:
-    return drill_done(
+    """Combat stays passed for this size once the smoothed plateau has fired."""
+    passed = state.setdefault("combat_passed", {})
+    if _is_combat(skill) and passed.get(skill):
+        return True
+    done = drill_done(
         skill,
         updates=int(state.get("updates_this_size", 0)),
         window=window,
@@ -709,7 +814,12 @@ def _drill_done(cfg, state, skill: str, window) -> bool:
         plateau_updates=cfg.plateau_updates,
         plateau_threshold=cfg.plateau_threshold,
         combat_min_episodes=cfg.combat_min_episodes,
+        smooth_window=cfg.plateau_smooth_window,
+        smooth=cfg.plateau_smooth,
     )
+    if done and _is_combat(skill):
+        passed[skill] = True
+    return done
 
 
 def _size_cleared(cfg, state, windows) -> bool:

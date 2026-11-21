@@ -1,5 +1,5 @@
-# Short mixed 3x3 warm-up. Every sandbox shares each update. A size advances
-# after min_updates once every window clears 0.5; otherwise allow_unmet hands
+# Short mixed 3x3 warm-up. Every sandbox, including scouting, shares each
+# update. max_updates_per_size stops it after two updates; allow_unmet hands
 # the skill_count=0 checkpoint on.
 #
 # poetry run python scripts/train_sandboxes.py --config configs/sandboxes_smoke.yaml
@@ -11,6 +11,7 @@ success_threshold: 0.5
 window: 8
 min_updates: 3
 max_episodes_per_size: 80
+max_updates_per_size: 2
 decisions_per_update: 128
 rehearsal_frac: 0.15
 size_mix_frac: 0.0
@@ -25,6 +26,7 @@ skills:
   - merchant
   - builder
   - landing
+  - scouting
   - combat_destroyer
   - combat_submarine
   - combat_cruiser

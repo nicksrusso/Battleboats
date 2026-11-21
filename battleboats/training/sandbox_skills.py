@@ -15,6 +15,7 @@ SKILL_NAMES = (
     "combat_cruiser",
     "combat_battleship",
     "combat_carrier",
+    "scouting",
 )
 
 SKILL_INDEX = {name: i for i, name in enumerate(SKILL_NAMES)}

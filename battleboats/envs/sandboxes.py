@@ -10,6 +10,10 @@ are sparse completion rewards (+1, then the episode ends):
   buy itself is the real ``BuildShipAction``.
 - landing: +1 when the landing ship captures the enemy home. No enemy ships.
   Sightings are the engine's real fog.
+- scouting: random hull vs random hull. +detection_reward on the first fresh
+  sighting of the enemy ship, then the episode ends. 0 if the horizon
+  arrives still blind. The enemy holds position. It is placed outside the
+  learner ship's detection range.
 - combat_<type>: a fixed number of turns against a scripted enemy of the
   same type. The reward is the change in relative combat power, not a kill.
   On small boards that enemy's strength is scaled down (15% at 3×3, full
@@ -91,6 +95,24 @@ def side_power(engine, player_id: int) -> float:
     return total
 
 
+def detection_reward(turn: int, max_turns: int) -> float:
+    """Fraction of the horizon still left when the enemy is first sighted.
+
+    1 on turn 0, ``1 / max_turns`` on the last turn, 0 at or past the horizon.
+    A miss is not passed here: the caller pays 0 when the episode ends blind.
+    """
+    span = int(max_turns)
+    if span <= 0:
+        return 0.0
+    remaining = span - min(span, max(0, int(turn)))
+    return remaining / float(span)
+
+
+def detection_range(scout: ShipType, target: ShipType) -> float:
+    """Engine sight radius: scout scouting coefficient times target visibility."""
+    return float(BASE_STATS[scout].scouting) * float(BASE_STATS[target].visibility)
+
+
 def combat_outcome(my_start: float, enemy_start: float, my_end: float, enemy_end: float) -> float:
     """Change in (own power - enemy power), divided by the starting total.
 
@@ -166,6 +188,61 @@ def combat_layout(rng: random.Random, w: int, h: int, reach: int, close: bool) -
                 "satellite": rest[0],
             }
     raise RuntimeError(f"no combat layout on {w}x{h} reach={reach} close={close}")
+
+
+def _reaches_sight(w: int, h: int, land: set, origin: Pos, target: Pos, reach: float) -> bool:
+    """Some water tile the learner can reach is inside ``reach`` of ``target``."""
+    waters = {(x, y) for x in range(w) for y in range(h) if (x, y) not in land}
+    if origin not in waters or target not in waters:
+        return False
+    stack = [origin]
+    seen = set()
+    while stack:
+        pos = stack.pop()
+        if pos in seen:
+            continue
+        seen.add(pos)
+        dist = abs(pos[0] - target[0]) + abs(pos[1] - target[1])
+        if dist <= reach:
+            return True
+        for nxt in _neighbors(pos, w, h):
+            if nxt in waters and nxt not in seen:
+                stack.append(nxt)
+    return False
+
+
+def scout_layout(rng: random.Random, w: int, h: int, reach: float) -> Optional[dict]:
+    """Two water tiles strictly outside ``reach``, each with a land neighbor.
+
+    ``reach`` is the learner ship's detection radius against the enemy. The
+    enemy has to start blind, and the learner has to be able to sail into
+    range without crossing land.
+    """
+    cells = [(x, y) for x in range(w) for y in range(h)]
+    rng.shuffle(cells)
+    for a in cells:
+        for b in cells:
+            if a == b:
+                continue
+            dist = abs(a[0] - b[0]) + abs(a[1] - b[1])
+            if dist <= reach:
+                continue
+            banned = {a, b}
+            home = _land_neighbor(a, w, h, banned)
+            if home is None:
+                continue
+            opp = _land_neighbor(b, w, h, banned | {home})
+            if opp is None or opp == home:
+                continue
+            if not _reaches_sight(w, h, {home, opp}, a, b, reach):
+                continue
+            return {
+                "learner_ship": a,
+                "enemy_ship": b,
+                "home": home,
+                "opp": opp,
+            }
+    return None
 
 
 def _neighbors(pos: Pos, w: int, h: int) -> List[Pos]:
@@ -659,6 +736,113 @@ class CombatSandbox(_Sandbox):
             self.engine.players[1].cash = 0
 
 
+class ScoutingSandbox(_Sandbox):
+    """Random hull vs random hull. Reward the first fresh sighting, then stop.
+
+    The enemy end-turns in place, so a detection is the learner sailing into
+    its own detection range. Types are drawn uniformly from every hull and
+    rejected when the board cannot hide that pair. Learner ports are taken
+    out of the scouting set: a port sees ``4 * visibility`` tiles, which is
+    the whole 3×3 and nearly every larger board up to 8×8, so the enemy
+    would spawn already found. Ship-to-ship detection is the engine rule.
+    """
+
+    skill_name = "scouting"
+
+    def __init__(self, map_json_path: str, *, width: int, height: int, max_turns: int = 30) -> None:
+        self._found = False
+        self._target_id: Optional[int] = None
+        self.episode_reward = 0.0
+        self.learner_type = ShipType.DESTROYER
+        self.enemy_type = ShipType.DESTROYER
+        super().__init__(map_json_path, width=width, height=height, max_turns=max_turns)
+
+    @property
+    def found(self) -> bool:
+        return self._found
+
+    def reset(self, seed: Optional[int] = None, options=None) -> None:
+        if (options or {}).get("scenario"):
+            super().reset(seed=seed, options=options)
+            return
+        last_error: Optional[BaseException] = None
+        types = tuple(ShipType)
+        for attempt in range(40):
+            rng = random.Random((seed or 0) + attempt * 17)
+            learner_type = rng.choice(types)
+            enemy_type = rng.choice(types)
+            reach = detection_range(learner_type, enemy_type)
+            layout = scout_layout(rng, self.width, self.height, reach)
+            if layout is None:
+                continue
+            self._layout = layout
+            self.learner_type = learner_type
+            self.enemy_type = enemy_type
+            try:
+                lay = layout
+                self._write_map([lay["home"], lay["opp"]], [lay["home"]], [lay["opp"]])
+                super().reset(seed=seed, options=options)
+                return
+            except RuntimeError as exc:
+                last_error = exc
+        raise RuntimeError(f"ScoutingSandbox: no blind placement ({last_error})")
+
+    def _configure_scenario(self, seed, options) -> None:
+        assert self.engine is not None
+        self._rng = random.Random((seed or 0) + 5)
+        self._found = False
+        self.episode_reward = 0.0
+        lay = self._layout
+        own = lay["learner_ship"]
+        tgt = lay["enemy_ship"]
+        m = self.engine.map
+        if m.terrain[own] != WATER or m.terrain[tgt] != WATER or own == tgt:
+            raise RuntimeError("ScoutingSandbox: spawn tiles are not water")
+        # A port's detection radius covers small boards. Drop the learner's
+        # ports from the scouting set so only the ship's own sensors count.
+        # The port tile stays on the map; the learner just does not scout from it.
+        self.engine.players[0].owned_port_positions.clear()
+        self.engine.players[0].cash = 0
+        self.engine.players[1].cash = 0
+        hunter = self.engine._spawn_ship(0, self.learner_type, own)
+        target = self.engine._spawn_ship(1, self.enemy_type, tgt)
+        self._hunter_id = hunter.id
+        self._target_id = target.id
+        self.engine.current_player = 0
+        self.engine.turn = 0
+        self.engine.winner = None
+        self.engine.players[0].sightings.clear()
+        self.engine._refresh_sightings()
+        if self._enemy_in_sight():
+            raise RuntimeError("ScoutingSandbox: enemy spawned inside sight range")
+        self._filter((MoveAction, EndTurnAction))
+
+    def _enemy_in_sight(self) -> bool:
+        assert self.engine is not None and self._target_id is not None
+        sighting = self.engine.players[0].sightings.get(self._target_id)
+        return sighting is not None and bool(sighting.fresh)
+
+    def _capture_reward_state(self) -> Dict:
+        return {}
+
+    def _reward_after_step(self, agent, action, pre) -> Dict[str, float]:
+        rewards = {a: 0.0 for a in self.agents}
+        assert self.engine is not None
+        if not self._found and self._enemy_in_sight():
+            self._found = True
+            self.episode_reward = detection_reward(self.engine.turn, self.max_turns)
+            rewards[self._agent_name(0)] = self.episode_reward
+        return rewards
+
+    def _is_terminated(self) -> bool:
+        return self._found
+
+    def _after_engine_step(self, agent, action) -> None:
+        self._pass_opponent(scripted=False, stop=lambda: self._found)
+        if self.engine is not None:
+            self.engine.players[1].cash = 0
+
+
 def make_sandbox(skill: str, map_json_path: str, *, width: int, height: int, max_turns: int):
     """Build the sandbox named by ``skill`` (see ``SKILL_NAMES``)."""
     if skill == "merchant":
@@ -667,6 +851,8 @@ def make_sandbox(skill: str, map_json_path: str, *, width: int, height: int, max
         return ShipBuildSandbox(map_json_path, width=width, height=height, max_turns=max_turns)
     if skill == "landing":
         return LandingSandbox(map_json_path, width=width, height=height, max_turns=max_turns)
+    if skill == "scouting":
+        return ScoutingSandbox(map_json_path, width=width, height=height, max_turns=max_turns)
     if skill.startswith("combat_"):
         return CombatSandbox(
             map_json_path,
@@ -682,13 +868,14 @@ def horizon(skill: str, size: int) -> Tuple[int, int]:
     """(max_turns, max_steps) for a square board of this size.
 
     Combat is a fixed fight: ``max(8, 3 * size)`` turns (9 on 3×3, 30 on 10×10).
-    The reward is paid at that horizon, not when a ship dies.
+    The reward is paid at that horizon, not when a ship dies. Scouting uses
+    the same turn budget and ends early on the first sighting.
     """
     if skill == "builder":
         return max(10, size * 4), max(36, size * 12)
     if skill == "merchant":
         return max(8, size * 4), max(24, size * 12)
-    if skill.startswith("combat_"):
+    if skill == "scouting" or skill.startswith("combat_"):
         turns = max(8, int(size) * 3)
         return turns, max(24, turns * 8)
     return max(8, size * 3), max(16, size * 8)

@@ -151,19 +151,21 @@ def test_missed_gate_stops(tmp_path: Path) -> None:
     assert final_checkpoint_path(cfg).is_file()
 
 
-def test_wandb_stays_off_and_survives_a_missing_package(monkeypatch) -> None:
+def test_wandb_stays_off_and_survives_a_missing_package(monkeypatch, capsys) -> None:
     monkeypatch.delenv("BATTLEBOATS_WANDB", raising=False)
     assert wandb_requested(False) is False
     assert init_wandb(False, project="battleboats-skill-pipeline", config={}).enabled is False
+    assert "[wandb] off" in capsys.readouterr().out
 
     monkeypatch.setenv("BATTLEBOATS_WANDB", "1")
     assert wandb_requested(False) is True
     monkeypatch.setitem(sys.modules, "wandb", None)
     logger = init_wandb(False, project="battleboats-skill-pipeline", config={})
     assert logger.enabled is False
+    assert "[wandb] off" in capsys.readouterr().out
 
 
-def test_wandb_skips_when_logged_out_and_logs_when_configured(monkeypatch) -> None:
+def test_wandb_skips_when_logged_out_and_logs_when_configured(monkeypatch, capsys) -> None:
     monkeypatch.delenv("WANDB_API_KEY", raising=False)
     monkeypatch.delenv("WANDB_MODE", raising=False)
 
@@ -177,6 +179,7 @@ def test_wandb_skips_when_logged_out_and_logs_when_configured(monkeypatch) -> No
     monkeypatch.setitem(sys.modules, "wandb", LoggedOut)
     quiet = init_wandb(True, project="battleboats-skill-pipeline", config={})
     assert quiet.enabled is False
+    assert "[wandb] off" in capsys.readouterr().out
 
     class Ready:
         api = type("Api", (), {"api_key": "secret"})()
@@ -200,6 +203,7 @@ def test_wandb_skips_when_logged_out_and_logs_when_configured(monkeypatch) -> No
     assert logger.enabled
     logger.log({"eval/move": 1.0}, step=1)
     logger.finish()
+    assert "[wandb] on" in capsys.readouterr().out
     assert Ready.rows[0] == ("init", "battleboats-skill-pipeline")
     assert ("log", 1) in Ready.rows
     assert Ready.rows[-1][0] == "finish"

@@ -10,9 +10,15 @@ No skill one-hot. ``latest.pt`` loads in self-play with no shape change:
 ``<run_dir>/latest.pt`` is the resume point and the handoff weights.
 ``<run_dir>/summary.json`` holds per-sandbox, per-size success rates.
 
+A fresh run has to drop the old directory. Resume is otherwise on, and
+history is appended:
+
+    rm -rf runs/sandboxes
+    poetry run python scripts/train_sandboxes.py --config configs/sandboxes.yaml --device cpu
+
 Weights & Biases is off unless ``wandb: true`` or ``BATTLEBOATS_WANDB=1``.
-A missing install or login does not stop training. Project defaults to
-``battleboats-skill-pipeline``.
+Startup prints ``[wandb] on`` or ``[wandb] off``. A missing install or login
+does not stop training. Project defaults to ``battleboats-skill-pipeline``.
 
 Exit status 2 when a size misses its gate and ``allow_unmet`` is off.
 """
