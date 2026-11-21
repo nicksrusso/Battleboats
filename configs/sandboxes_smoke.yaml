@@ -1,5 +1,6 @@
-# Short 3x3 run of the harder sandboxes. Advances after min_updates once the
-# window clears 0.5, otherwise allow_unmet hands the checkpoint on.
+# Short mixed 3x3 warm-up. Every sandbox shares each update. A size advances
+# after min_updates once every window clears 0.5; otherwise allow_unmet hands
+# the skill_count=0 checkpoint on.
 #
 # poetry run python scripts/train_sandboxes.py --config configs/sandboxes_smoke.yaml
 

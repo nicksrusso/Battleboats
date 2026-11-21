@@ -1,11 +1,14 @@
-"""Train sandboxes in order: merchant, builder, landing, then each combat ship.
+"""Train every sandbox at once as a warm-up for the full-game pointer net.
 
-    poetry run python scripts/train_sandboxes.py --config configs/sandboxes.yaml
-    poetry run python scripts/train_sandboxes.py --config configs/sandboxes_smoke.yaml
+No skill one-hot. ``latest.pt`` loads in self-play with no shape change:
 
-Checkpoints land in ``<run_dir>/<skill>/size_<N>.pt`` and ``<skill>/final.pt``.
-``<run_dir>/latest.pt`` is the resume point. ``<run_dir>/summary.json`` holds
-per-sandbox, per-size success rates.
+    poetry run python scripts/train_sandboxes.py --config configs/sandboxes.yaml --device cpu
+    poetry run python scripts/train_selfplay.py --config configs/selfplay.yaml \\
+        --init-checkpoint runs/sandboxes/latest.pt --device cpu
+
+``<run_dir>/<skill>/size_<N>.pt`` and ``<skill>/final.pt`` mark the size gates.
+``<run_dir>/latest.pt`` is the resume point and the handoff weights.
+``<run_dir>/summary.json`` holds per-sandbox, per-size success rates.
 
 Weights & Biases is off unless ``wandb: true`` or ``BATTLEBOATS_WANDB=1``.
 A missing install or login does not stop training. Project defaults to

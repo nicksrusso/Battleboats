@@ -1,14 +1,23 @@
-# Sandbox curriculum. One shared policy, skill one-hot.
-# Order: merchant -> builder (buy a ship) -> landing -> combat ship types.
-# A size advances when the rolling window of on-size episodes clears
-# success_threshold. size_mix_frac of episodes are smaller boards of the
-# same sandbox. rehearsal_frac are fresh episodes of earlier sandboxes.
+# Sandbox warm-up for the full-game pointer net. skill_count is 0: no skill
+# one-hot and no skill embedding. Ship type is the ordinary observation token.
+# Every sandbox is sampled in the same update, with an equal decision budget.
+# Rewards are divided by that sandbox's running return scale (max of 1, the
+# absolute mean, and the std of discounted returns) so a larger return cannot
+# own the gradient. A size advances when every sandbox's window clears
+# success_threshold, and only after min_updates. rehearsal_frac and
+# size_mix_frac are smaller boards of that same sandbox.
 #
-# poetry run python scripts/train_sandboxes.py --config configs/sandboxes.yaml
+# poetry run python scripts/train_sandboxes.py --config configs/sandboxes.yaml --device cpu
+#
+# Hand the weights to full-game PPO. The checkpoint's model_config is what
+# loads, so the self-play arch does not have to be restated:
+# poetry run python scripts/train_selfplay.py --config configs/selfplay.yaml \
+#     --init-checkpoint runs/sandboxes/latest.pt --device cpu
 #
 # Final weights: runs/sandboxes/latest.pt
 # Per sandbox:   runs/sandboxes/<skill>/final.pt and size_<N>.pt
 # Rates:         runs/sandboxes/summary.json
+# Each update logs <skill>/success_rate and <skill>/mean_reward (wandb too).
 #
 # device is configurable. Default is cpu. "auto" uses a GPU when torch can see
 # one (ROCm reports as cuda). Rollouts are single-process Python, so a GPU
@@ -22,6 +31,13 @@ seed: 0
 success_threshold: 0.80
 window: 64
 min_updates: 3
+# Combat drills advance on a plateau of the raw reward and of value loss,
+# not on a win rate. Gain over plateau_updates below plateau_threshold,
+# after combat_min_episodes. max_updates_per_size advances the size anyway.
+plateau_threshold: 0.02
+plateau_updates: 10
+combat_min_episodes: 32
+max_updates_per_size: 40
 max_episodes_per_size: 400
 decisions_per_update: 512
 rehearsal_frac: 0.15

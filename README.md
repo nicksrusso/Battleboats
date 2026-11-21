@@ -101,14 +101,16 @@ Open the printed URL (`http://127.0.0.1:8765` by default). Fog of war applies to
 
 # Sandbox curriculum
 
-One shared policy with a skill one-hot. Sandboxes are the real engine on a randomized map with a sparse completion reward: merchant (load, then unload at home), builder (deliver cash with a merchant, then buy a ship), landing (capture the enemy home under real fog; the enemy has no ships), then one combat ship type at a time against a scripted enemy of the same type. Small boards weaken that enemy; 10×10 uses full strength. A size advances from 3×3 toward 10×10 when 64 on-size episodes are at least 0.80, and only after 3 updates. Later sandboxes mix in about 15% fresh episodes of earlier ones. Default device is cpu.
+One shared pointer net with no skill input (`skill_count=0`), the same asset, verb, and target heads as the full game. Sandboxes are a warm-up, all mixed in every update and sampled with an equal decision budget: merchant (load, then unload at home), builder (deliver cash with a merchant, then buy a ship), landing (capture the enemy home under real fog; the enemy has no ships), and combat against a scripted enemy of the same type, one sandbox per hull. Small boards weaken that enemy; 10×10 uses full strength. Ship type is the ordinary observation token, not a task id. Each sandbox's rewards are divided by `max(1, |mean|, std)` of its discounted returns, so a larger return cannot own the gradient. Merchant, builder, and landing advance from 3×3 toward 10×10 when 64 on-size episodes are at least 0.80, and only after 3 updates. Combat is not scored or gated on a kill: the episode runs a fixed number of turns and the reward is the change in relative combat power. A combat drill is done when that raw reward and the value loss have each improved by less than 2% over the last 10 updates, after a minimum number of episodes. A size advances when every drill is done by its own rule, or when `max_updates_per_size` trips and a warning is logged. About 15% of episodes rehearse a smaller cleared board, and about 20% mix another smaller board. Each update logs success rate and mean reward per sandbox. Default device is cpu.
 
 ```bash
-poetry run python scripts/train_sandboxes.py --config configs/sandboxes.yaml
-poetry run python scripts/train_sandboxes.py --config configs/sandboxes_smoke.yaml
+poetry run python scripts/train_sandboxes.py --config configs/sandboxes.yaml --device cpu
+poetry run python scripts/train_sandboxes.py --config configs/sandboxes_smoke.yaml --device cpu
+poetry run python scripts/train_selfplay.py --config configs/selfplay.yaml \
+    --init-checkpoint runs/sandboxes/latest.pt --device cpu
 ```
 
-Checkpoints: `runs/sandboxes/<skill>/size_<N>.pt`, `runs/sandboxes/<skill>/final.pt`, and `runs/sandboxes/latest.pt`. Rates: `runs/sandboxes/summary.json`. `wandb: true` or `BATTLEBOATS_WANDB=1` logs to project `battleboats-skill-pipeline`. A missing wandb install or login does not stop training.
+`runs/sandboxes/latest.pt` is the handoff. Self-play loads that file's `model_config` directly, so there is no shape change. Per sandbox: `runs/sandboxes/<skill>/size_<N>.pt` and `final.pt`. Rates: `runs/sandboxes/summary.json`. `wandb: true` or `BATTLEBOATS_WANDB=1` logs to project `battleboats-skill-pipeline`, including `<skill>/success_rate` and `<skill>/mean_reward`. A missing wandb install or login does not stop training.
 
 # Skill pipeline
 
