@@ -7,6 +7,7 @@ from urllib.parse import urlencode
 
 import pytest
 
+from battleboats.envs.observation import TOKEN_DIM
 from battleboats.training.checkpoints import save_checkpoint
 from battleboats.training.policy import PolicyNetwork
 from battleboats.ui.server import Handler, ThreadingHTTPServer
@@ -54,7 +55,7 @@ def _request(port: int, method: str, path: str, form: dict | None = None):
 
 def _save_policy(path: Path) -> None:
     policy = PolicyNetwork(
-        token_dim=28,
+        token_dim=TOKEN_DIM,
         d_model=32,
         nhead=2,
         num_layers=1,

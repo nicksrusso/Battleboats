@@ -13,6 +13,7 @@ from typing import Any, Dict, Optional, Tuple
 
 import torch
 
+from battleboats.envs.observation import TOKEN_DIM
 from battleboats.training.policy import PolicyNetwork
 
 
@@ -58,17 +59,63 @@ def load_checkpoint(
     path: Path,
     device: torch.device,
 ) -> Tuple[PolicyNetwork, Dict[str, Any]]:
-    """Load a self-describing checkpoint. ``model_config`` wins over any caller arch."""
+    """Load a self-describing checkpoint. ``model_config`` wins over any caller arch.
+
+    Official checkpoints whose ``token_dim`` is smaller than the current
+    observation width are warm-started: the first layer (``proj``) is widened
+    and the new input columns are zero-initialized, so the old features
+    behave as they did until training moves those weights.
+    """
     ckpt = torch.load(path, map_location=device, weights_only=False)
     if "model_state" not in ckpt or "model_config" not in ckpt:
         raise ValueError(
             f"{path} is not a battleboats policy checkpoint "
             "(expected keys model_state and model_config)"
         )
-    policy = PolicyNetwork(**ckpt["model_config"])
-    policy.load_state_dict(ckpt["model_state"])
+    cfg = dict(ckpt["model_config"])
+    state = dict(ckpt["model_state"])
+    old_dim = int(cfg["token_dim"])
+    if old_dim < TOKEN_DIM:
+        cfg["token_dim"] = TOKEN_DIM
+        policy = PolicyNetwork(**cfg)
+        state = _widen_input_proj(state, policy, old_dim)
+        print(f"[checkpoint] widened proj {old_dim} -> {TOKEN_DIM} (zero-init new columns)")
+    elif old_dim > TOKEN_DIM:
+        raise ValueError(
+            f"{path} has token_dim={old_dim}, newer than current TOKEN_DIM={TOKEN_DIM}"
+        )
+    else:
+        policy = PolicyNetwork(**cfg)
+    policy.load_state_dict(state)
     policy.to(device)
-    return policy, dict(ckpt["model_config"])
+    return policy, cfg
+
+
+def _widen_input_proj(
+    state: Dict[str, Any],
+    policy: PolicyNetwork,
+    old_dim: int,
+) -> Dict[str, Any]:
+    """Copy old ``proj`` weights into a wider first layer; new columns stay 0."""
+    key = "proj.weight"
+    if key not in state:
+        raise ValueError("checkpoint model_state is missing proj.weight")
+    old_w = state[key]
+    new_w = policy.proj.weight.detach().clone()
+    if old_w.shape[0] != new_w.shape[0]:
+        raise ValueError(
+            f"proj out features {tuple(old_w.shape)} cannot widen to {tuple(new_w.shape)}"
+        )
+    if old_w.shape[1] != old_dim:
+        raise ValueError(
+            f"proj.weight width {old_w.shape[1]} does not match token_dim={old_dim}"
+        )
+    if new_w.shape[1] != TOKEN_DIM:
+        raise ValueError(f"new proj width {new_w.shape[1]} != TOKEN_DIM={TOKEN_DIM}")
+    new_w.zero_()
+    new_w[:, :old_dim] = old_w
+    state[key] = new_w
+    return state
 
 
 def frozen_copy(policy: PolicyNetwork) -> PolicyNetwork:

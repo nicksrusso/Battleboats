@@ -4,6 +4,7 @@ from pathlib import Path
 
 import yaml
 
+from battleboats.envs.observation import TOKEN_DIM
 from battleboats.training.checkpoints import save_checkpoint
 from battleboats.training.curriculum import (
     ArchSpec,
@@ -125,7 +126,7 @@ def test_snapshot_ring_drops_oldest(tmp_path: Path) -> None:
     ring = RecentSnapshots(tmp_path / "snaps", pool_size=2, device="cpu")
     for i in range(3):
         policy = PolicyNetwork(
-            token_dim=28,
+            token_dim=TOKEN_DIM,
             d_model=32,
             nhead=2,
             num_layers=1,
