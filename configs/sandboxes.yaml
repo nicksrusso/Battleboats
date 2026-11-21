@@ -1,0 +1,63 @@
+# Sandbox curriculum. One shared policy, skill one-hot.
+# Order: merchant -> builder (buy a ship) -> landing -> combat ship types.
+# A size advances when the rolling window of on-size episodes clears
+# success_threshold. size_mix_frac of episodes are smaller boards of the
+# same sandbox. rehearsal_frac are fresh episodes of earlier sandboxes.
+#
+# poetry run python scripts/train_sandboxes.py --config configs/sandboxes.yaml
+#
+# Final weights: runs/sandboxes/latest.pt
+# Per sandbox:   runs/sandboxes/<skill>/final.pt and size_<N>.pt
+# Rates:         runs/sandboxes/summary.json
+#
+# device is configurable. Default is cpu. "auto" uses a GPU when torch can see
+# one (ROCm reports as cuda). Rollouts are single-process Python, so a GPU
+# only shortens the PPO step.
+# wandb: true  or  BATTLEBOATS_WANDB=1
+# Missing wandb or no login is a warning, not a crash.
+
+run_dir: runs/sandboxes
+device: cpu
+seed: 0
+success_threshold: 0.80
+window: 64
+min_updates: 3
+max_episodes_per_size: 400
+decisions_per_update: 512
+rehearsal_frac: 0.15
+size_mix_frac: 0.20
+eval_every: 5
+eval_episodes: 8
+allow_unmet: false
+save_every: 10
+wandb: false
+wandb_project: battleboats-skill-pipeline
+
+sizes: [3, 4, 5, 6, 8, 10]
+skills:
+  - merchant
+  - builder
+  - landing
+  - combat_destroyer
+  - combat_submarine
+  - combat_cruiser
+  - combat_battleship
+  - combat_carrier
+
+arch:
+  d_model: 64
+  nhead: 4
+  num_layers: 2
+  dim_feedforward: 128
+  dropout: 0.1
+
+ppo:
+  lr: 0.0003
+  gamma: 0.99
+  lam: 0.95
+  clip_eps: 0.2
+  vf_coef: 0.5
+  ent_coef: 0.05
+  epochs: 4
+  minibatch_size: 128
+  max_grad_norm: 0.5

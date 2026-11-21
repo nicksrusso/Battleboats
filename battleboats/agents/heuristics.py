@@ -17,14 +17,14 @@ Design choices:
 Terminal states bypass `features()` and return ±1 directly.
 """
 
+import json
 import math
-from typing import TYPE_CHECKING, Dict, Tuple
+from pathlib import Path
+from typing import TYPE_CHECKING, Dict, Optional, Tuple
 
 from battleboats.core.gameEngine import MERCHANT_CAPACITY
 from battleboats.core.shipyard.ship_data import attack_modifier
 from battleboats.core.shipyard.ship_type import ShipType
-import json
-
 if TYPE_CHECKING:
     from battleboats.core.gameEngine import gameEngine
     from battleboats.core.shipyard.ship import Ship
@@ -62,6 +62,27 @@ HOME_THREAT_NON_COMBAT_TYPES = frozenset(
 )
 
 HOME_THREAT_WEIGHT_LANDING = 250  # Landings are the only win-enabling unit
+
+
+def _home_threat(home, ships, manhattan) -> float:
+    """Inverse-distance threat on one home. Merchants and builders contribute 0.
+
+    Landings use ``HOME_THREAT_WEIGHT_LANDING`` (strength 0 would otherwise
+    vanish). Combat ships use their strength. ``features`` uses a separate
+    linear-proximity pressure term; this helper is the unit the home-threat
+    tests lock.
+    """
+    total = 0.0
+    for ship in ships:
+        if ship.type in HOME_THREAT_NON_COMBAT_TYPES:
+            continue
+        distance = manhattan(ship.position, home)
+        if ship.type is ShipType.LANDING:
+            weight = HOME_THREAT_WEIGHT_LANDING
+        else:
+            weight = ship.stats.strength
+        total += weight / (1 + distance)
+    return total
 
 # Combat ships within this Manhattan distance of a home port add NO home pressure.
 # Bordering a hostile home with combat ships neither captures it (only a Landing
@@ -116,16 +137,40 @@ ECON_BETA = 0.1
 # ----------------------------------------------------------- default weights
 # Each value is `weight / per-feature-scale` collapsed into one number, so
 # DEFAULT_WEIGHTS[k] * features[k] is a term in the pre-tanh sum directly.
-# The learning loop will replace this dict with the output of regression
-# on (features, mcts_root_value) pairs; don't over-tune these defaults.
-with open("/home/nick/Desktop/repos/Battleboats/runs/weights/v5.json", "r") as f:
-    regression_data = json.load(f)
-DEFAULT_WEIGHTS = regression_data["weights"]
+# Prefer the regression file when it exists. Nick's copy lived at
+# runs/weights/v5.json and is not in git; if that file is missing (he deleted
+# runs/), fall back to the hand prior below so imports and tests still work.
+_WEIGHT_CANDIDATES: Tuple[Path, ...] = (
+    Path("/home/nick/Desktop/repos/Battleboats/runs/weights/v5.json"),
+    Path(__file__).resolve().parents[2] / "runs" / "weights" / "v5.json",
+)
 
-# Per-state bias term learned by v3's intercept. Not currently applied in
-# heuristic_eval (tanh(Σ w·φ) only). If fidelity matters, add it inside the
-# tanh; magnitude (~0.34) shifts some states meaningfully. Acceptable for now.
-DEFAULT_INTERCEPT = regression_data["intercept"]
+# Keys match the historical v5 column order (see scripts/play_human_vs_random.py
+# FEATURE_LABEL). econ_value_self is 0 in the prior: it is one-sided and equal
+# for both players at the opening, so a non-zero weight would break the
+# symmetric-start zero-sum check. Drop v5.json back in runs/weights/ to restore
+# the fitted weights, intercept included.
+_HAND_PRIOR_WEIGHTS: Dict[str, float] = {
+    "material_diff": 0.0005,
+    "home_pressure_diff": 0.001,
+    "combat_balance": 0.001,
+    "econ_value_self": 0.0,
+    "merchant_count_value_self": 0.0002,
+    "has_landing_self": 0.3,
+    "landing_pressure_self": 0.4,
+}
+
+
+def _load_default_weights() -> Tuple[Dict[str, float], float, Optional[str]]:
+    for path in _WEIGHT_CANDIDATES:
+        if path.is_file():
+            with open(path) as f:
+                data = json.load(f)
+            return dict(data["weights"]), float(data["intercept"]), str(path)
+    return dict(_HAND_PRIOR_WEIGHTS), 0.0, None
+
+
+DEFAULT_WEIGHTS, DEFAULT_INTERCEPT, WEIGHTS_SOURCE = _load_default_weights()
 
 FEATURE_KEYS: Tuple[str, ...] = tuple(DEFAULT_WEIGHTS.keys())
 

@@ -1,0 +1,44 @@
+# Short 3x3 run of the harder sandboxes. Advances after min_updates once the
+# window clears 0.5, otherwise allow_unmet hands the checkpoint on.
+#
+# poetry run python scripts/train_sandboxes.py --config configs/sandboxes_smoke.yaml
+
+run_dir: runs/sandboxes_smoke
+device: cpu
+seed: 0
+success_threshold: 0.5
+window: 8
+min_updates: 3
+max_episodes_per_size: 80
+decisions_per_update: 128
+rehearsal_frac: 0.15
+size_mix_frac: 0.0
+eval_every: 100
+eval_episodes: 0
+allow_unmet: true
+save_every: 0
+wandb: false
+
+sizes: [3]
+skills:
+  - merchant
+  - builder
+  - landing
+  - combat_destroyer
+  - combat_submarine
+  - combat_cruiser
+  - combat_battleship
+  - combat_carrier
+
+arch:
+  d_model: 32
+  nhead: 2
+  num_layers: 1
+  dim_feedforward: 64
+  dropout: 0.0
+
+ppo:
+  lr: 0.0005
+  epochs: 2
+  minibatch_size: 32
+  ent_coef: 0.08

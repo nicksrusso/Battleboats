@@ -13,6 +13,7 @@ Run with:
 """
 
 import random
+from pathlib import Path
 
 import pytest
 
@@ -21,7 +22,13 @@ from battleboats.agents.random_agent import random_action
 from battleboats.core.gameEngine import gameEngine
 from battleboats.envs.battleboats_aec import BattleboatsAEC
 
-MAP_JSON = "/home/nick/Desktop/repos/Battleboats/battleboats/core/config/map.json"
+MAP_JSON = str(
+    Path(__file__).resolve().parents[1]
+    / "battleboats"
+    / "core"
+    / "config"
+    / "map.json"
+)
 
 # Smoke-test budget: small, just enough to exercise selection / expansion / backprop.
 SMOKE_ITERATIONS = 20

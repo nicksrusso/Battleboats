@@ -1,0 +1,39 @@
+# One update per skill, tiny net, CPU. Missed gates still hand the checkpoint on.
+# poetry run python scripts/train_curriculum.py --config configs/curriculum_smoke.yaml
+
+run_dir: runs/curriculum_smoke
+device: cpu
+seed: 0
+allow_unmet: true
+save_every: 1
+wandb: false
+
+arch:
+  d_model: 32
+  nhead: 2
+  num_layers: 1
+  dim_feedforward: 64
+  dropout: 0.0
+
+ppo:
+  lr: 0.0003
+  epochs: 1
+  minibatch_size: 8
+  ent_coef: 0.01
+
+stages:
+  - {skill: merchant, width: 2, height: 3, success_threshold: 0.0, max_updates: 1,
+     metric: success_rate, eval_every: 1, eval_episodes: 1, max_turns: 6, max_steps: 24,
+     rollout_decisions: 8}
+  - {skill: landing, width: 2, height: 3, success_threshold: 0.0, max_updates: 1,
+     metric: success_rate, eval_every: 1, eval_episodes: 1, max_turns: 6, max_steps: 24,
+     rollout_decisions: 8}
+  - {skill: combat, width: 2, height: 3, success_threshold: 0.0, max_updates: 1,
+     metric: success_rate, eval_every: 1, eval_episodes: 1, max_turns: 6, max_steps: 24,
+     rollout_decisions: 8}
+  - {skill: builder, width: 2, height: 3, success_threshold: 0.0, max_updates: 1,
+     metric: success_rate, eval_every: 1, eval_episodes: 1, max_turns: 6, max_steps: 24,
+     rollout_decisions: 8}
+  - {skill: full, width: 4, height: 4, success_threshold: 0.0, max_updates: 1,
+     metric: win_rate, eval_every: 1, eval_episodes: 1, max_turns: 6, max_steps: 24,
+     rollout_decisions: 8, train_opponent: random, map_count: 1}

@@ -47,6 +47,7 @@ class Transition:
     reward: float = 0.0  # sparse: 0 except the terminal decision (±1), set post-game
     advantage: float = 0.0  # filled by GAE
     ret: float = 0.0  # value target = advantage + value, filled by GAE
+    skill_idx: int = 0  # which sandbox / unit type conditioned the policy
 
 
 def heuristic_action(engine, pid: int, rng, eps: float = 1e-9):
@@ -91,6 +92,7 @@ def collect_trajectory(
     rng,
     max_steps: int = 400,
     use_env_reward: bool = False,
+    opponent_action=None,
 ) -> Tuple[List[Transition], Dict[str, Any]]:
     """Play one game and return the learning seat's decisions and outcome.
 
@@ -132,9 +134,15 @@ def collect_trajectory(
         pid = env._player_id(agent)
         engine = env.engine
 
-        # Random opponent: step a uniform legal action without recording it.
+        # Unrecorded opponent. ``opponent_action`` is an optional callable
+        # (engine, pid, rng) -> Action used for a scripted baseline. With neither
+        # a policy nor a callable, the opponent is uniform random.
         if pid != agent_pid and opponent_policy is None:
-            env.step(random_action(engine, pid, rng))
+            if opponent_action is not None:
+                action = opponent_action(engine, pid, rng)
+            else:
+                action = random_action(engine, pid, rng)
+            env.step(action)
             steps += 1
             if steps > max_steps:
                 break
@@ -142,9 +150,12 @@ def collect_trajectory(
 
         masks = ActionMasks(engine, pid, device=device)
         net = policy if pid == agent_pid else opponent_policy
+        skill_idx = int(getattr(env, "skill_index", 0))
 
         # sample an action
-        a_idx, v_idx, t_idx, logp, value = net.act(masks.tokens, masks.pad_mask, masks)
+        a_idx, v_idx, t_idx, logp, value = net.act(
+            masks.tokens, masks.pad_mask, masks, skill_idx=skill_idx
+        )
 
         if pid == agent_pid:
             verb_name = VERB_NAMES[int(v_idx)]
@@ -166,6 +177,7 @@ def collect_trajectory(
                     target_idx=-1 if t_idx is None else int(t_idx),  # -1 sentinel = no target
                     logp=float(logp),
                     value=float(value),
+                    skill_idx=skill_idx,
                 )
             )
 
