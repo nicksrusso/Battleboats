@@ -11,7 +11,8 @@ No skill one-hot. ``latest.pt`` loads in self-play with no shape change:
 ``<run_dir>/summary.json`` holds per-sandbox, per-size success rates.
 
 Weights & Biases is off unless ``wandb: true`` or ``BATTLEBOATS_WANDB=1``.
-A missing install or login does not stop training. Project defaults to
+Startup prints ``[wandb] on ...`` or ``[wandb] off ...`` either way. A
+missing install or login does not stop training. Project defaults to
 ``battleboats-skill-pipeline``.
 
 Exit status 2 when a size misses its gate and ``allow_unmet`` is off.

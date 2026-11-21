@@ -11,11 +11,22 @@ import os
 from typing import Any, Dict, Optional
 
 
-def wandb_requested(config_flag: bool) -> bool:
+def wandb_source(config_flag: bool) -> Optional[str]:
+    """Why logging was requested, or None when it stays off.
+
+    ``BATTLEBOATS_WANDB`` wins over the config flag so a shell override is
+    visible in the log line.
+    """
     env = os.environ.get("BATTLEBOATS_WANDB", "").strip().lower()
     if env in ("1", "true", "yes", "on"):
-        return True
-    return bool(config_flag)
+        return "BATTLEBOATS_WANDB"
+    if config_flag:
+        return "config"
+    return None
+
+
+def wandb_requested(config_flag: bool) -> bool:
+    return wandb_source(config_flag) is not None
 
 
 class WandbLog:
@@ -62,20 +73,28 @@ def _has_credentials(wandb: Any) -> bool:
 
 
 def init_wandb(config_flag: bool, *, project: str, config: Dict[str, Any]) -> WandbLog:
-    """Start a run, or return a no-op logger."""
-    if not wandb_requested(config_flag):
+    """Start a run, or return a no-op logger.
+
+    Always prints one line: ``[wandb] on ...`` or ``[wandb] off ...``. A
+    missing package, a missing key, or an init error is off, with the reason
+    on that same line.
+    """
+    source = wandb_source(config_flag)
+    if source is None:
+        print("[wandb] off (config wandb=false, BATTLEBOATS_WANDB unset)")
         return WandbLog()
     try:
         import wandb
     except ImportError:
-        print("[wandb] package is not installed; continuing without logging")
+        print("[wandb] off (package is not installed); continuing without logging")
         return WandbLog()
     if not _has_credentials(wandb):
-        print("[wandb] not logged in (no API key); continuing without logging")
+        print("[wandb] off (not logged in, no API key); continuing without logging")
         return WandbLog()
     try:
         wandb.init(project=project, config=config, reinit=True)
     except Exception as exc:
-        print(f"[wandb] init failed ({exc}); continuing without logging")
+        print(f"[wandb] off (init failed: {exc}); continuing without logging")
         return WandbLog()
+    print(f"[wandb] on project={project} via {source}")
     return WandbLog(wandb)
