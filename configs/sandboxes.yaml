@@ -108,7 +108,9 @@ ppo:
   lam: 0.95
   clip_eps: 0.2
   vf_coef: 0.5
-  ent_coef: 0.05
+  # 0.01 (PPO default). 0.05 kept EndTurn vs Build from peaking on
+  # expensive build_* drills, where cheaper hulls are already legal.
+  ent_coef: 0.01
   epochs: 4
   minibatch_size: 128
   max_grad_norm: 0.5

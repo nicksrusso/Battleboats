@@ -546,6 +546,7 @@ def test_load_real_config() -> None:
     assert cfg.max_updates_per_size == 750
     assert cfg.max_episodes_per_size == 2000
     assert cfg.allow_unmet is False
+    assert cfg.ppo.ent_coef == 0.01
     assert cfg.device == "cpu"
     assert cfg.wandb is False
     assert cfg.wandb_project == "battleboats-skill-pipeline"
