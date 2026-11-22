@@ -21,6 +21,14 @@ default 5..7). A landing ship moves 3 tiles a turn and captures from distance
 1, so d >= 5 means neither side can capture on its first turn and the
 defender always gets a turn to react. The learner plays seat 0 and seat 1
 equally often, so the first-mover tempo evens out across games.
+
+Small boards: fleet starts (and so the landing and forward variants) are
+skipped on maps narrower than ``min_width`` or shorter than ``min_height``.
+Those games are normal starts. The default 16x8 is the smallest board in the
+big-map pool, so 16x8, 32x16 and 48x24 behave as before. On 12x6 the homes
+are only about 6 apart, inside the 6-tile placement radius and the 5-7 forward
+ring, so ships start within reach of the enemy home: turn-0 captures, and
+forward landing ships placed in the defenders' guns.
 """
 
 from __future__ import annotations
@@ -50,6 +58,12 @@ class FleetStarts:
     radius: int = 6
     landing_forward_prob: float = 0.0
     landing_forward_dist: Tuple[int, int] = (5, 7)
+    min_width: int = 16
+    min_height: int = 8
+
+    def allows(self, width: int, height: int) -> bool:
+        """Whether this board is big enough for fleet starts."""
+        return int(width) >= self.min_width and int(height) >= self.min_height
 
     @classmethod
     def from_dict(cls, raw: Optional[dict]) -> "FleetStarts":
@@ -61,7 +75,11 @@ class FleetStarts:
             radius=int(raw.pop("radius", 6)),
             landing_forward_prob=float(raw.pop("landing_forward_prob", 0.0)),
             landing_forward_dist=tuple(int(x) for x in raw.pop("landing_forward_dist", (5, 7))),
+            min_width=int(raw.pop("min_width", 16)),
+            min_height=int(raw.pop("min_height", 8)),
         )
+        if out.min_width < 1 or out.min_height < 1:
+            raise ValueError("fleet_starts.min_width and min_height must be >= 1")
         if len(out.landing_forward_dist) != 2 or not 1 <= out.landing_forward_dist[0] <= out.landing_forward_dist[1]:
             raise ValueError("fleet_starts.landing_forward_dist must be [min, max] with 1 <= min <= max")
         if raw:
@@ -166,6 +184,8 @@ def apply_fleet_start(engine, cfg: FleetStarts, rng: random.Random) -> Optional[
     Returns the fleet, or None for a normal start. Sets
     ``engine.fleet_start_forward`` (True when landing ships start forward)."""
     engine.fleet_start_forward = False
+    if not cfg.allows(engine.map.width, engine.map.height):
+        return None
     if cfg.prob <= 0.0 or rng.random() >= cfg.prob:
         return None
     fleet = draw_fleet(rng, cfg.budget, cfg.landing_prob)
