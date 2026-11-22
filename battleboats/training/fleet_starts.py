@@ -163,10 +163,13 @@ def _free_tile(engine, ring: Dict[int, List[Tuple[int, int]]], d: int, rng: rand
 
 def apply_fleet_start(engine, cfg: FleetStarts, rng: random.Random) -> Optional[List[ShipType]]:
     """With probability ``cfg.prob`` give both sides the same random fleet.
-    Returns the fleet, or None for a normal start."""
+    Returns the fleet, or None for a normal start. Sets
+    ``engine.fleet_start_forward`` (True when landing ships start forward)."""
+    engine.fleet_start_forward = False
     if cfg.prob <= 0.0 or rng.random() >= cfg.prob:
         return None
     fleet = draw_fleet(rng, cfg.budget, cfg.landing_prob)
     forward = ShipType.LANDING in fleet and cfg.landing_forward_prob > 0 and rng.random() < cfg.landing_forward_prob
     place_fleets(engine, fleet, rng, cfg.radius, forward_landing=forward, forward_dist=cfg.landing_forward_dist)
+    engine.fleet_start_forward = bool(forward)
     return fleet

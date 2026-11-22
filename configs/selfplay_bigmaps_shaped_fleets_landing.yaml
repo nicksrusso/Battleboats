@@ -93,16 +93,16 @@ reward_shaping:
 # On fleet_starts.prob of games both sides start with the same random fleet
 # (same hulls, same total cost <= budget), each ship at the same sea distance
 # (1..radius) from its own home. Cash and ports are a normal start. 1200 is
-# about 24 turns of home income: 4-12 hulls, one landing ship half the time.
+# about 24 turns of home income: 4-12 hulls, always one landing ship.
 fleet_starts:
   prob: 0.333
   budget: 1200
-  landing_prob: 0.5
+  landing_prob: 1.0
   radius: 6
-  # When the fleet has a landing ship, 30% of the time both sides' landing
+  # When the fleet has a landing ship, 50% of the time both sides' landing
   # ships start 5-7 water tiles from the ENEMY home (same distance for both),
   # so captures happen early enough to learn the capture move.
-  landing_forward_prob: 0.3
+  landing_forward_prob: 0.5
   landing_forward_dist: [5, 7]
 
 # Must match the v0.0.1 checkpoint (only used if init_checkpoint is missing).

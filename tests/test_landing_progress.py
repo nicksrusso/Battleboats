@@ -235,6 +235,7 @@ def test_forward_prob_off_keeps_landing_home(tmp_path):
         eng = env.engine
         fleet = apply_fleet_start(eng, FleetStarts(prob=1.0, landing_prob=1.0), random.Random(i))
         assert ShipType.LANDING in fleet
+        assert eng.fleet_start_forward is False
         for p in (0, 1):
             ring = sea_distances(eng, eng.players[p].home_port, 6)
             near = {t for tiles in ring.values() for t in tiles}
@@ -250,7 +251,8 @@ def test_landing_config_and_logging(tmp_path, capsys):
     cfg = load_selfplay_config(ROOT / "configs" / "selfplay_bigmaps_shaped_fleets_landing.yaml")
     assert cfg.reward_shaping.landing_progress == pytest.approx(0.2)
     assert cfg.reward_shaping.caps["landing_progress"] == pytest.approx(0.3)
-    assert cfg.fleet_starts.landing_forward_prob == pytest.approx(0.3)
+    assert cfg.fleet_starts.landing_forward_prob == pytest.approx(0.5)
+    assert cfg.fleet_starts.landing_prob == pytest.approx(1.0)
     assert cfg.fleet_starts.landing_forward_dist == (5, 7)
     old = load_selfplay_config(ROOT / "configs" / "selfplay_bigmaps_shaped_fleets.yaml")
     assert old.reward_shaping.landing_progress == 0.0 and old.fleet_starts.landing_forward_prob == 0.0
@@ -269,3 +271,19 @@ def test_landing_config_and_logging(tmp_path, capsys):
         assert "shape_landing_progress" in r and "landing" in r and "landing_alive_mean" in r
     out = capsys.readouterr().out
     assert ",landing_progress:" in out and " land=alive:" in out and "landing_forward_prob=0.5" in out
+
+
+def test_forward_start_is_tagged(tmp_path):
+    maps, _ = _pool(tmp_path)
+    tags = []
+    for i in range(40):
+        env = BattleboatsAEC(maps[0], max_turns=50)
+        env.reset(seed=i)
+        fleet = apply_fleet_start(env.engine, FleetStarts(prob=1.0, landing_prob=1.0, landing_forward_prob=0.5), random.Random(i))
+        assert fleet is not None
+        tags.append(env.engine.fleet_start_forward)
+    assert any(tags) and not all(tags)
+    env = BattleboatsAEC(maps[0], max_turns=50)
+    env.reset(seed=0)
+    assert apply_fleet_start(env.engine, FleetStarts(prob=0.0), random.Random(0)) is None
+    assert env.engine.fleet_start_forward is False

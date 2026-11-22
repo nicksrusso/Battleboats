@@ -138,6 +138,7 @@ class _Slot:
     purchases: Dict[str, int] = field(default_factory=empty_purchase_counts)
     tracker: Any = None
     fleet_start: bool = False
+    fleet_forward: bool = False
     combat: Dict[str, Any] = field(default_factory=empty_combat)
     min_dist: Optional[int] = None
     landing: Dict[str, Any] = field(default_factory=empty_landing)
@@ -236,6 +237,7 @@ class GameCollector:
         slot.tracker = ShapingTracker(self.shaping)
         fleet = apply_fleet_start(slot.env.engine, self.fleet_starts, random.Random(self.seed * 4_000_037 + ep + 7))
         slot.fleet_start = fleet is not None
+        slot.fleet_forward = bool(getattr(slot.env.engine, "fleet_start_forward", False))
         slot.tracker.start(slot.env.engine, slot.agent_pid)
         slot.combat = empty_combat()
         slot.min_dist = None
@@ -283,6 +285,7 @@ class GameCollector:
                 "opponent": slot.opp_tag or "random",
                 "shaping": dict(slot.tracker.totals),
                 "fleet_start": slot.fleet_start,
+                "fleet_forward": slot.fleet_forward,
                 "combat": slot.combat,
                 "min_fleet_dist": slot.min_dist,
                 "landing": slot.landing,

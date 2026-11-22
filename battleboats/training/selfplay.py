@@ -336,7 +336,8 @@ def _train_loop(cfg, policy, optimizer, snapshots, collector, state, state_path,
             b["draws"] += int(info.get("outcome", 0) == 0)
         by_start: Dict[str, Dict[str, int]] = {}
         for info in infos:
-            b = by_start.setdefault("fleet" if info.get("fleet_start") else "normal", {"games": 0, "wins": 0, "draws": 0})
+            kind = "forward" if info.get("fleet_forward") else ("fleet" if info.get("fleet_start") else "normal")
+            b = by_start.setdefault(kind, {"games": 0, "wins": 0, "draws": 0})
             b["games"] += 1
             b["wins"] += int(info.get("outcome", 0) > 0)
             b["draws"] += int(info.get("outcome", 0) == 0)
