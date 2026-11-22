@@ -218,7 +218,12 @@ def collect_trajectory(
     }
 
 
-def compute_gae(transitions: List[Transition], gamma: float = 0.99, lam: float = 0.95) -> None:
+def compute_gae(
+    transitions: List[Transition],
+    gamma: float = 0.99,
+    lam: float = 0.95,
+    last_value: float = 0.0,
+) -> None:
     """Fill each Transition's ``advantage`` and ``ret`` in place via GAE.
 
     Generalized Advantage Estimation over one trajectory: a backward,
@@ -230,6 +235,9 @@ def compute_gae(transitions: List[Transition], gamma: float = 0.99, lam: float =
 
     Operates per trajectory only; advantage normalization happens later in the
     PPO update, not here.
+
+    ``last_value`` bootstraps a segment cut before the game ended: it is
+    V(s) of the learner's next decision state. Leave it 0 for a finished game.
     """
     gae_next = 0.0
     for t in reversed(range(len(transitions))):
@@ -237,7 +245,7 @@ def compute_gae(transitions: List[Transition], gamma: float = 0.99, lam: float =
         if t + 1 < len(transitions):
             next_val = transitions[t + 1].value
         else:
-            next_val = 0.0
+            next_val = float(last_value)
         delta = this_t.reward + gamma * next_val - this_t.value
         gae = delta + gamma * lam * gae_next
         this_t.advantage = gae

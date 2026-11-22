@@ -28,6 +28,10 @@ class BattleboatsBaseAEC(AECEnv):
         """Store config; engine is created in reset()."""
         self.map_json_path = map_json_path
         self.max_turns = max_turns
+        # Self-play collection builds its own ActionMasks and never reads
+        # infos["legal_actions"], so it turns this off to skip a second
+        # enumerate_legal per step.
+        self.prime_legal_actions = True
         self.possible_agents = self._possible_agents()
         self.engine: Optional[gameEngine] = None
 
@@ -158,6 +162,8 @@ class BattleboatsBaseAEC(AECEnv):
     def _prime_legal_actions(self) -> None:
         """Write enumerate_legal for the seat about to act."""
         assert self.engine is not None
+        if not self.prime_legal_actions:
+            return
         pid = self._player_id(self.agent_selection)
         # If engine seat != exposed agent (shouldn't after auto-opp), still
         # list legal moves for the AEC agent so policies don't see empty lists.

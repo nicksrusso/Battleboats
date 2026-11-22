@@ -24,11 +24,13 @@ class Map:
         self.port_owner: np.ndarray = np.zeros((0, 0), dtype=np.int8)
         self.ship_at: np.ndarray = np.zeros((0, 0), dtype=np.int32)
         self.port_positions: List[Tuple[int, int]] = []
+        self._coastline_cache = None
 
     # ------------------------------------------------------------------ load
     def load(self, json_path: str) -> None:
         with open(json_path) as f:
             data = json.load(f)
+        self._coastline_cache = None
         self.width = data["width"]
         self.height = data["height"]
         self.terrain = np.full((self.width, self.height), WATER, dtype=np.uint8)
@@ -98,6 +100,7 @@ class Map:
         self.port_owner[pos] = player
 
     def add_port(self, pos: Tuple[int, int], player: int) -> None:
+        self._coastline_cache = None
         self.terrain[pos] = LAND
         self.port_owner[pos] = player
         self.port_positions.append(pos)
