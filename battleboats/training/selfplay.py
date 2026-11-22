@@ -6,12 +6,18 @@ uniform random agent so the value head still sees decisive games. There is
 no rating, no prioritized matchmaking, and no exploiter. A later
 quality-diversity archive can replace ``RecentSnapshots.sample`` without
 changing the checkpoint format or the policy network.
+
+Collection goes through ``vec_collect``: worker processes keep several games
+open, batch the forward passes, and stop at exactly ``rollout_decisions``
+learner decisions. Cut games are bootstrapped and continue next update.
+Opponents are drawn per game from the ring at that game's start.
 """
 
 from __future__ import annotations
 
 import json
 import random
+import time
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Dict, List, Optional
@@ -22,16 +28,23 @@ import yaml
 from battleboats.envs.battleboats_aec import BattleboatsAEC
 from battleboats.envs.map_pool import PoolSize, build_map_pool, episode_limits
 from battleboats.envs.skill_maps import write_full_map
-from battleboats.training.checkpoints import frozen_copy, load_checkpoint, save_checkpoint
+from battleboats.training.checkpoints import (
+    frozen_copy,
+    load_checkpoint,
+    model_config_of,
+    save_checkpoint,
+)
 from battleboats.training.curriculum import ArchSpec, _infer_token_dim, _new_policy
 from battleboats.training.device import resolve_device
-from battleboats.training.loop import PPOHyper, apply_ppo, collect_episodes
-from battleboats.training.policy import PolicyNetwork
+from battleboats.training.loop import PPOHyper, apply_ppo
+from battleboats.training.policy import PolicyNetwork, set_dropout
+from battleboats.training.ppo_buffer import RolloutBuffer
 from battleboats.training.selfplay_purchases import (
     aggregate_purchases,
     format_purchase_line,
     purchase_mix,
 )
+from battleboats.training.vec_collect import make_collector
 
 
 @dataclass
@@ -46,11 +59,12 @@ class SelfPlayConfig:
     height: int = 8
     map_count: int = 4
     updates: int = 200
+    # Exact learner decisions per update. Games longer than this are cut
+    # and bootstrapped, then continue next update (see vec_collect).
     rollout_decisions: int = 2048
     max_turns: int = 80
     # 400 cut full games near turn 45. 3000 lets an 80-turn game finish
-    # on the turn cap. collect_episodes caps how many games an update
-    # starts, not how many steps one game may take.
+    # on the turn cap. max_steps caps engine steps per game.
     max_steps: int = 3000
     snapshot_every: int = 5
     snapshot_pool: int = 4
@@ -64,6 +78,15 @@ class SelfPlayConfig:
     map_pool: List[PoolSize] = field(default_factory=list)
     land_fraction: float = 0.02
     ref_home_distance: int = 14
+    # Collection: 0 workers plays in this process. Each worker keeps
+    # games_per_worker games open and batches their forward passes.
+    num_workers: int = 0
+    games_per_worker: int = 4
+    collect_threads: int = 1
+    ppo_threads: int = 8
+    # Overrides every dropout rate after loading (None keeps the checkpoint's).
+    # 0 makes the PPO re-score match the eval-mode rollout.
+    dropout: Optional[float] = 0.0
 
     def __post_init__(self) -> None:
         self.run_dir = Path(self.run_dir)
@@ -98,6 +121,11 @@ def load_selfplay_config(path: Path) -> SelfPlayConfig:
         map_pool=[PoolSize(**entry) for entry in raw.get("map_pool") or []],
         land_fraction=float(raw.get("land_fraction", 0.02)),
         ref_home_distance=int(raw.get("ref_home_distance", 14)),
+        num_workers=int(raw.get("num_workers", 0)),
+        games_per_worker=int(raw.get("games_per_worker", 4)),
+        collect_threads=int(raw.get("collect_threads", 1)),
+        ppo_threads=int(raw.get("ppo_threads", 8)),
+        dropout=None if raw.get("dropout", 0.0) is None else float(raw.get("dropout", 0.0)),
     )
 
 
@@ -146,6 +174,17 @@ class RecentSnapshots:
     def names(self) -> List[str]:
         return [p.name for p in self.paths]
 
+    def ring(self) -> Dict[str, PolicyNetwork]:
+        """Every pooled snapshot by tag (file stem), loading any not cached."""
+        out: Dict[str, PolicyNetwork] = {}
+        for path in self.paths:
+            key = str(path)
+            if key not in self._cache:
+                net, _ = load_checkpoint(path, self.device)
+                self._cache[key] = frozen_copy(net)
+            out[path.stem] = self._cache[key]
+        return out
+
 
 def run_selfplay(cfg: SelfPlayConfig, *, resume: bool = True) -> Dict[str, Any]:
     cfg.run_dir.mkdir(parents=True, exist_ok=True)
@@ -192,6 +231,8 @@ def run_selfplay(cfg: SelfPlayConfig, *, resume: bool = True) -> Dict[str, Any]:
         if cfg.init_checkpoint is not None:
             print(f"[selfplay] {cfg.init_checkpoint} missing — random init")
         policy = _new_policy(cfg.arch, _infer_token_dim(env), device)
+    if cfg.dropout is not None:
+        set_dropout(policy, cfg.dropout)
 
     snapshots = RecentSnapshots(cfg.run_dir / "snapshots", cfg.snapshot_pool, device)
     if snapshots.load_from_disk() == 0:
@@ -217,45 +258,45 @@ def run_selfplay(cfg: SelfPlayConfig, *, resume: bool = True) -> Dict[str, Any]:
         )
     )
 
-    def map_index(episode_index: int) -> int:
-        if cfg.map_pool:
-            # Seeded by episode so a resumed run draws the same sequence.
-            return random.Random(cfg.seed * 1_000_003 + episode_index).randrange(len(maps))
-        return episode_index % len(maps)
+    collector = make_collector(
+        maps,
+        map_info,
+        num_workers=cfg.num_workers,
+        games_per_worker=cfg.games_per_worker,
+        collect_threads=cfg.collect_threads,
+        model_config=model_config_of(policy),
+        seed=cfg.seed,
+        episode_offset=ep,
+        random_opponent_frac=cfg.random_opponent_frac,
+        gamma=cfg.ppo.gamma,
+        lam=cfg.ppo.lam,
+    )
+    try:
+        return _train_loop(cfg, policy, optimizer, snapshots, collector, state, state_path, latest, history, device, use_wandb)
+    finally:
+        collector.close()
+        try:
+            env.close()
+        except Exception:
+            pass
 
-    def reset(episode_index: int) -> int:
-        i = map_index(episode_index)
-        env.map_json_path = maps[i]
-        env.max_turns = map_info[i]["max_turns"]
-        env.reset(seed=cfg.seed + episode_index)
-        return episode_index % 2
 
-    def steps_for(episode_index: int) -> int:
-        return map_info[map_index(episode_index)]["max_steps"]
-
-    def opponent_for(episode_index: int):
-        if rng.random() < cfg.random_opponent_frac:
-            return None, None
-        opp = snapshots.sample(rng)
-        if opp is None:
-            return None, None
-        return opp, None
-
+def _train_loop(cfg, policy, optimizer, snapshots, collector, state, state_path, latest, history, device, use_wandb):
     for update in range(int(state["update"]), cfg.updates):
-        buffer, infos, ep = collect_episodes(
-            policy,
-            env,
-            rng,
-            target_decisions=cfg.rollout_decisions,
-            hyper=cfg.ppo,
-            max_steps=steps_for,
-            reset=reset,
-            opponent_for=opponent_for,
-            use_env_reward=False,
-            episode_start=ep,
-            annotate=lambda info, e: {**info, "map_size": f"{e.engine.map.width}x{e.engine.map.height}"},
-        )
+        t0 = time.perf_counter()
+        if cfg.num_workers <= 0:
+            torch.set_num_threads(max(1, cfg.collect_threads))
+        policy.eval()
+        collected = collector.collect(policy, snapshots.ring(), cfg.rollout_decisions)
+        collect_s = time.perf_counter() - t0
+        buffer = RolloutBuffer()
+        for segment in collected.segments:
+            buffer.add(segment)
+        infos = collected.finished
+        torch.set_num_threads(max(1, cfg.ppo_threads))
+        t1 = time.perf_counter()
         metrics = apply_ppo(policy, optimizer, buffer, cfg.ppo, device)
+        ppo_s = time.perf_counter() - t1
         wins = sum(1 for info in infos if info.get("outcome", 0) > 0)
         draws = sum(1 for info in infos if info.get("outcome", 0) == 0)
         n = max(1, len(infos))
@@ -276,7 +317,13 @@ def run_selfplay(cfg: SelfPlayConfig, *, resume: bool = True) -> Dict[str, Any]:
             "mean_steps": (sum(step_counts) / len(step_counts)) if step_counts else 0.0,
             "pool": snapshots.names(),
             "by_size": by_size,
-            **purchase_mix(aggregate_purchases(infos)),
+            "decisions": collected.decisions,
+            "env_steps": collected.env_steps,
+            "segments": len(collected.segments),
+            "collect_s": collect_s,
+            "ppo_s": ppo_s,
+            # Learner purchases made during this update, finished games or not.
+            **purchase_mix(aggregate_purchases([{"purchases": collected.purchases}])),
             **{f"ppo_{k}": v for k, v in metrics.items()},
         }
         with history.open("a") as f:
@@ -286,7 +333,8 @@ def run_selfplay(cfg: SelfPlayConfig, *, resume: bool = True) -> Dict[str, Any]:
             f"win={row['win_rate']:.2f} draw={row['draw_rate']:.2f} "
             f"games={row['games']} max_turn={row['max_turn']} "
             f"mean_steps={row['mean_steps']:.0f} pool={len(snapshots.paths)} "
-            f"ent={metrics['entropy']:.3f}"
+            f"ent={metrics['entropy']:.3f} dec={collected.decisions} env_steps={collected.env_steps} "
+            f"collect={collect_s:.1f}s ppo={ppo_s:.1f}s"
             + (
                 " sizes=" + ",".join(f"{k}:{v['games']}" for k, v in sorted(by_size.items()))
                 if cfg.map_pool
@@ -304,15 +352,11 @@ def run_selfplay(cfg: SelfPlayConfig, *, resume: bool = True) -> Dict[str, Any]:
             save_checkpoint(policy, cfg.run_dir / f"update_{update + 1}.pt")
         if (update + 1) % max(1, cfg.snapshot_every) == 0:
             snapshots.add(policy, tag=f"update_{update + 1:05d}")
-        state = {"update": update + 1, "episode": ep}
+        state = {"update": update + 1, "episode": collector.next_episode()}
         state_path.write_text(json.dumps(state, indent=2))
 
     if use_wandb:
         import wandb
 
         wandb.finish()
-    try:
-        env.close()
-    except Exception:
-        pass
     return {"ok": True, "checkpoint": str(latest), "updates": cfg.updates, "pool": snapshots.names()}

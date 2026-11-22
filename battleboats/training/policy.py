@@ -440,6 +440,80 @@ class PolicyNetwork(nn.Module):
         value = self.value(context)  # (B,)
         return asset_idx, verb_idx, target_idx, joint_lp, value
 
+    @torch.no_grad()
+    def act_batch(self, tokens: torch.Tensor, pad_mask: torch.Tensor, masks_list, skill_idx=None, globals=None):
+        """``act`` for B states at once (rollout).
+
+        ``tokens`` is ``(B, N_max, token_dim)`` padded, ``pad_mask`` ``(B, N_max)``
+        and ``masks_list`` holds one single-state masks object per row (the
+        ``ActionMasks`` contract: ``.asset`` ``(1, n)``, ``.verbs_for``,
+        ``.target_for``). The target head is routed per row by grouping rows on
+        the sampled verb, like ``evaluate_actions``, so no ``.item()`` branch.
+        Sampling order (asset, verb, then target groups) matches ``act``, so a
+        B=1 call draws the same action as ``act`` under the same seed.
+
+        Returns a dict: asset_idx, verb_idx, target_idx (B,) long with -1 for
+        no-target verbs, logp (B,), value (B,), and the per-row masks used
+        (asset_masks, verb_mask, target_masks) for the rollout buffer.
+        """
+        B, N = tokens.shape[0], tokens.shape[1]
+        dev = tokens.device
+        embeddings, context = self.encode(tokens, pad_mask, globals)
+        context = self._with_skill(context, skill_idx, B)
+
+        asset_rows = [m.asset[0] for m in masks_list]
+        asset_mask = torch.zeros(B, N, dtype=torch.bool, device=dev)
+        for i, row in enumerate(asset_rows):
+            asset_mask[i, : row.shape[0]] = row
+        asset_dist = masked_categorical(self.head_asset(context, embeddings, asset_mask))
+        asset_idx = asset_dist.sample()
+        lp_a = asset_dist.log_prob(asset_idx)
+        e_asset = embeddings[torch.arange(B, device=dev), asset_idx]
+        assets = asset_idx.tolist()
+
+        verb_mask = torch.cat([m.verbs_for(a) for m, a in zip(masks_list, assets)], dim=0).to(dev)
+        verb_dist = masked_categorical(self.head_verb(torch.cat([context, e_asset], dim=-1), verb_mask))
+        verb_idx = verb_dist.sample()
+        lp_v = verb_dist.log_prob(verb_idx)
+        e_verb = self.verb_embedding(verb_idx)
+        verbs = verb_idx.tolist()
+
+        target_cond = torch.cat([context, e_asset, e_verb], dim=-1)
+        target_idx = torch.full((B,), -1, dtype=torch.long, device=dev)
+        lp_t = torch.zeros(B, device=dev)
+        target_masks = [None] * B
+        for verb_name in VERBS_WITH_TARGET:
+            v = VERB_TO_IDX[verb_name]
+            rows = [i for i in range(B) if verbs[i] == v]
+            if not rows:
+                continue
+            per_row = [masks_list[i].target_for(verb_name, assets[i])[0] for i in rows]
+            if verb_name == "attack":
+                sub_mask = torch.zeros(len(rows), N, dtype=torch.bool, device=dev)
+                for j, row in enumerate(per_row):
+                    sub_mask[j, : row.shape[0]] = row
+            else:
+                sub_mask = torch.stack(per_row).to(dev)
+            r = torch.tensor(rows, dtype=torch.long, device=dev)
+            sub_emb = embeddings[r] if verb_name == "attack" else None
+            dist = masked_categorical(self.head_target(verb_name, target_cond[r], sub_mask, sub_emb))
+            t = dist.sample()
+            target_idx[r] = t
+            lp_t[r] = dist.log_prob(t)
+            for j, i in enumerate(rows):
+                target_masks[i] = per_row[j]
+
+        return {
+            "asset_idx": asset_idx,
+            "verb_idx": verb_idx,
+            "target_idx": target_idx,
+            "logp": lp_a + lp_v + lp_t,
+            "value": self.value(context),
+            "asset_masks": asset_rows,
+            "verb_mask": verb_mask,
+            "target_masks": target_masks,
+        }
+
     # --- PPO update (parallel re-evaluation of stored actions) -----------------
     def evaluate_actions(
         self,
@@ -548,4 +622,17 @@ def masked_categorical(logits: torch.Tensor, mask: Optional[torch.Tensor] = None
     # Tripwire that works whether the head pre-masked or we just did: every row must
     # keep at least one finite logit, else softmax over all -inf gives silent NaNs.
     assert torch.isfinite(logits).any(dim=-1).all(), "row with no legal option -> NaN"
-    return Categorical(logits=logits)
+    # validate_args=False skips torch's per-call constraint checks; the
+    # tripwire above already covers the case that matters here.
+    return Categorical(logits=logits, validate_args=False)
+
+
+def set_dropout(policy: nn.Module, p: float) -> None:
+    """Set every dropout rate in ``policy`` (nn.Dropout modules and the
+    attention dropout float) to ``p``. Weights are untouched, so any
+    checkpoint loads the same way and saved configs record the new rate."""
+    for module in policy.modules():
+        if isinstance(module, nn.Dropout):
+            module.p = float(p)
+        elif isinstance(module, nn.MultiheadAttention):
+            module.dropout = float(p)

@@ -96,6 +96,8 @@ class ActionMasks:
         # memory-lean. Rollout/PPO (act, to_action, masks) triggers the build.
         self._engine = engine
         self._built = False
+        self._tokens = None
+        self._globals = None
 
     # ------------------------------------------------------------------ build
     def _ensure_built(self):
@@ -118,15 +120,23 @@ class ActionMasks:
 
     @property
     def tokens(self) -> "torch.Tensor":
-        """(1, N, TOKEN_DIM) — entity tokens for this state (lazy; rollout only)."""
-        toks = build_entity_tokens(self._engine, self.player_id)
-        return torch.from_numpy(toks).unsqueeze(0).to(self.device)
+        """(1, N, TOKEN_DIM) — entity tokens for this state (lazy; rollout only).
+
+        Built once per ActionMasks and reused, so act() and the stored
+        Transition share one build. Treat it as read-only.
+        """
+        if self._tokens is None:
+            toks = build_entity_tokens(self._engine, self.player_id)
+            self._tokens = torch.from_numpy(toks).unsqueeze(0).to(self.device)
+        return self._tokens
 
     @property
     def globals(self) -> "torch.Tensor":
-        """(1, GLOBALS_DIM) — cash, counts, turn, board size (lazy; rollout only)."""
-        g = build_globals(self._engine, self.player_id)
-        return torch.from_numpy(g).unsqueeze(0).to(self.device)
+        """(1, GLOBALS_DIM) — cash, counts, turn, board size (lazy, built once)."""
+        if self._globals is None:
+            g = build_globals(self._engine, self.player_id)
+            self._globals = torch.from_numpy(g).unsqueeze(0).to(self.device)
+        return self._globals
 
     @property
     def pad_mask(self) -> "torch.Tensor":

@@ -18,15 +18,16 @@
 run_dir: runs/selfplay_bigmaps
 device: cpu
 seed: 0
-init_checkpoint: runs/checkpoints/v0.0.1_8f0a942.pt
+init_checkpoint: runs/checkpoints/v0.0.1_f4f7bef.pt
 map_pool:
   - {width: 16, height: 8, count: 30, ports: 2}
   - {width: 32, height: 16, count: 30, ports: 3}
   - {width: 48, height: 24, count: 30, ports: 4}
 land_fraction: 0.02
 ref_home_distance: 14
-# ~47 s an update on Nick's 16-core CPU in a 13-update pace run, so 700 is ~9 h.
 updates: 700
+# Exact learner decisions per update. Long games are cut here, bootstrapped
+# with V(s), and continue in the next update (battleboats/training/vec_collect.py).
 rollout_decisions: 2048
 max_turns: 80
 max_steps: 8000
@@ -35,6 +36,17 @@ snapshot_pool: 4
 random_opponent_frac: 0.15
 save_every: 10
 wandb: false
+
+# Collection: worker processes at collect_threads torch threads each, each
+# keeping games_per_worker games open and batching their forward passes.
+# PPO runs in the main process at ppo_threads.
+num_workers: 7
+games_per_worker: 8
+collect_threads: 1
+ppo_threads: 8
+# Overrides the checkpoint's dropout (0.1 in v0.0.1). 0 keeps the PPO
+# re-score identical to the eval-mode rollout. Weights load unchanged.
+dropout: 0.0
 
 # Must match the v0.0.1 checkpoint (only used if init_checkpoint is missing).
 arch:

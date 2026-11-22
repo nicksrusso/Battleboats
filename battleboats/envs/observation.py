@@ -19,6 +19,7 @@ Fog-of-war discipline (load-bearing):
 """
 
 import math
+from functools import lru_cache
 from typing import TYPE_CHECKING, Any, Dict, List, Sequence, Tuple
 
 import numpy as np
@@ -279,13 +280,24 @@ def build_globals(engine: "gameEngine", player_id: int) -> np.ndarray:
 # ============================================================================
 
 
+@lru_cache(maxsize=1 << 16)
+def _fourier_values(coord: float, wavelengths: Tuple[float, ...]) -> np.ndarray:
+    # Same math.sin/math.cos as the old per-element loop, computed once per
+    # (coord, wavelengths) and cast to float32 the way the row assignment did.
+    out = np.empty(2 * len(wavelengths), dtype=np.float32)
+    for i, wavelength in enumerate(wavelengths):
+        angle = 2.0 * math.pi * (coord / wavelength)
+        out[2 * i] = math.sin(angle)
+        out[2 * i + 1] = math.cos(angle)
+    out.setflags(write=False)
+    return out
+
+
 def _fourier_axis(
     coord: float, wavelengths: Sequence[float], row: np.ndarray, offset: int
 ) -> None:
-    for i, wavelength in enumerate(wavelengths):
-        angle = 2.0 * math.pi * (coord / wavelength)
-        row[offset + 2 * i] = math.sin(angle)
-        row[offset + 2 * i + 1] = math.cos(angle)
+    values = _fourier_values(coord, tuple(wavelengths))
+    row[offset : offset + values.shape[0]] = values
 
 
 def _write_position(row: np.ndarray, x: float, y: float, home: Tuple[int, int]) -> None:
@@ -308,24 +320,34 @@ def _write_board_size(row: np.ndarray, engine: "gameEngine") -> None:
 def _coastline_tiles(engine: "gameEngine") -> List[Tuple[int, int]]:
     """All land tiles adjacent to water and NOT currently ports.
 
-    These are candidate `build_port` targets. Static for a given map; could
-    be cached on env construction. For now recompute per observation — the
-    cost is O(W * H * 4) which is negligible at 160x80.
+    These are candidate `build_port` targets. The land-next-to-water scan is
+    cached on the Map (cleared by Map.load and Map.add_port); ports are
+    filtered on every call.
     """
     m = engine.map
+    base = getattr(m, "_coastline_cache", None)
+    if base is None:
+        base = _coastline_scan(m)
+        m._coastline_cache = base
+    return [pos for pos in base if not m.is_port(pos)]
+
+
+def _coastline_scan(m) -> Tuple[Tuple[int, int], ...]:
+    # Land tiles next to water, ports included. Terrain is fixed after
+    # Map.load, and Map.add_port clears the cache, so callers filter ports live.
     neighbors = ((1, 0), (-1, 0), (0, 1), (0, -1))
     out: List[Tuple[int, int]] = []
     for x in range(m.width):
         for y in range(m.height):
             pos = (x, y)
-            if not m.is_land(pos) or m.is_port(pos):
+            if not m.is_land(pos):
                 continue
             for dx, dy in neighbors:
                 nb = (x + dx, y + dy)
                 if m.in_bounds(nb) and m.is_water(nb):
                     out.append(pos)
                     break
-    return out
+    return tuple(out)
 
 
 def _write_friendly_ship_token(row: np.ndarray, ship, engine: "gameEngine", home: Tuple[int, int]) -> None:
