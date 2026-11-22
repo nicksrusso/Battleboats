@@ -48,6 +48,11 @@ ppo_threads: 8
 # re-score identical to the eval-mode rollout. Weights load unchanged.
 dropout: 0.0
 
+# Per-event shaped rewards (battleboats/training/reward_shaping.py). Off here;
+# see configs/selfplay_bigmaps_shaped.yaml for the shaped variant.
+reward_shaping:
+  enabled: false
+
 # Must match the v0.0.1 checkpoint (only used if init_checkpoint is missing).
 arch:
   d_model: 64

@@ -39,6 +39,7 @@ from battleboats.training.device import resolve_device
 from battleboats.training.loop import PPOHyper, apply_ppo
 from battleboats.training.policy import PolicyNetwork, set_dropout
 from battleboats.training.ppo_buffer import RolloutBuffer
+from battleboats.training.reward_shaping import COMPONENTS, RewardShaping
 from battleboats.training.selfplay_purchases import (
     aggregate_purchases,
     format_purchase_line,
@@ -87,6 +88,9 @@ class SelfPlayConfig:
     # Overrides every dropout rate after loading (None keeps the checkpoint's).
     # 0 makes the PPO re-score match the eval-mode rollout.
     dropout: Optional[float] = 0.0
+    # Per-event shaped rewards (battleboats/training/reward_shaping.py). Off
+    # unless the config's reward_shaping block sets enabled: true.
+    reward_shaping: RewardShaping = field(default_factory=RewardShaping)
 
     def __post_init__(self) -> None:
         self.run_dir = Path(self.run_dir)
@@ -126,6 +130,7 @@ def load_selfplay_config(path: Path) -> SelfPlayConfig:
         collect_threads=int(raw.get("collect_threads", 1)),
         ppo_threads=int(raw.get("ppo_threads", 8)),
         dropout=None if raw.get("dropout", 0.0) is None else float(raw.get("dropout", 0.0)),
+        reward_shaping=RewardShaping.from_dict(raw.get("reward_shaping")),
     )
 
 
@@ -257,6 +262,13 @@ def run_selfplay(cfg: SelfPlayConfig, *, resume: bool = True) -> Dict[str, Any]:
             else f"map={cfg.width}x{cfg.height}"
         )
     )
+    if cfg.reward_shaping.enabled:
+        rs = cfg.reward_shaping
+        print(
+            "[selfplay] reward shaping ON "
+            + " ".join(f"{k}={rs.weight(k)}" for k in COMPONENTS)
+            + f" caps={rs.caps} total_cap={rs.total_cap}"
+        )
 
     collector = make_collector(
         maps,
@@ -270,6 +282,7 @@ def run_selfplay(cfg: SelfPlayConfig, *, resume: bool = True) -> Dict[str, Any]:
         random_opponent_frac=cfg.random_opponent_frac,
         gamma=cfg.ppo.gamma,
         lam=cfg.ppo.lam,
+        shaping=cfg.reward_shaping,
     )
     try:
         return _train_loop(cfg, policy, optimizer, snapshots, collector, state, state_path, latest, history, device, use_wandb)
@@ -324,6 +337,7 @@ def _train_loop(cfg, policy, optimizer, snapshots, collector, state, state_path,
             "ppo_s": ppo_s,
             # Learner purchases made during this update, finished games or not.
             **purchase_mix(aggregate_purchases([{"purchases": collected.purchases}])),
+            **{f"shape_{k}": v for k, v in collected.shaping.items()},
             **{f"ppo_{k}": v for k, v in metrics.items()},
         }
         with history.open("a") as f:
@@ -342,6 +356,11 @@ def _train_loop(cfg, policy, optimizer, snapshots, collector, state, state_path,
             )
             + " "
             + format_purchase_line(row)
+            + (
+                " shape=" + ",".join(f"{k}:{collected.shaping[k]:.3f}" for k in COMPONENTS)
+                if cfg.reward_shaping.enabled
+                else ""
+            )
         )
         if use_wandb:
             import wandb
