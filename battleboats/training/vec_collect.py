@@ -19,7 +19,8 @@ that decision's transition. The terminal outcome is added on top of the last
 transition's shaping, never replacing it. The kill component's losses happen
 on the opponent's turn; they are settled when the learner next decides (or
 the game ends, or the segment is cut) and land on the learner's previous
-transition.
+transition. ``landing_progress`` (a potential difference between consecutive
+learner decisions) is settled the same way.
 
 ``fleet_starts`` gives a fraction of games a random, equal-cost fleet for both
 sides at the start (``fleet_starts.py``). Every step (both seats) is checked
@@ -47,7 +48,7 @@ import torch
 from torch.nn.utils.rnn import pad_sequence
 
 from battleboats.agents.random_agent import random_action
-from battleboats.core.actions import AttackAction, BuildShipAction, EndTurnAction
+from battleboats.core.actions import AttackAction, BuildShipAction, CapturePortAction, EndTurnAction
 from battleboats.envs.action_masks import ActionMasks
 from battleboats.envs.battleboats_aec import BattleboatsAEC
 from battleboats.training.policy import PolicyNetwork
@@ -72,6 +73,33 @@ def empty_combat() -> Dict[str, Any]:
     }
 
 
+def empty_landing() -> Dict[str, Any]:
+    """Learner landing-ship stats. ``alive_sum``/``samples`` average the
+    learner's landing ships alive over its decisions; ``min_dist`` is the
+    smallest water distance (1 = adjacent) of any learner landing ship to the
+    enemy home seen at a learner decision. Captures count both seats."""
+    return {
+        "alive_sum": 0,
+        "samples": 0,
+        "min_dist": None,
+        "learner_capture_attempts": 0,
+        "learner_captures": 0,
+        "learner_home_captures": 0,
+        "opp_capture_attempts": 0,
+        "opp_captures": 0,
+        "opp_home_captures": 0,
+    }
+
+
+def merge_landing(into: Dict[str, Any], other: Dict[str, Any]) -> None:
+    for k, v in other.items():
+        if k == "min_dist":
+            if v is not None and (into[k] is None or v < into[k]):
+                into[k] = v
+        else:
+            into[k] += v
+
+
 def merge_combat(into: Dict[str, Any], other: Dict[str, Any]) -> None:
     for k, v in other.items():
         if isinstance(v, dict):
@@ -89,6 +117,7 @@ class CollectResult:
     # Learner shaped reward by component, summed over this collect.
     shaping: Dict[str, float] = field(default_factory=empty_totals)
     combat: Dict[str, Any] = field(default_factory=empty_combat)
+    landing: Dict[str, Any] = field(default_factory=empty_landing)
     decisions: int = 0
     env_steps: int = 0
     open_games: int = 0
@@ -111,6 +140,7 @@ class _Slot:
     fleet_start: bool = False
     combat: Dict[str, Any] = field(default_factory=empty_combat)
     min_dist: Optional[int] = None
+    landing: Dict[str, Any] = field(default_factory=empty_landing)
 
 
 def _batch_inputs(masks_list: Sequence[ActionMasks]):
@@ -206,9 +236,10 @@ class GameCollector:
         slot.tracker = ShapingTracker(self.shaping)
         fleet = apply_fleet_start(slot.env.engine, self.fleet_starts, random.Random(self.seed * 4_000_037 + ep + 7))
         slot.fleet_start = fleet is not None
-        slot.tracker.mark_fleet(slot.env.engine, slot.agent_pid)
+        slot.tracker.start(slot.env.engine, slot.agent_pid)
         slot.combat = empty_combat()
         slot.min_dist = None
+        slot.landing = empty_landing()
 
     def _make_slots(self) -> None:
         self.slots = []
@@ -233,7 +264,7 @@ class GameCollector:
         winner = engine.winner
         outcome = 1.0 if winner == slot.agent_pid else (-1.0 if winner is not None else 0.0)
         if slot.segment:
-            self._settle_losses(slot, result)
+            self._settle(slot, result)
             slot.segment[-1].reward += outcome
             compute_gae(slot.segment, gamma=self.gamma, lam=self.lam, last_value=0.0)
             result.segments.append(slot.segment)
@@ -254,6 +285,7 @@ class GameCollector:
                 "fleet_start": slot.fleet_start,
                 "combat": slot.combat,
                 "min_fleet_dist": slot.min_dist,
+                "landing": slot.landing,
             }
         )
         self._start(slot)
@@ -300,10 +332,11 @@ class GameCollector:
             if key == LEARNER:
                 # Losses since the last learner step belong to the previous transition.
                 if slot.segment:
-                    self._settle_losses(slot, result)
+                    self._settle(slot, result)
                 else:
-                    slot.tracker.mark_fleet(slot.env.engine, slot.agent_pid)
+                    slot.tracker.start(slot.env.engine, slot.agent_pid)
                 self._track_distance(slot)
+                self._track_landing(slot, result)
                 slot.segment.append(
                     Transition(
                         tokens=masks.tokens[0],
@@ -337,16 +370,31 @@ class GameCollector:
                 slot.tracker.mark_fleet(slot.env.engine, slot.agent_pid)
         return recorded
 
-    def _settle_losses(self, slot: _Slot, result: CollectResult) -> None:
-        penalty = slot.tracker.settle_losses(slot.env.engine, slot.agent_pid)
-        if penalty and slot.segment:
-            slot.segment[-1].reward += penalty
-            result.shaping["kill"] += penalty
+    def _settle(self, slot: _Slot, result: CollectResult) -> None:
+        """Credit rewards that accrued since the learner's previous decision
+        (ship losses, landing progress) to that decision's transition."""
+        earned = slot.tracker.settle(slot.env.engine, slot.agent_pid)
+        if earned and slot.segment:
+            slot.segment[-1].reward += sum(earned.values())
+            for name, value in earned.items():
+                result.shaping[name] += value
+
+    @staticmethod
+    def _track_landing(slot: _Slot, result: CollectResult) -> None:
+        d, _norm, count = slot.tracker.landing_distance(slot.env.engine, slot.agent_pid)
+        for stats in (slot.landing, result.landing):
+            stats["alive_sum"] += count
+            stats["samples"] += 1
+            if d is not None and (stats["min_dist"] is None or d < stats["min_dist"]):
+                stats["min_dist"] = d
 
     def _step(self, slot: _Slot, pid: int, action, result: CollectResult) -> None:
         """env.step plus attack bookkeeping for either seat."""
         engine = slot.env.engine
         attack = None
+        capture = None
+        if isinstance(action, CapturePortAction) and engine.map.in_bounds(action.target) and engine.map.is_port(action.target):
+            capture = int(engine.map.port_owner[action.target])
         if isinstance(action, AttackAction):
             attacker = engine.ships.get(action.attacker_id)
             target = engine.ships.get(action.target_id)
@@ -355,6 +403,13 @@ class GameCollector:
         slot.env.step(action)
         slot.steps += 1
         result.env_steps += 1
+        if capture is not None:
+            side = "learner" if pid == slot.agent_pid else "opp"
+            taken = int(engine.map.port_owner[action.target]) == pid and capture != pid
+            for stats in (slot.landing, result.landing):
+                stats[f"{side}_capture_attempts"] += 1
+                stats[f"{side}_captures"] += int(taken)
+                stats[f"{side}_home_captures"] += int(taken and engine.winner == pid)
         if attack is not None and attack[0].has_attacked:
             side = "learner" if pid == slot.agent_pid else "opp"
             sunk = action.target_id not in engine.ships
@@ -414,7 +469,7 @@ class GameCollector:
                 self._act(key, items, result)
         if waiting:
             for slot, _ in waiting:
-                self._settle_losses(slot, result)
+                self._settle(slot, result)
             for (slot, _), v in zip(waiting, self._values(waiting)):
                 compute_gae(slot.segment, gamma=self.gamma, lam=self.lam, last_value=v)
                 result.segments.append(slot.segment)
@@ -482,6 +537,7 @@ def merge_results(results: Sequence[CollectResult]) -> CollectResult:
         for k, v in r.shaping.items():
             out.shaping[k] = out.shaping.get(k, 0.0) + v
         merge_combat(out.combat, r.combat)
+        merge_landing(out.landing, r.landing)
         out.decisions += r.decisions
         out.env_steps += r.env_steps
         out.open_games += r.open_games

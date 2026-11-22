@@ -278,7 +278,8 @@ def run_selfplay(cfg: SelfPlayConfig, *, resume: bool = True) -> Dict[str, Any]:
         fs = cfg.fleet_starts
         print(
             f"[selfplay] fleet starts ON prob={fs.prob} budget={fs.budget} "
-            f"landing_prob={fs.landing_prob} radius={fs.radius}"
+            f"landing_prob={fs.landing_prob} radius={fs.radius} "
+            f"landing_forward_prob={fs.landing_forward_prob} landing_forward_dist={list(fs.landing_forward_dist)}"
         )
 
     collector = make_collector(
@@ -353,6 +354,10 @@ def _train_loop(cfg, policy, optimizer, snapshots, collector, state, state_path,
             "by_start": by_start,
             "mean_turn": (sum(turns) / len(turns)) if turns else 0.0,
             "combat": combat,
+            "landing": collected.landing,
+            "landing_alive_mean": (
+                collected.landing["alive_sum"] / collected.landing["samples"] if collected.landing["samples"] else 0.0
+            ),
             "min_fleet_dist_mean": (sum(dists) / len(dists)) if dists else None,
             "min_fleet_dist_games": len(dists),
             "decisions": collected.decisions,
@@ -398,11 +403,17 @@ def _train_loop(cfg, policy, optimizer, snapshots, collector, state, state_path,
                 else ""
             )
             + (f" mindist={row['min_fleet_dist_mean']:.1f}" if dists else "")
+            + f" land=alive:{row['landing_alive_mean']:.2f}"
+            + f",mind:{collected.landing['min_dist'] if collected.landing['min_dist'] is not None else '-'}"
+            + f",cap=L{collected.landing['learner_capture_attempts']}/{collected.landing['learner_captures']}"
+            f"/{collected.landing['learner_home_captures']}"
+            f",O{collected.landing['opp_capture_attempts']}/{collected.landing['opp_captures']}"
+            f"/{collected.landing['opp_home_captures']}"
         )
         if use_wandb:
             import wandb
 
-            wandb.log({k: v for k, v in row.items() if k not in ("pool", "by_size", "by_start", "combat", "purchases")})
+            wandb.log({k: v for k, v in row.items() if k not in ("pool", "by_size", "by_start", "combat", "landing", "purchases")})
         save_checkpoint(policy, latest, extra={"update": update + 1})
         if cfg.save_every and (update + 1) % cfg.save_every == 0:
             save_checkpoint(policy, cfg.run_dir / f"update_{update + 1}.pt")

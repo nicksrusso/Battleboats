@@ -26,6 +26,19 @@ pays for what the engine actually did:
   charged to the player's previous transition, the one whose outcome included
   the opponent's reply. A loss before the player's first decision has no
   transition to land on and is dropped.
+- ``landing_progress`` (potential-based): with D the water (BFS) distance
+  from the nearest of the player's landing ships to the enemy home port
+  (1 = adjacent, can capture), and ``norm`` the water distance from the
+  player's own home to the enemy home, the potential is
+  ``phi = -landing_progress * min(D, norm) / norm``. No landing ship (none
+  built yet, or all sunk) counts as D = norm, the distance from its own home,
+  so phi lies in [-coef, 0]. Each learner transition gets ``phi' - phi``
+  between its decision and the player's next one (settled like kill losses).
+  Moving in and back out pays zero net, so oscillating can't be farmed. A sunk
+  landing ship drops phi back to -coef, which takes back the progress it had
+  earned, and building a new one at home is worth ~0, so there is no free
+  refund. The full trip pays about ``coef`` once. The per-game cap clips the
+  running net sum to [-cap, +cap]; it is not part of ``total_cap``.
 
 Exploit guards: each port position pays ``port_build``/``port_capture`` at
 most once per player per game (so a port traded back and forth pays once),
@@ -51,8 +64,9 @@ from battleboats.core.actions import (
 )
 from battleboats.core.gameEngine import MERCHANT_CAPACITY
 from battleboats.core.shipyard.ship_data import BASE_STATS
+from battleboats.core.shipyard.ship_type import ShipType
 
-COMPONENTS = ("build", "load", "unload", "port_build", "port_capture", "kill")
+COMPONENTS = ("build", "load", "unload", "port_build", "port_capture", "kill", "landing_progress")
 MAX_HULL_COST = float(max(s.cost for s in BASE_STATS.values()))
 
 
@@ -69,6 +83,7 @@ class RewardShaping:
     port_build: float = 0.0
     port_capture: float = 0.0
     kill: float = 0.0
+    landing_progress: float = 0.0
     # Per-game cap on each component's summed reward (None = no cap).
     caps: Dict[str, Optional[float]] = field(default_factory=dict)
     # Cap on one player's summed positive non-kill shaping in one game
@@ -106,6 +121,97 @@ class ShapingTracker:
         self.kill_gain = 0.0
         self.kill_loss = 0.0
         self.fleet: Optional[Dict[int, Any]] = None
+        self.phi: Optional[float] = None
+        self.phi0: Optional[float] = None
+        self.progress_paid = 0.0
+        self._dist: Optional[Dict[Tuple[int, int], int]] = None
+        self._norm: Optional[int] = None
+
+    # ----------------------------------------------------- landing distance
+    def _distances(self, engine, pid: int) -> Tuple[Dict[Tuple[int, int], int], int]:
+        """Water BFS distance to the enemy home (1 = adjacent), and the
+        distance from ``pid``'s own home. Terrain is fixed in a game, so this
+        is computed once per tracker (one tracker per game and player)."""
+        if self._dist is None:
+            m = engine.map
+            target = engine.players[1 - pid].home_port
+            dist: Dict[Tuple[int, int], int] = {}
+            frontier = []
+            for dx, dy in ((1, 0), (-1, 0), (0, 1), (0, -1)):
+                nb = (target[0] + dx, target[1] + dy)
+                if m.in_bounds(nb) and m.is_water(nb):
+                    dist[nb] = 1
+                    frontier.append(nb)
+            while frontier:
+                nxt = []
+                for pos in frontier:
+                    for dx, dy in ((1, 0), (-1, 0), (0, 1), (0, -1)):
+                        nb = (pos[0] + dx, pos[1] + dy)
+                        if nb not in dist and m.in_bounds(nb) and m.is_water(nb):
+                            dist[nb] = dist[pos] + 1
+                            nxt.append(nb)
+                frontier = nxt
+            home = engine.players[pid].home_port
+            near = [
+                dist[(home[0] + dx, home[1] + dy)]
+                for dx, dy in ((1, 0), (-1, 0), (0, 1), (0, -1))
+                if (home[0] + dx, home[1] + dy) in dist
+            ]
+            self._dist = dist
+            self._norm = max(1, min(near) if near else m.manhattan(home, target))
+        return self._dist, self._norm
+
+    def landing_distance(self, engine, pid: int) -> Tuple[Optional[int], int, int]:
+        """(min water distance of ``pid``'s landing ships to the enemy home
+        or None if it has none, norm, number of landing ships)."""
+        dist, norm = self._distances(engine, pid)
+        best, count = None, 0
+        for sid in engine.players[pid].owned_ship_ids:
+            ship = engine.ships[sid]
+            if ship.type != ShipType.LANDING:
+                continue
+            count += 1
+            d = dist.get(ship.position, norm)
+            best = d if best is None else min(best, d)
+        return best, norm, count
+
+    def potential(self, engine, pid: int) -> float:
+        if not (self.cfg.enabled and self.cfg.landing_progress):
+            return 0.0
+        d, norm, _ = self.landing_distance(engine, pid)
+        d = norm if d is None else min(d, norm)
+        return -self.cfg.landing_progress * d / norm
+
+    def start(self, engine, pid: int) -> None:
+        """Baseline fleet and potential with no reward (game start, or a
+        first decision with no earlier transition to credit)."""
+        self.mark_fleet(engine, pid)
+        self.phi = self.potential(engine, pid)
+        self.phi0 = self.phi
+
+    def settle(self, engine, pid: int) -> Dict[str, float]:
+        """Rewards that accrued since ``pid``'s previous decision (ships lost
+        on the opponent's turn, landing progress). Credit them to that
+        decision's transition."""
+        out: Dict[str, float] = {}
+        loss = self.settle_losses(engine, pid)
+        if loss:
+            out["kill"] = loss
+        if self.cfg.enabled and self.cfg.landing_progress:
+            new = self.potential(engine, pid)
+            if self.phi is not None:
+                delta = new - self.phi
+                cap = self.cfg.caps.get("landing_progress")
+                paid = self.progress_paid + delta
+                if cap is not None:
+                    paid = min(cap, max(-cap, paid))
+                value = paid - self.progress_paid
+                self.progress_paid = paid
+                if value:
+                    self.totals["landing_progress"] += value
+                    out["landing_progress"] = value
+            self.phi = new
+        return out
 
     @property
     def scores_kills(self) -> bool:
@@ -200,6 +306,6 @@ class ShapingTracker:
         if cap is not None:
             value = min(value, max(0.0, cap - self.totals[name]))
         if self.cfg.total_cap is not None:
-            positive = sum(v for k, v in self.totals.items() if k != "kill")
+            positive = sum(v for k, v in self.totals.items() if k not in ("kill", "landing_progress"))
             value = min(value, max(0.0, self.cfg.total_cap - positive))
         return value

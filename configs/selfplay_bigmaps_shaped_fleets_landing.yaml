@@ -1,0 +1,125 @@
+# Same as selfplay_bigmaps_shaped_fleets.yaml plus a potential-based landing-ship
+# progress reward and forward-placed landing ships in some fleet starts.
+# Full-game PPO on random maps from core/config/generate_map.py at three
+# sizes. Each episode draws one map uniformly from the pool. Warm-starts from
+# v0.0.1 (or a later sandbox checkpoint). Cell coordinates use sinusoidal
+# features of raw integer positions (and home-relative offsets). Board
+# width/height are still divided by POSITION_SCALE (256). Older checkpoints
+# with a narrower token_dim widen the first layer and zero-init new columns.
+#
+# max_turns / max_steps below are the caps for homes ref_home_distance apart. Each map scales both
+# by (home-to-home Manhattan distance / ref_home_distance), never below 1x.
+# The 8x8 boards had homes 14 apart and played to an 80-turn cap in 3000 steps
+# (~37 engine steps a turn, both seats). On the bigger boards ships sail at
+# full speed for longer, and a pace run measured 45-80 steps a turn, so
+# 3000/80 cut games before their turn cap. max_steps here is 100 a turn: a
+# safety net, so the per-map turn cap is what ends a game.
+#
+# poetry run python scripts/train_selfplay.py --config configs/selfplay_bigmaps.yaml
+
+run_dir: runs/selfplay_bigmaps_fleets_landing
+device: cpu
+seed: 0
+init_checkpoint: runs/checkpoints/v0.0.1_f4f7bef.pt
+map_pool:
+  - {width: 16, height: 8, count: 30, ports: 2}
+  - {width: 32, height: 16, count: 30, ports: 3}
+  - {width: 48, height: 24, count: 30, ports: 4}
+land_fraction: 0.02
+ref_home_distance: 14
+updates: 700
+# Exact learner decisions per update. Long games are cut here, bootstrapped
+# with V(s), and continue in the next update (battleboats/training/vec_collect.py).
+rollout_decisions: 2048
+max_turns: 80
+max_steps: 8000
+snapshot_every: 5
+snapshot_pool: 4
+random_opponent_frac: 0.15
+save_every: 10
+wandb: false
+
+# Collection: worker processes at collect_threads torch threads each, each
+# keeping games_per_worker games open and batching their forward passes.
+# PPO runs in the main process at ppo_threads.
+num_workers: 7
+games_per_worker: 8
+collect_threads: 1
+ppo_threads: 8
+# Overrides the checkpoint's dropout (0.1 in v0.0.1). 0 keeps the PPO
+# re-score identical to the eval-mode rollout. Weights load unchanged.
+dropout: 0.0
+
+# Per-event shaped rewards on top of terminal +1/-1/0 (draw 0). Scale: a
+# player earns 250 starting cash plus 50 a turn from its home port, so an
+# 80-turn game buys roughly 4k cash of ships (about 16 carriers' worth, or
+# ~40 destroyers); the old run bought 40-100 hulls a game. At build 0.01 per
+# max-cost (250) hull that is 0.16-0.4, so build is capped at 0.2. A full
+# merchant hold is 100 materials (200 cash); load pays 0.01 and unload 0.02 per
+# full hold. Ports are rare and strategic: 0.05 per built port, 0.1 per captured
+# non-home port (a home-port capture wins and only gets the terminal +1), each
+# port position paying once per player per game. total_cap keeps one player's
+# summed shaping in a game at or below 0.4, well under the terminal 1.
+reward_shaping:
+  enabled: true
+  weights:
+    build: 0.01          # x hull_cost / 250 per ship actually bought
+    load: 0.01           # x units taken on / 100 (merchant capacity)
+    unload: 0.02         # x units delivered at home / 100
+    port_build: 0.05     # per new port built by a builder
+    port_capture: 0.1    # per enemy non-home port captured
+    kill: 0.02           # zero-sum: +0.02 x cost/250 per enemy ship sunk, -0.02 x cost/250 per own ship lost
+    landing_progress: 0.2  # potential: -0.2 x (water distance of nearest landing ship to enemy home) / (home-to-home distance)
+  caps:                  # per player per game, per component
+    build: 0.2
+    load: 0.05
+    unload: 0.1
+    port_build: 0.15
+    port_capture: 0.2
+    kill: 0.3            # gains capped at +0.3 and losses at -0.3 per game
+    landing_progress: 0.3  # running net sum clipped to [-0.3, 0.3]
+  total_cap: 0.4         # positive non-kill shaping only; kill has its own cap
+
+# Landing progress is potential-based: phi = -0.2 x min(D, norm) / norm, where
+# D is the nearest own landing ship's water distance to the enemy home and norm
+# the water distance between the homes; no landing ship counts as D = norm.
+# Each learner step earns phi' - phi, so the full trip pays ~0.2 once, retreat
+# or losing the ship gives it back, and oscillating nets zero.
+#
+# Kill scale: a destroyer/submarine/merchant is 0.008, a carrier 0.02, so a
+# 1200-cost fleet wiped out is about -0.1 (+0.1 to the side that sank it).
+# Long fights stay under the +/-0.3 cap, well below the terminal +/-1.
+#
+# On fleet_starts.prob of games both sides start with the same random fleet
+# (same hulls, same total cost <= budget), each ship at the same sea distance
+# (1..radius) from its own home. Cash and ports are a normal start. 1200 is
+# about 24 turns of home income: 4-12 hulls, one landing ship half the time.
+fleet_starts:
+  prob: 0.333
+  budget: 1200
+  landing_prob: 0.5
+  radius: 6
+  # When the fleet has a landing ship, 30% of the time both sides' landing
+  # ships start 5-7 water tiles from the ENEMY home (same distance for both),
+  # so captures happen early enough to learn the capture move.
+  landing_forward_prob: 0.3
+  landing_forward_dist: [5, 7]
+
+# Must match the v0.0.1 checkpoint (only used if init_checkpoint is missing).
+arch:
+  d_model: 64
+  nhead: 4
+  num_layers: 2
+  dim_feedforward: 128
+  dropout: 0.1
+
+ppo:
+  lr: 0.0003
+  gamma: 0.99
+  lam: 0.95
+  clip_eps: 0.2
+  vf_coef: 0.5
+  ent_coef: 0.01
+  epochs: 4
+  minibatch_size: 256
+  max_grad_norm: 0.5
