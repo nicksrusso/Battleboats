@@ -104,6 +104,10 @@ fleet_starts:
   # so captures happen early enough to learn the capture move.
   landing_forward_prob: 0.5
   landing_forward_dist: [5, 7]
+  # Boards narrower than min_width or shorter than min_height get normal
+  # starts only (12x6 homes are too close for fleet placement).
+  min_width: 16
+  min_height: 8
 
 # Must match the v0.0.1 checkpoint (only used if init_checkpoint is missing).
 arch:

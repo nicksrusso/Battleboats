@@ -279,8 +279,13 @@ def run_selfplay(cfg: SelfPlayConfig, *, resume: bool = True) -> Dict[str, Any]:
         print(
             f"[selfplay] fleet starts ON prob={fs.prob} budget={fs.budget} "
             f"landing_prob={fs.landing_prob} radius={fs.radius} "
-            f"landing_forward_prob={fs.landing_forward_prob} landing_forward_dist={list(fs.landing_forward_dist)}"
+            f"landing_forward_prob={fs.landing_forward_prob} landing_forward_dist={list(fs.landing_forward_dist)} "
+            f"min_board={fs.min_width}x{fs.min_height}"
         )
+        if cfg.map_pool:
+            small = sorted({f"{e.width}x{e.height}" for e in cfg.map_pool if not fs.allows(e.width, e.height)})
+            if small:
+                print(f"[selfplay] fleet starts OFF on {small} (below min_board {fs.min_width}x{fs.min_height}); those games are normal starts")
 
     collector = make_collector(
         maps,
