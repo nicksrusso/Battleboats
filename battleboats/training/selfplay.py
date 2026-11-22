@@ -39,6 +39,7 @@ from battleboats.training.device import resolve_device
 from battleboats.training.loop import PPOHyper, apply_ppo
 from battleboats.training.policy import PolicyNetwork, set_dropout
 from battleboats.training.ppo_buffer import RolloutBuffer
+from battleboats.training.fleet_starts import FleetStarts
 from battleboats.training.reward_shaping import COMPONENTS, RewardShaping
 from battleboats.training.selfplay_purchases import (
     aggregate_purchases,
@@ -91,6 +92,9 @@ class SelfPlayConfig:
     # Per-event shaped rewards (battleboats/training/reward_shaping.py). Off
     # unless the config's reward_shaping block sets enabled: true.
     reward_shaping: RewardShaping = field(default_factory=RewardShaping)
+    # Random equal-cost fleets for both sides on a fraction of games
+    # (battleboats/training/fleet_starts.py). prob 0 = normal starts only.
+    fleet_starts: FleetStarts = field(default_factory=FleetStarts)
 
     def __post_init__(self) -> None:
         self.run_dir = Path(self.run_dir)
@@ -131,6 +135,7 @@ def load_selfplay_config(path: Path) -> SelfPlayConfig:
         ppo_threads=int(raw.get("ppo_threads", 8)),
         dropout=None if raw.get("dropout", 0.0) is None else float(raw.get("dropout", 0.0)),
         reward_shaping=RewardShaping.from_dict(raw.get("reward_shaping")),
+        fleet_starts=FleetStarts.from_dict(raw.get("fleet_starts")),
     )
 
 
@@ -269,6 +274,12 @@ def run_selfplay(cfg: SelfPlayConfig, *, resume: bool = True) -> Dict[str, Any]:
             + " ".join(f"{k}={rs.weight(k)}" for k in COMPONENTS)
             + f" caps={rs.caps} total_cap={rs.total_cap}"
         )
+    if cfg.fleet_starts.prob > 0:
+        fs = cfg.fleet_starts
+        print(
+            f"[selfplay] fleet starts ON prob={fs.prob} budget={fs.budget} "
+            f"landing_prob={fs.landing_prob} radius={fs.radius}"
+        )
 
     collector = make_collector(
         maps,
@@ -283,6 +294,7 @@ def run_selfplay(cfg: SelfPlayConfig, *, resume: bool = True) -> Dict[str, Any]:
         gamma=cfg.ppo.gamma,
         lam=cfg.ppo.lam,
         shaping=cfg.reward_shaping,
+        fleet_starts=cfg.fleet_starts,
     )
     try:
         return _train_loop(cfg, policy, optimizer, snapshots, collector, state, state_path, latest, history, device, use_wandb)
@@ -321,6 +333,14 @@ def _train_loop(cfg, policy, optimizer, snapshots, collector, state, state_path,
             b["games"] += 1
             b["wins"] += int(info.get("outcome", 0) > 0)
             b["draws"] += int(info.get("outcome", 0) == 0)
+        by_start: Dict[str, Dict[str, int]] = {}
+        for info in infos:
+            b = by_start.setdefault("fleet" if info.get("fleet_start") else "normal", {"games": 0, "wins": 0, "draws": 0})
+            b["games"] += 1
+            b["wins"] += int(info.get("outcome", 0) > 0)
+            b["draws"] += int(info.get("outcome", 0) == 0)
+        dists = [info["min_fleet_dist"] for info in infos if info.get("min_fleet_dist") is not None]
+        combat = collected.combat
         row = {
             "update": update + 1,
             "win_rate": wins / n,
@@ -330,6 +350,11 @@ def _train_loop(cfg, policy, optimizer, snapshots, collector, state, state_path,
             "mean_steps": (sum(step_counts) / len(step_counts)) if step_counts else 0.0,
             "pool": snapshots.names(),
             "by_size": by_size,
+            "by_start": by_start,
+            "mean_turn": (sum(turns) / len(turns)) if turns else 0.0,
+            "combat": combat,
+            "min_fleet_dist_mean": (sum(dists) / len(dists)) if dists else None,
+            "min_fleet_dist_games": len(dists),
             "decisions": collected.decisions,
             "env_steps": collected.env_steps,
             "segments": len(collected.segments),
@@ -361,11 +386,23 @@ def _train_loop(cfg, policy, optimizer, snapshots, collector, state, state_path,
                 if cfg.reward_shaping.enabled
                 else ""
             )
+            + f" atk=L{combat['learner_attacks']}/{combat['learner_sinks']}"
+            f",O{combat['opp_attacks']}/{combat['opp_sinks']}"
+            + " sunk=" + ",".join(f"{k}:{v}" for k, v in sorted(combat["sunk_by_learner"].items()))
+            + " lost=" + ",".join(f"{k}:{v}" for k, v in sorted(combat["lost_by_learner"].items()))
+            + (
+                " starts=" + ",".join(
+                    f"{k}:{v['games']}g/{v['wins']}w/{v['draws']}d" for k, v in sorted(by_start.items())
+                )
+                if by_start
+                else ""
+            )
+            + (f" mindist={row['min_fleet_dist_mean']:.1f}" if dists else "")
         )
         if use_wandb:
             import wandb
 
-            wandb.log({k: v for k, v in row.items() if k not in ("pool", "by_size", "purchases")})
+            wandb.log({k: v for k, v in row.items() if k not in ("pool", "by_size", "by_start", "combat", "purchases")})
         save_checkpoint(policy, latest, extra={"update": update + 1})
         if cfg.save_every and (update + 1) % cfg.save_every == 0:
             save_checkpoint(policy, cfg.run_dir / f"update_{update + 1}.pt")

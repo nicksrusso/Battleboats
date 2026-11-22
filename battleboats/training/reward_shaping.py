@@ -18,11 +18,21 @@ pays for what the engine actually did:
 - ``port_build``: a builder turned a coastline tile into a new port.
 - ``port_capture``: a landing ship took an enemy port. A capture that ends
   the game (enemy home port) gets no shaping; the terminal reward covers it.
+- ``kill`` (zero-sum): sinking an enemy ship pays ``+kill * cost / 250`` on
+  the attack that sank it; losing one of your own ships costs
+  ``-kill * cost / 250``. Ships only sink from attacks (a builder spent on a
+  port is not a loss). A loss happens on the opponent's turn, so it is found
+  by diffing the player's fleet at its next decision (``settle_losses``) and
+  charged to the player's previous transition, the one whose outcome included
+  the opponent's reply. A loss before the player's first decision has no
+  transition to land on and is dropped.
 
 Exploit guards: each port position pays ``port_build``/``port_capture`` at
 most once per player per game (so a port traded back and forth pays once),
-and each component has a per-game cap (``caps``), with a total per-game cap
-on top. Only the acting player's step is scored, and only learner decisions
+and each component has a per-game cap (``caps``). ``total_cap`` caps the
+summed positive shaping of the non-kill components. Kill is capped on its
+own, symmetrically: gains at ``+caps.kill`` and losses at ``-caps.kill``, so
+both players' kill rewards stay mirror images. Only the acting player's step is scored, and only learner decisions
 get the reward, on the transition of the action that caused it.
 """
 
@@ -34,6 +44,7 @@ from typing import Any, Dict, Optional, Set, Tuple
 from battleboats.core.actions import (
     BuildPortAction,
     BuildShipAction,
+    AttackAction,
     CapturePortAction,
     MerchantLoadAction,
     MerchantUnloadAction,
@@ -41,7 +52,7 @@ from battleboats.core.actions import (
 from battleboats.core.gameEngine import MERCHANT_CAPACITY
 from battleboats.core.shipyard.ship_data import BASE_STATS
 
-COMPONENTS = ("build", "load", "unload", "port_build", "port_capture")
+COMPONENTS = ("build", "load", "unload", "port_build", "port_capture", "kill")
 MAX_HULL_COST = float(max(s.cost for s in BASE_STATS.values()))
 
 
@@ -57,9 +68,11 @@ class RewardShaping:
     unload: float = 0.0
     port_build: float = 0.0
     port_capture: float = 0.0
+    kill: float = 0.0
     # Per-game cap on each component's summed reward (None = no cap).
     caps: Dict[str, Optional[float]] = field(default_factory=dict)
-    # Cap on the summed shaping of one player in one game (None = no cap).
+    # Cap on one player's summed positive non-kill shaping in one game
+    # (None = no cap). Kill has its own symmetric cap in ``caps``.
     total_cap: Optional[float] = None
 
     @classmethod
@@ -90,12 +103,48 @@ class ShapingTracker:
         self.cfg = cfg
         self.totals: Dict[str, float] = empty_totals()
         self.ports_paid: Set[Tuple[str, Tuple[int, int]]] = set()
+        self.kill_gain = 0.0
+        self.kill_loss = 0.0
+        self.fleet: Optional[Dict[int, Any]] = None
+
+    @property
+    def scores_kills(self) -> bool:
+        return self.cfg.enabled and self.cfg.kill != 0.0
+
+    def mark_fleet(self, engine, pid: int) -> None:
+        """Remember ``pid``'s fleet (call after its own step and at game start)."""
+        if self.scores_kills:
+            self.fleet = {sid: engine.ships[sid].type for sid in engine.players[pid].owned_ship_ids}
+
+    def settle_losses(self, engine, pid: int) -> float:
+        """Negative kill reward for ships ``pid`` lost since ``mark_fleet``.
+        Re-marks the fleet. Returns 0 when nothing was lost."""
+        if not self.scores_kills:
+            return 0.0
+        before = self.fleet
+        self.mark_fleet(engine, pid)
+        if before is None:
+            return 0.0
+        lost = [t for sid, t in before.items() if sid not in self.fleet]
+        if not lost:
+            return 0.0
+        penalty = sum(self.cfg.kill * BASE_STATS[t].cost / MAX_HULL_COST for t in lost)
+        cap = self.cfg.caps.get("kill")
+        if cap is not None:
+            penalty = min(penalty, max(0.0, cap - self.kill_loss))
+        self.kill_loss += penalty
+        self.totals["kill"] -= penalty
+        return -penalty
 
     def snapshot(self, engine, pid: int, action) -> Optional[Dict[str, Any]]:
         """State needed to score ``action`` (taken by ``pid``), read before the step."""
         if not self.cfg.enabled:
             return None
         player = engine.players[pid]
+        if isinstance(action, AttackAction):
+            target = engine.ships.get(action.target_id)
+            hit = target is not None and target.owner != pid and self.cfg.kill != 0.0
+            return {"type": target.type if hit else None}
         if isinstance(action, BuildShipAction):
             return {"cash": player.cash, "ships": len(player.owned_ship_ids)}
         if isinstance(action, (MerchantLoadAction, MerchantUnloadAction)):
@@ -111,7 +160,10 @@ class ShapingTracker:
             return {}
         player = engine.players[pid]
         raw: Dict[str, float] = {}
-        if isinstance(action, BuildShipAction):
+        if isinstance(action, AttackAction):
+            if pre["type"] is not None and action.target_id not in engine.ships:
+                raw["kill"] = self.cfg.kill * BASE_STATS[pre["type"]].cost / MAX_HULL_COST
+        elif isinstance(action, BuildShipAction):
             cost = BASE_STATS[action.ship_type].cost
             if pre["cash"] - player.cash == cost and len(player.owned_ship_ids) == pre["ships"] + 1:
                 raw["build"] = self.cfg.build * cost / MAX_HULL_COST
@@ -140,8 +192,14 @@ class ShapingTracker:
 
     def _capped(self, name: str, value: float) -> float:
         cap = self.cfg.caps.get(name)
+        if name == "kill":
+            if cap is not None:
+                value = min(value, max(0.0, cap - self.kill_gain))
+            self.kill_gain += value
+            return value
         if cap is not None:
             value = min(value, max(0.0, cap - self.totals[name]))
         if self.cfg.total_cap is not None:
-            value = min(value, max(0.0, self.cfg.total_cap - sum(self.totals.values())))
+            positive = sum(v for k, v in self.totals.items() if k != "kill")
+            value = min(value, max(0.0, self.cfg.total_cap - positive))
         return value

@@ -16,7 +16,15 @@ the per-map step cap still counts as a draw, as before.
 With ``shaping`` enabled (``reward_shaping``), each learner decision also gets
 the shaped reward its own action earned (``ShapingTracker.score``), added to
 that decision's transition. The terminal outcome is added on top of the last
-transition's shaping, never replacing it. Opponent actions are not scored.
+transition's shaping, never replacing it. The kill component's losses happen
+on the opponent's turn; they are settled when the learner next decides (or
+the game ends, or the segment is cut) and land on the learner's previous
+transition.
+
+``fleet_starts`` gives a fraction of games a random, equal-cost fleet for both
+sides at the start (``fleet_starts.py``). Every step (both seats) is checked
+for attacks, so ``CollectResult.combat`` counts attacks, sinkings and sunk
+hulls for the learner and its opponent.
 
 ``ParallelCollector`` runs one ``GameCollector`` per worker process (spawn,
 ``collect_threads`` torch threads each) and sends the learner and snapshot
@@ -39,16 +47,38 @@ import torch
 from torch.nn.utils.rnn import pad_sequence
 
 from battleboats.agents.random_agent import random_action
-from battleboats.core.actions import BuildShipAction, EndTurnAction
+from battleboats.core.actions import AttackAction, BuildShipAction, EndTurnAction
 from battleboats.envs.action_masks import ActionMasks
 from battleboats.envs.battleboats_aec import BattleboatsAEC
 from battleboats.training.policy import PolicyNetwork
+from battleboats.training.fleet_starts import FleetStarts, apply_fleet_start
 from battleboats.training.reward_shaping import RewardShaping, ShapingTracker, empty_totals
+from battleboats.training.selfplay_purchases import hull_name
 from battleboats.training.rollout import Transition, compute_gae
 from battleboats.training.selfplay_purchases import empty_purchase_counts, record_purchase
 
 LEARNER = "__learner__"
 _TENSOR_FIELDS = ("tokens", "asset_mask", "verb_mask", "target_mask", "globals")
+
+
+def empty_combat() -> Dict[str, Any]:
+    return {
+        "learner_attacks": 0,
+        "learner_sinks": 0,
+        "opp_attacks": 0,
+        "opp_sinks": 0,
+        "sunk_by_learner": {},
+        "lost_by_learner": {},
+    }
+
+
+def merge_combat(into: Dict[str, Any], other: Dict[str, Any]) -> None:
+    for k, v in other.items():
+        if isinstance(v, dict):
+            for h, n in v.items():
+                into[k][h] = into[k].get(h, 0) + n
+        else:
+            into[k] += v
 
 
 @dataclass
@@ -58,6 +88,7 @@ class CollectResult:
     purchases: Dict[str, int] = field(default_factory=empty_purchase_counts)
     # Learner shaped reward by component, summed over this collect.
     shaping: Dict[str, float] = field(default_factory=empty_totals)
+    combat: Dict[str, Any] = field(default_factory=empty_combat)
     decisions: int = 0
     env_steps: int = 0
     open_games: int = 0
@@ -77,6 +108,9 @@ class _Slot:
     segment: List[Transition] = field(default_factory=list)
     purchases: Dict[str, int] = field(default_factory=empty_purchase_counts)
     tracker: Any = None
+    fleet_start: bool = False
+    combat: Dict[str, Any] = field(default_factory=empty_combat)
+    min_dist: Optional[int] = None
 
 
 def _batch_inputs(masks_list: Sequence[ActionMasks]):
@@ -104,6 +138,7 @@ class GameCollector:
         gamma: float = 0.99,
         lam: float = 0.95,
         shaping: Optional[RewardShaping] = None,
+        fleet_starts: Optional[FleetStarts] = None,
     ) -> None:
         self.maps = [str(m) for m in maps]
         self.map_info = list(map_info)
@@ -116,6 +151,7 @@ class GameCollector:
         self.random_opponent_frac = float(random_opponent_frac)
         self.gamma, self.lam = float(gamma), float(lam)
         self.shaping = shaping if shaping is not None else RewardShaping()
+        self.fleet_starts = fleet_starts if fleet_starts is not None else FleetStarts()
         self.policy = self._new_net()
         self.opponents: Dict[str, PolicyNetwork] = {}
         self.ring: List[str] = []
@@ -168,6 +204,11 @@ class GameCollector:
         slot.segment = []
         slot.purchases = empty_purchase_counts()
         slot.tracker = ShapingTracker(self.shaping)
+        fleet = apply_fleet_start(slot.env.engine, self.fleet_starts, random.Random(self.seed * 4_000_037 + ep + 7))
+        slot.fleet_start = fleet is not None
+        slot.tracker.mark_fleet(slot.env.engine, slot.agent_pid)
+        slot.combat = empty_combat()
+        slot.min_dist = None
 
     def _make_slots(self) -> None:
         self.slots = []
@@ -192,6 +233,7 @@ class GameCollector:
         winner = engine.winner
         outcome = 1.0 if winner == slot.agent_pid else (-1.0 if winner is not None else 0.0)
         if slot.segment:
+            self._settle_losses(slot, result)
             slot.segment[-1].reward += outcome
             compute_gae(slot.segment, gamma=self.gamma, lam=self.lam, last_value=0.0)
             result.segments.append(slot.segment)
@@ -209,6 +251,9 @@ class GameCollector:
                 "episode": slot.ep,
                 "opponent": slot.opp_tag or "random",
                 "shaping": dict(slot.tracker.totals),
+                "fleet_start": slot.fleet_start,
+                "combat": slot.combat,
+                "min_fleet_dist": slot.min_dist,
             }
         )
         self._start(slot)
@@ -226,9 +271,7 @@ class GameCollector:
             env = slot.env
             pid = env._player_id(env.agent_selection)
             if pid != slot.agent_pid and slot.opp_tag is None:
-                env.step(random_action(env.engine, pid, slot.rng))
-                slot.steps += 1
-                result.env_steps += 1
+                self._step(slot, pid, random_action(env.engine, pid, slot.rng), result)
                 continue
             return pid
 
@@ -238,9 +281,7 @@ class GameCollector:
         for slot, pid in items:
             masks = ActionMasks(slot.env.engine, pid)
             if masks.n == 0:
-                slot.env.step(EndTurnAction())
-                slot.steps += 1
-                result.env_steps += 1
+                self._step(slot, pid, EndTurnAction(), result)
                 continue
             live.append(slot)
             masks_list.append(masks)
@@ -257,6 +298,12 @@ class GameCollector:
         recorded = 0
         for i, (slot, masks) in enumerate(zip(live, masks_list)):
             if key == LEARNER:
+                # Losses since the last learner step belong to the previous transition.
+                if slot.segment:
+                    self._settle_losses(slot, result)
+                else:
+                    slot.tracker.mark_fleet(slot.env.engine, slot.agent_pid)
+                self._track_distance(slot)
                 slot.segment.append(
                     Transition(
                         tokens=masks.tokens[0],
@@ -279,16 +326,60 @@ class GameCollector:
                 record_purchase(slot.purchases, action.ship_type)
                 record_purchase(result.purchases, action.ship_type)
             pre = slot.tracker.snapshot(slot.env.engine, pid_of[i], action) if key == LEARNER else None
-            slot.env.step(action)
-            slot.steps += 1
-            result.env_steps += 1
+            self._step(slot, pid_of[i], action, result)
             if pre is not None:
                 earned = slot.tracker.score(slot.env.engine, pid_of[i], action, pre)
                 if earned:
                     slot.segment[-1].reward += sum(earned.values())
                     for name, value in earned.items():
                         result.shaping[name] += value
+            if key == LEARNER:
+                slot.tracker.mark_fleet(slot.env.engine, slot.agent_pid)
         return recorded
+
+    def _settle_losses(self, slot: _Slot, result: CollectResult) -> None:
+        penalty = slot.tracker.settle_losses(slot.env.engine, slot.agent_pid)
+        if penalty and slot.segment:
+            slot.segment[-1].reward += penalty
+            result.shaping["kill"] += penalty
+
+    def _step(self, slot: _Slot, pid: int, action, result: CollectResult) -> None:
+        """env.step plus attack bookkeeping for either seat."""
+        engine = slot.env.engine
+        attack = None
+        if isinstance(action, AttackAction):
+            attacker = engine.ships.get(action.attacker_id)
+            target = engine.ships.get(action.target_id)
+            if attacker is not None and target is not None and not attacker.has_attacked:
+                attack = (attacker, target.type)
+        slot.env.step(action)
+        slot.steps += 1
+        result.env_steps += 1
+        if attack is not None and attack[0].has_attacked:
+            side = "learner" if pid == slot.agent_pid else "opp"
+            sunk = action.target_id not in engine.ships
+            for stats in (slot.combat, result.combat):
+                stats[f"{side}_attacks"] += 1
+                if sunk:
+                    stats[f"{side}_sinks"] += 1
+                    book = stats["sunk_by_learner" if side == "learner" else "lost_by_learner"]
+                    name = hull_name(attack[1])
+                    book[name] = book.get(name, 0) + 1
+
+    @staticmethod
+    def _track_distance(slot: _Slot) -> None:
+        """Running per-game min Manhattan distance between the two fleets,
+        sampled at learner decisions."""
+        engine = slot.env.engine
+        mine = [engine.ships[s].position for s in engine.players[slot.agent_pid].owned_ship_ids]
+        theirs = [engine.ships[s].position for s in engine.players[1 - slot.agent_pid].owned_ship_ids]
+        if not mine or not theirs:
+            return
+        a = np.asarray(mine)
+        b = np.asarray(theirs)
+        d = int((np.abs(a[:, None, 0] - b[None, :, 0]) + np.abs(a[:, None, 1] - b[None, :, 1])).min())
+        if slot.min_dist is None or d < slot.min_dist:
+            slot.min_dist = d
 
     @torch.no_grad()
     def _values(self, items) -> List[float]:
@@ -322,6 +413,8 @@ class GameCollector:
             for key, items in groups.items():
                 self._act(key, items, result)
         if waiting:
+            for slot, _ in waiting:
+                self._settle_losses(slot, result)
             for (slot, _), v in zip(waiting, self._values(waiting)):
                 compute_gae(slot.segment, gamma=self.gamma, lam=self.lam, last_value=v)
                 result.segments.append(slot.segment)
@@ -388,6 +481,7 @@ def merge_results(results: Sequence[CollectResult]) -> CollectResult:
             out.purchases[k] = out.purchases.get(k, 0) + v
         for k, v in r.shaping.items():
             out.shaping[k] = out.shaping.get(k, 0.0) + v
+        merge_combat(out.combat, r.combat)
         out.decisions += r.decisions
         out.env_steps += r.env_steps
         out.open_games += r.open_games
