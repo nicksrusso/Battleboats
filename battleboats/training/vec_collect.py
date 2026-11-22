@@ -13,6 +13,11 @@ next update with the new weights. Finished games get the sparse terminal
 reward (+1/-1/0) on their last learner decision and bootstrap with 0; hitting
 the per-map step cap still counts as a draw, as before.
 
+With ``shaping`` enabled (``reward_shaping``), each learner decision also gets
+the shaped reward its own action earned (``ShapingTracker.score``), added to
+that decision's transition. The terminal outcome is added on top of the last
+transition's shaping, never replacing it. Opponent actions are not scored.
+
 ``ParallelCollector`` runs one ``GameCollector`` per worker process (spawn,
 ``collect_threads`` torch threads each) and sends the learner and snapshot
 weights to every worker before each update. Episode ``k`` of worker ``w``
@@ -38,6 +43,7 @@ from battleboats.core.actions import BuildShipAction, EndTurnAction
 from battleboats.envs.action_masks import ActionMasks
 from battleboats.envs.battleboats_aec import BattleboatsAEC
 from battleboats.training.policy import PolicyNetwork
+from battleboats.training.reward_shaping import RewardShaping, ShapingTracker, empty_totals
 from battleboats.training.rollout import Transition, compute_gae
 from battleboats.training.selfplay_purchases import empty_purchase_counts, record_purchase
 
@@ -50,6 +56,8 @@ class CollectResult:
     segments: List[List[Transition]] = field(default_factory=list)
     finished: List[Dict[str, Any]] = field(default_factory=list)
     purchases: Dict[str, int] = field(default_factory=empty_purchase_counts)
+    # Learner shaped reward by component, summed over this collect.
+    shaping: Dict[str, float] = field(default_factory=empty_totals)
     decisions: int = 0
     env_steps: int = 0
     open_games: int = 0
@@ -68,6 +76,7 @@ class _Slot:
     decisions: int = 0
     segment: List[Transition] = field(default_factory=list)
     purchases: Dict[str, int] = field(default_factory=empty_purchase_counts)
+    tracker: Any = None
 
 
 def _batch_inputs(masks_list: Sequence[ActionMasks]):
@@ -94,6 +103,7 @@ class GameCollector:
         random_opponent_frac: float = 0.15,
         gamma: float = 0.99,
         lam: float = 0.95,
+        shaping: Optional[RewardShaping] = None,
     ) -> None:
         self.maps = [str(m) for m in maps]
         self.map_info = list(map_info)
@@ -105,6 +115,7 @@ class GameCollector:
         self.episode_offset = int(episode_offset)
         self.random_opponent_frac = float(random_opponent_frac)
         self.gamma, self.lam = float(gamma), float(lam)
+        self.shaping = shaping if shaping is not None else RewardShaping()
         self.policy = self._new_net()
         self.opponents: Dict[str, PolicyNetwork] = {}
         self.ring: List[str] = []
@@ -156,6 +167,7 @@ class GameCollector:
         slot.decisions = 0
         slot.segment = []
         slot.purchases = empty_purchase_counts()
+        slot.tracker = ShapingTracker(self.shaping)
 
     def _make_slots(self) -> None:
         self.slots = []
@@ -180,7 +192,7 @@ class GameCollector:
         winner = engine.winner
         outcome = 1.0 if winner == slot.agent_pid else (-1.0 if winner is not None else 0.0)
         if slot.segment:
-            slot.segment[-1].reward = outcome
+            slot.segment[-1].reward += outcome
             compute_gae(slot.segment, gamma=self.gamma, lam=self.lam, last_value=0.0)
             result.segments.append(slot.segment)
         result.finished.append(
@@ -196,6 +208,7 @@ class GameCollector:
                 "map_size": f"{engine.map.width}x{engine.map.height}",
                 "episode": slot.ep,
                 "opponent": slot.opp_tag or "random",
+                "shaping": dict(slot.tracker.totals),
             }
         )
         self._start(slot)
@@ -221,7 +234,7 @@ class GameCollector:
 
     def _act(self, key: str, items, result: CollectResult) -> int:
         net = self.policy if key == LEARNER else self.opponents[key]
-        live, masks_list = [], []
+        live, masks_list, pid_of = [], [], []
         for slot, pid in items:
             masks = ActionMasks(slot.env.engine, pid)
             if masks.n == 0:
@@ -231,6 +244,7 @@ class GameCollector:
                 continue
             live.append(slot)
             masks_list.append(masks)
+            pid_of.append(pid)
         if not live:
             return 0
         tokens, pad, glob = _batch_inputs(masks_list)
@@ -264,9 +278,16 @@ class GameCollector:
             if key == LEARNER and isinstance(action, BuildShipAction):
                 record_purchase(slot.purchases, action.ship_type)
                 record_purchase(result.purchases, action.ship_type)
+            pre = slot.tracker.snapshot(slot.env.engine, pid_of[i], action) if key == LEARNER else None
             slot.env.step(action)
             slot.steps += 1
             result.env_steps += 1
+            if pre is not None:
+                earned = slot.tracker.score(slot.env.engine, pid_of[i], action, pre)
+                if earned:
+                    slot.segment[-1].reward += sum(earned.values())
+                    for name, value in earned.items():
+                        result.shaping[name] += value
         return recorded
 
     @torch.no_grad()
@@ -365,6 +386,8 @@ def merge_results(results: Sequence[CollectResult]) -> CollectResult:
         out.finished.extend(r.finished)
         for k, v in r.purchases.items():
             out.purchases[k] = out.purchases.get(k, 0) + v
+        for k, v in r.shaping.items():
+            out.shaping[k] = out.shaping.get(k, 0.0) + v
         out.decisions += r.decisions
         out.env_steps += r.env_steps
         out.open_games += r.open_games
