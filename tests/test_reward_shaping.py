@@ -207,9 +207,9 @@ def test_config_parsing_and_defaults():
     shaped = load_selfplay_config(ROOT / "configs" / "selfplay_bigmaps_shaped.yaml")
     rs = shaped.reward_shaping
     assert rs.enabled and rs.total_cap is not None and rs.total_cap < 1.0
-    old = [k for k in COMPONENTS if k != "kill"]
+    old = [k for k in COMPONENTS if k not in ("kill", "landing_progress")]
     assert all(rs.weight(k) > 0 for k in old)
-    assert rs.kill == 0.0  # the kill component lives in selfplay_bigmaps_shaped_fleets.yaml
+    assert rs.kill == 0.0 and rs.landing_progress == 0.0  # added in later configs
     assert sum(rs.caps[k] for k in old) > rs.total_cap
     assert shaped.init_checkpoint == base.init_checkpoint
     with pytest.raises(ValueError):
