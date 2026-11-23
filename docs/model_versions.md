@@ -12,12 +12,18 @@ directories for versioned models carry the same name, e.g.
 `runs/selfplay_16x8_v0.2.0`. A minor bump marks a rules change, so models
 from different minor versions were trained under different game rules.
 
+Experiment run folders such as `runs/selfplay_mixed_v0.2.0` and
+`runs/selfplay_mixed_v0.2.1` are named for the starting checkpoint or
+experiment, not model versions; there is no tagged v0.2.1 model.
+`runs/selfplay_mixed_v0.2.2` produced v0.3.0 (update 800), not a v0.2.2 model.
+
 | Version | Weights | Commit | What |
 |---|---|---|---|
 | v0.0.1 | `runs/checkpoints/v0.0.1_f4f7bef.pt` | f4f7bef | Fresh sandbox warm-up: Fourier positions, globals token, live goal gates, cheap typed builds only, ent_coef 0.01. Used for the LLM games. |
 | v0.1.0 | `runs/checkpoints/v0.1.0_cb0a0c7.pt` | cb0a0c7 | **Baseline.** 12x6 self-play smoke v7, update 150. |
 | v0.1.1 | `runs/checkpoints/v0.1.1_cb0a0c7.pt` | cb0a0c7 | 16x8 self-play from v0.1.0, 700 updates. Old rules. |
 | v0.2.0 | `runs/checkpoints/v0.2.0_955f221.pt` | 955f221 | 16x8 self-play from v0.1.0, 700 updates, under the #38 rules (bought ships wait a turn; captured/built ports wait a turn). |
+| v0.3.0 | `runs/checkpoints/v0.3.0_26348ee.pt` | 26348ee | Mixed 16x8+20x10 self-play from v0.2.0, tagged at update 800 (the run's final u1000 collapsed and is not this version). Same #38 rules; ship_lost / draw penalty / distance-scaled landing_progress. |
 
 ## v0.1.0 (baseline)
 
@@ -51,3 +57,13 @@ from different minor versions were trained under different game rules.
 - Head-to-heads under the new rules (200 games each, alternating seats; opponents trained under the old rules):
   - vs v0.1.0: 108/70/22, win rate 54.0% (Wilson 95% [47.1, 60.8]), score 0.595.
   - vs v0.1.1: 68/124/8, win rate 34.0% (Wilson 95% [27.8, 40.8]), score 0.360. v0.1.1 is stronger even under the new rules.
+
+## v0.3.0
+
+- Source: `runs/selfplay_mixed_v0.2.2/update_800.pt`, 800 updates (of a 1000-update run), 4684 finished games through update 800, trained 2026-11-23 06:21:56-06:45:32 CST. The run continued after this checkpoint and collapsed by updates 901-1000 (draws 45%, landing 7%, mean turn 60); `latest.pt` / `update_1000.pt` is not v0.3.0.
+- sha256 `e5ba7164392d8b90b18c77b0893413351b038e6fe34ee891b5e57cc81d61d285`.
+- Lineage: warm start from v0.2.0. Same #38 rules as v0.2.0.
+- Code: 26348ee (#41). Training changes vs v0.2.0: 40-map pool (16x8 x20 ports 2 + 20x10 x20 ports 2, no 24x12), `reward_shaping.ship_lost` 0.02 (cap 0.5), kill 0.02 (cap 0.3), `reward.draw` -0.15, `landing_progress_distance_scale` on (a full home-to-adjacent landing trip pays exactly `landing_progress` on every map size).
+- Self-play: `map_gen.min_port_enemy_home_water: 7`, land_fraction 0.02, hull_ent_coef 0.05, hull exploration eps 0.15, fleet starts prob 0.333, 7 workers x 8 games, 2048 decisions per update.
+- Training through update 800: 4684 games, W/L/D 2404/1727/553, mean turn 34.7, draw 11.8%, landing 27.9% of buys. Updates 701-800: 522 games, W/L/D 291/189/42, mean turn 32.1, draw 8.0%, entropy 2.28, hull-head entropy 0.80, landing 23.2% of buys.
+- Head-to-head vs v0.2.0 (200 games, alternating seats, on this run's 16x8+20x10 pool): 129/67/4, win rate 64.5% (Wilson 95% [57.7, 70.8]), score 0.655. As seat 0: 72/26/2; as seat 1: 57/41/2. Per size: 16x8 67/34/3, 20x10 62/33/1.
