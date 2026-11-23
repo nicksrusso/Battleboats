@@ -38,12 +38,15 @@ Builders
     targets are preferred; Manhattan-to-home is the primary key.
 
 Landings
-    Target last-known / currently known capturable ports, with a
-    sighted enemy home first. If no enemy port has been seen, explore
-    toward the far side of the map from our home (the enemy home is
-    not known at kickoff unless a scout or friendly port has already
-    sighted it — the policy observation starts empty too). Always
-    flee from hostile combat ships that we can see (or recently saw);
+    Target the nearest last-known / currently known capturable port
+    (any sighted enemy port, home or satellite, and any sighted
+    neutral) measured by water-path distance from the landing ship.
+    A sighted enemy home is not preferred over a closer satellite.
+    If no enemy or neutral port has been seen, explore toward the
+    far side of the map from our home (the enemy home is not known
+    at kickoff unless a scout or friendly port has already sighted
+    it — the policy observation starts empty too). Always flee from
+    hostile combat ships that we can see (or recently saw);
     survival outranks capturing. A landing ship never issues
     ``AttackAction``.
 
@@ -73,10 +76,17 @@ from dataclasses import dataclass
 from typing import Dict, Iterable, List, Optional, Sequence, Tuple
 
 from battleboats.agents.heuristics import COMBAT_TYPES, _ship_value, pk
-from battleboats.core.actions import (Action, AttackAction, BuildPortAction,
-                                      BuildShipAction, CapturePortAction,
-                                      EndTurnAction, MerchantLoadAction,
-                                      MerchantUnloadAction, MoveAction)
+from battleboats.core.actions import (
+    Action,
+    AttackAction,
+    BuildPortAction,
+    BuildShipAction,
+    CapturePortAction,
+    EndTurnAction,
+    MerchantLoadAction,
+    MerchantUnloadAction,
+    MoveAction,
+)
 from battleboats.core.shipyard.ship_data import BASE_STATS
 from battleboats.core.shipyard.ship_type import ShipType
 
@@ -474,8 +484,11 @@ def _choose(
 def _choose_capture(
     engine, player_id: int, captures: Sequence[Action], cfg: TacticalConfig
 ) -> Optional[Action]:
-    """Take a capture unless the landing is threatened — survival comes first."""
-    known_home = _known_enemy_home(engine, player_id)
+    """Take a capture unless the landing is threatened — survival comes first.
+
+    Any capturable port is fair game; a sighted enemy home is not
+    preferred over a satellite or a neutral.
+    """
     safe: List[Action] = []
     for action in captures:
         if not isinstance(action, CapturePortAction):
@@ -488,14 +501,6 @@ def _choose_capture(
         safe.append(action)
     if not safe:
         return None
-    if known_home is not None:
-        home_caps = [
-            a
-            for a in safe
-            if isinstance(a, CapturePortAction) and a.target == known_home
-        ]
-        if home_caps:
-            return home_caps[0]
     return safe[0]
 
 
@@ -733,7 +738,7 @@ def _flee_score(
 
 def _goal_tiles(engine, player_id: int, ship, cfg: TacticalConfig) -> List[Pos]:
     if ship.type is ShipType.LANDING:
-        return _landing_goal_tiles(engine, player_id)
+        return _landing_goal_tiles(engine, player_id, ship.position)
     if ship.type is ShipType.MERCHANT:
         port = _merchant_goal_port(engine, player_id, ship)
         return _water_neighbors(engine, port) if port is not None else []
@@ -751,23 +756,41 @@ def _goal_tiles(engine, player_id: int, ship, cfg: TacticalConfig) -> List[Pos]:
     return _explore_goal(engine, player_id)
 
 
-def _landing_goal_tiles(engine, player_id: int) -> List[Pos]:
-    """Approach tiles of *known* capturable ports, sighted enemy home first."""
-    known_home = _known_enemy_home(engine, player_id)
-    if known_home is not None:
-        tiles = _water_neighbors(engine, known_home)
-        if tiles:
-            return tiles
+def _path_dist_to_port(engine, origin: Pos, port: Pos) -> int:
+    """Water-path length from ``origin`` to a water tile adjacent to ``port``."""
+    neighbors = _water_neighbors(engine, port)
+    if not neighbors:
+        return _INF
+    if origin in neighbors:
+        return 0
+    if not engine.map.is_water(origin):
+        return _INF
+    dist = _water_dist_map(engine, [origin])
+    return min((dist.get(n, _INF) for n in neighbors), default=_INF)
+
+
+def _landing_goal_tiles(engine, player_id: int, origin: Pos) -> List[Pos]:
+    """Approach tiles of the nearest *known* capturable port by water path.
+
+    Any sighted enemy port (home or not) and any sighted neutral counts.
+    Falls back to Manhattan if no water path exists, and to far-side
+    exploration if no capturable port has been seen.
+    """
     ports = _known_capturable_ports(engine, player_id)
     if not ports:
         return _explore_goal(engine, player_id)
-    ports.sort(
-        key=lambda p: (engine.map.manhattan(engine.players[player_id].home_port, p), p)
+
+    def nearest(key) -> Pos:
+        return min(ports, key=lambda p: (key(p), p))
+
+    reachable = [p for p in ports if _path_dist_to_port(engine, origin, p) < _INF]
+    best = (
+        nearest(lambda p: _path_dist_to_port(engine, origin, p))
+        if reachable
+        else nearest(lambda p: engine.map.manhattan(origin, p))
     )
-    tiles: List[Pos] = []
-    for port in ports:
-        tiles.extend(_water_neighbors(engine, port))
-    return tiles
+    tiles = _water_neighbors(engine, best)
+    return tiles if tiles else _explore_goal(engine, player_id)
 
 
 def _known_capturable_ports(engine, player_id: int) -> List[Pos]:

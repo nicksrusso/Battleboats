@@ -35,8 +35,7 @@ import torch
 
 from battleboats.agents.random_agent import random_action
 from battleboats.agents.tactical import tactical_scripted_action
-from battleboats.core.actions import (AttackAction, BuildShipAction,
-                                      CapturePortAction)
+from battleboats.core.actions import AttackAction, BuildShipAction, CapturePortAction
 from battleboats.core.shipyard.ship_type import ShipType
 from battleboats.envs.action_masks import ActionMasks
 from battleboats.envs.battleboats_aec import BattleboatsAEC
@@ -578,7 +577,7 @@ def main() -> None:
             "buys": "per-game uniform build queue: sample types equally, buy the head when cash and a legal port allow it, otherwise save",
             "strength": "local power = sum strength * max(0, 1 - d/R) within R=max(6, attack_range); engage if ours > theirs * 1.2",
             "noise": "softmax over per-ship move scores with temperature 0.5",
-            "landings": "target capturable ports (enemy home first); always flee combat ships; never AttackAction",
+            "landings": "target the nearest known capturable port (any enemy or neutral, by water-path distance); always flee combat ships; never AttackAction",
             "fog": "same sightings as policy observation (known_enemy_ships / known_enemy_ports); stale last-seen positions decay over 4 turns",
         },
         "vs_v0.3.0": vs_summary,
