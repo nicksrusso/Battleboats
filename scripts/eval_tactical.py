@@ -579,7 +579,7 @@ def main() -> None:
             "strength": "local power = sum strength * max(0, 1 - d/R) within R=max(6, attack_range); engage if ours > theirs * 1.2",
             "noise": "softmax over per-ship move scores with temperature 0.5",
             "landings": "target capturable ports (enemy home first); always flee combat ships; never AttackAction",
-            "fog": "full information",
+            "fog": "same sightings as policy observation (known_enemy_ships / known_enemy_ports); stale last-seen positions decay over 4 turns",
         },
         "vs_v0.3.0": vs_summary,
         "scripted_vs_scripted": ss_summary,

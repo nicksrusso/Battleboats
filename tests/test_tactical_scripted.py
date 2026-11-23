@@ -282,3 +282,70 @@ def test_merchant_loads_at_satellite_and_unloads_at_home(tmp_path: Path) -> None
     assert loaded and unloaded
     assert ship.cargo == 0
     assert engine.players[0].cash > 0
+
+
+def test_decision_invariant_to_hidden_enemy(tmp_path: Path) -> None:
+    """Perturbing an unseen enemy ship must not change the chosen action."""
+    # Homes at (0,0) and (19,9), Manhattan 28, outside port detection (16).
+    engine = gameEngine(write_two_home_map(tmp_path / "fog.json", 20, 10))
+    engine.reset(seed=0)
+    engine.players[0].cash = 0
+    engine.players[1].cash = 0
+    engine._spawn_ship(0, ShipType.DESTROYER, (1, 0))
+    hidden = engine._spawn_ship(1, ShipType.BATTLESHIP, (19, 8))
+    engine._refresh_sightings()
+    assert engine.known_enemy_ships(0) == []
+    assert engine.known_enemy_ports(0) == []
+
+    visible = engine.clone()
+    perturbed = engine.clone()
+    ship = perturbed.ships[hidden.id]
+    new_pos = (18, 9)
+    perturbed.map.relocate_ship(ship.id, ship.position, new_pos)
+    ship.position = new_pos
+    perturbed._spawn_ship(1, ShipType.CARRIER, (18, 8))
+
+    a1 = _act(visible, 0, random.Random(0))
+    a2 = _act(perturbed, 0, random.Random(0))
+    assert a1 in visible.enumerate_legal(0)
+    assert a2 == a1
+    # And the perturbation stayed hidden.
+    assert hidden.id not in {s.ship_id for s in visible.known_enemy_ships(0)}
+    assert all(
+        s.position not in ((18, 9), (18, 8)) for s in perturbed.known_enemy_ships(0)
+    )
+
+
+def test_landing_explores_far_side_not_unsighted_home(tmp_path: Path) -> None:
+    """With no port sightings, a landing explores opposite our home, not the hidden enemy home."""
+    # P0 home (0, 4), P1 home (19, 0): far-side explore target is (19, 5), not (19, 0).
+    # Homes are 23 apart, so neither port is in the other's detection range.
+    path = tmp_path / "explore.json"
+    path.write_text(
+        '{"width": 20, "height": 10, "seed": 0,'
+        ' "land": [[0, 4], [19, 0]],'
+        ' "ports": {"0": [[0, 4]], "1": [[19, 0]]}}'
+    )
+    engine = gameEngine(str(path))
+    engine.reset(seed=0)
+    engine.players[0].cash = 0
+    engine.players[1].cash = 0
+    landing = engine._spawn_ship(0, ShipType.LANDING, (1, 4))
+    engine._refresh_sightings()
+    assert engine.known_enemy_ports(0) == []
+    action = _act(engine, 0, random.Random(0))
+    assert isinstance(action, MoveAction)
+    assert action.ship_id == landing.id
+    explore = (19, 5)
+    hidden_home = (19, 0)
+    before_explore = engine.map.manhattan(landing.position, explore)
+    after_explore = engine.map.manhattan(action.destination, explore)
+    before_home = engine.map.manhattan(landing.position, hidden_home)
+    after_home = engine.map.manhattan(action.destination, hidden_home)
+    assert after_explore < before_explore
+    # Must not be uniquely chasing the hidden home (a diagonal step toward
+    # (19, 5) also shrinks y-distance to (19, 0) by 0, or x by 1 equally).
+    # A greedy step toward (19, 0) would decrease y; toward (19, 5) decreases
+    # x and keeps y or moves y toward 5. From (1, 4) that's +x, not -y.
+    assert action.destination[1] >= landing.position[1]
+    assert after_home <= before_home or after_explore < before_explore
