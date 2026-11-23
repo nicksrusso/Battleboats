@@ -582,9 +582,14 @@ class PolicyNetwork(nn.Module):
         masks,
         skill_idx=None,
         globals=None,
+        return_factors: bool = False,
     ):
         """Re-score a BATCH of stored (asset, verb, target) triples under the
         CURRENT policy. Returns (joint_logprob (B,), entropy (B,), value (B,)).
+
+        With ``return_factors=True``, also returns a dict of per-factor entropies
+        (``ent_asset``, ``ent_verb``, ``ent_target``), each (B,). Used by the
+        hull-head entropy bonus in ``ppo_update``.
 
         This is the PPO workhorse: joint_logprob feeds the probability ratio
         r = exp(logprob_new - logprob_old) in the clipped objective; entropy feeds
@@ -654,6 +659,12 @@ class PolicyNetwork(nn.Module):
         joint_logprob = lp_a + lp_v + lp_t  # (B,)
         entropy = ent_a + ent_v + ent_t  # (B,)
         value = self.value(context)  # (B,)
+        if return_factors:
+            return joint_logprob, entropy, value, {
+                "ent_asset": ent_a,
+                "ent_verb": ent_v,
+                "ent_target": ent_t,
+            }
         return joint_logprob, entropy, value
 
 

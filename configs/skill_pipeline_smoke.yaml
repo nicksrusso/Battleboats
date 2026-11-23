@@ -22,6 +22,10 @@ ppo:
   epochs: 1
   minibatch_size: 8
   ent_coef: 0.02
+  # Extra bonus on the build_ship (hull) head, averaged only over build
+  # decisions so it is not diluted by asset/verb/move entropy. Joint
+  # ent_coef alone left that head at ~0 nats after the sandboxes.
+  hull_ent_coef: 0.05
 
 stages:
   - name: skills

@@ -21,7 +21,7 @@ from typing import Dict, Optional
 import torch
 
 from battleboats.training.ppo_buffer import RolloutBuffer
-from battleboats.training.policy import PolicyNetwork
+from battleboats.training.policy import VERB_TO_IDX, PolicyNetwork
 
 
 # Cap on log(pi_new / pi_old) when dual_clip is on (exp(20) ~ 4.9e8).
@@ -41,6 +41,7 @@ def ppo_update(
     device: Optional[torch.device] = None,
     target_kl: Optional[float] = None,
     dual_clip: Optional[float] = None,
+    hull_ent_coef: float = 0.0,
 ) -> Dict[str, float]:
     """Run K epochs of PPO on the data in ``buffer`` and update ``policy``.
 
@@ -70,19 +71,23 @@ def ppo_update(
             that cap the sample already has zero gradient (clipped for A > 0,
             dual-clipped for A < 0), so the cap only prevents inf/NaN.
             None = plain PPO clip, unchanged.
+        hull_ent_coef: extra entropy bonus on the build_ship (hull) head,
+            averaged only over build_ship rows so it is not diluted by
+            asset/verb/move entropy. 0 = off (default). The joint ``ent_coef``
+            term is unchanged.
 
     Returns:
         A dict of mean scalar metrics: "policy_loss", "value_loss", "entropy",
-        "approx_kl", "clip_frac", and "epochs_run".
+        "hull_entropy", "approx_kl", "clip_frac", and "epochs_run".
     """
 
-    policy_losses, value_losses, entropies = [], [], []
+    policy_losses, value_losses, entropies, hull_ents = [], [], [], []
     approx_kls, clip_fracs = [], []
     epochs_run = 0
 
     for epoch in range(epochs):
         for batch, masks in buffer.iter_minibatches(minibatch_size, device=device):
-            logp_new, entropy, value = policy.evaluate_actions(
+            logp_new, entropy, value, factors = policy.evaluate_actions(
                 batch["tokens"],
                 batch["pad_mask"],
                 batch["asset_idx"],
@@ -91,6 +96,7 @@ def ppo_update(
                 masks,
                 skill_idx=batch.get("skill_idx"),
                 globals=batch.get("globals"),
+                return_factors=True,
             )
             adv = batch["advantage"]
             # Population std (unbiased=False): a size-1 minibatch — which happens
@@ -112,7 +118,17 @@ def ppo_update(
             policy_loss = -obj.mean()
             value_loss = torch.nn.functional.mse_loss(value, batch["ret"])
             entropy_bonus = entropy.mean()
-            loss = policy_loss + vf_coef * value_loss - ent_coef * entropy_bonus
+            build = batch["verb_idx"] == VERB_TO_IDX["build_ship"]
+            if build.any():
+                hull_ent = factors["ent_target"][build].mean()
+            else:
+                hull_ent = entropy.new_zeros(())
+            loss = (
+                policy_loss
+                + vf_coef * value_loss
+                - ent_coef * entropy_bonus
+                - hull_ent_coef * hull_ent
+            )
             optimizer.zero_grad()
             loss.backward()
             torch.nn.utils.clip_grad_norm_(policy.parameters(), max_grad_norm)
@@ -123,6 +139,7 @@ def ppo_update(
                 policy_losses.append(policy_loss.item())
                 value_losses.append(value_loss.item())
                 entropies.append(entropy_bonus.item())
+                hull_ents.append(hull_ent.item())
                 approx_kls.append(approx_kl.item())
                 clip_fracs.append(clip_frac.item())
         epochs_run += 1
@@ -134,6 +151,7 @@ def ppo_update(
         "policy_loss": _mean(policy_losses),
         "value_loss": _mean(value_losses),
         "entropy": _mean(entropies),
+        "hull_entropy": _mean(hull_ents),
         "approx_kl": _mean(approx_kls),
         "clip_frac": _mean(clip_fracs),
         "epochs_run": epochs_run,
