@@ -19,6 +19,13 @@ Log-prob stored for PPO (``logprob``):
   ~1e-10, so the gradient on the explored sample is ~0: the policy cannot
   learn the hull it never picks. Kept as an option.
 
+With ``logprob: policy`` an explored hull can be stored with log pi_old of
+-100 or lower. If a later epoch moves that hull's probability, the PPO ratio
+explodes (approx_kl hit 1e15 in runs/selfplay_12x6_smoke_v5), and for A < 0
+the clipped surrogate is unbounded, which NaN'd the weights. Trainers turn on
+dual-clip PPO (``ppo.dual_clip``, default 3.0 here) when this mode is used
+(see ``ensure_dual_clip``).
+
 ``eps`` can anneal linearly from ``eps`` to ``eps_end`` over
 ``anneal_updates`` updates (0 = constant).
 """
@@ -110,3 +117,15 @@ def format_explore(stats: Dict[str, Any], eps: float) -> str:
     land_e = stats["explored_hulls"].get("landing", 0)
     land_p = stats["policy_hulls"].get("landing", 0)
     return f"explore=eps:{eps:.3f},{stats['explored']}/{stats['build']},landing:e{land_e}/p{land_p}"
+
+
+DEFAULT_DUAL_CLIP = 3.0
+
+
+def ensure_dual_clip(explore: "HullExplore", ppo) -> Optional[str]:
+    """policy-mode exploration needs dual-clip PPO; set it if the config did not.
+    Returns a log line when it changed ``ppo.dual_clip``."""
+    if explore.enabled and explore.logprob == "policy" and getattr(ppo, "dual_clip", None) is None:
+        ppo.dual_clip = DEFAULT_DUAL_CLIP
+        return f"ppo.dual_clip unset; using {DEFAULT_DUAL_CLIP} for logprob=policy hull exploration"
+    return None

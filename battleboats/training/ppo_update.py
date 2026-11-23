@@ -24,6 +24,9 @@ from battleboats.training.ppo_buffer import RolloutBuffer
 from battleboats.training.policy import PolicyNetwork
 
 
+# Cap on log(pi_new / pi_old) when dual_clip is on (exp(20) ~ 4.9e8).
+LOG_RATIO_MAX = 20.0
+
 def ppo_update(
     policy: PolicyNetwork,
     optimizer: torch.optim.Optimizer,
@@ -37,6 +40,7 @@ def ppo_update(
     max_grad_norm: float = 0.5,
     device: Optional[torch.device] = None,
     target_kl: Optional[float] = None,
+    dual_clip: Optional[float] = None,
 ) -> Dict[str, float]:
     """Run K epochs of PPO on the data in ``buffer`` and update ``policy``.
 
@@ -58,6 +62,14 @@ def ppo_update(
         max_grad_norm: global gradient-norm clip.
         device: device the minibatch tensors are collated onto.
         target_kl: optional early-stop threshold on the per-epoch approx KL.
+        dual_clip: optional dual-clip constant c > 1 (Ye et al. 2020). For
+            negative advantages the surrogate is floored at ``c * A``, so a
+            sample whose ratio has exploded (an explored hull stored with a
+            tiny log pi_old, see hull_explore.py) cannot dominate the loss.
+            The log-ratio is also capped at ``LOG_RATIO_MAX`` before exp; past
+            that cap the sample already has zero gradient (clipped for A > 0,
+            dual-clipped for A < 0), so the cap only prevents inf/NaN.
+            None = plain PPO clip, unchanged.
 
     Returns:
         A dict of mean scalar metrics: "policy_loss", "value_loss", "entropy",
@@ -88,10 +100,16 @@ def ppo_update(
             # writes NaN into every weight on optimizer.step(), surfacing as a
             # bogus "row with no legal option" assert on the next minibatch.
             adv = (adv - adv.mean()) / (adv.std(unbiased=False) + 1e-8)
-            ratio = torch.exp(logp_new - batch["logp_old"])
+            log_ratio = logp_new - batch["logp_old"]
+            if dual_clip is not None:
+                log_ratio = log_ratio.clamp(max=LOG_RATIO_MAX)
+            ratio = torch.exp(log_ratio)
             surr1 = ratio * adv
             surr2 = torch.clamp(ratio, 1 - clip_eps, 1 + clip_eps) * adv
-            policy_loss = -torch.min(surr1, surr2).mean()
+            obj = torch.min(surr1, surr2)
+            if dual_clip is not None:
+                obj = torch.where(adv < 0, torch.max(obj, dual_clip * adv), obj)
+            policy_loss = -obj.mean()
             value_loss = torch.nn.functional.mse_loss(value, batch["ret"])
             entropy_bonus = entropy.mean()
             loss = policy_loss + vf_coef * value_loss - ent_coef * entropy_bonus
@@ -100,7 +118,7 @@ def ppo_update(
             torch.nn.utils.clip_grad_norm_(policy.parameters(), max_grad_norm)
             optimizer.step()
             with torch.no_grad():
-                approx_kl = ((ratio - 1) - (logp_new - batch["logp_old"])).mean()
+                approx_kl = ((ratio - 1) - log_ratio).mean()
                 clip_frac = ((ratio - 1).abs() > clip_eps).float().mean()
                 policy_losses.append(policy_loss.item())
                 value_losses.append(value_loss.item())

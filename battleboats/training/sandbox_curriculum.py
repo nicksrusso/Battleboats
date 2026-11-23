@@ -47,6 +47,7 @@ from battleboats.training.ppo_buffer import RolloutBuffer
 from battleboats.training.hull_explore import (
     HullExplore,
     empty_explore_stats,
+    ensure_dual_clip,
     format_explore,
     merge_explore_stats,
     set_policy_explore,
@@ -467,6 +468,11 @@ def run_sandboxes(cfg: SandboxRunConfig, *, resume: bool = True) -> Dict:
     )
     if cfg.hull_explore.enabled:
         print(f"[sandboxes] hull exploration ON {cfg.hull_explore.describe()} (training episodes only)")
+        note = ensure_dual_clip(cfg.hull_explore, cfg.ppo)
+        if note:
+            print(f"[sandboxes] {note}")
+    if cfg.ppo.dual_clip is not None:
+        print(f"[sandboxes] ppo dual_clip={cfg.ppo.dual_clip}")
     try:
         while state["size_index"] < len(cfg.sizes):
             done, policy = _run_size(cfg, state, policy, envs, rng, device, logger)

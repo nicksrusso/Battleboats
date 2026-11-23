@@ -40,7 +40,7 @@ from battleboats.training.loop import PPOHyper, apply_ppo
 from battleboats.training.policy import PolicyNetwork, set_dropout
 from battleboats.training.ppo_buffer import RolloutBuffer
 from battleboats.training.fleet_starts import FleetStarts
-from battleboats.training.hull_explore import HullExplore, format_explore, set_policy_explore
+from battleboats.training.hull_explore import HullExplore, ensure_dual_clip, format_explore, set_policy_explore
 from battleboats.training.reward_shaping import COMPONENTS, RewardShaping
 from battleboats.training.selfplay_purchases import (
     aggregate_purchases,
@@ -295,6 +295,11 @@ def run_selfplay(cfg: SelfPlayConfig, *, resume: bool = True) -> Dict[str, Any]:
 
     if cfg.hull_explore.enabled:
         print(f"[selfplay] hull exploration ON {cfg.hull_explore.describe()} (learner build decisions only)")
+        note = ensure_dual_clip(cfg.hull_explore, cfg.ppo)
+        if note:
+            print(f"[selfplay] {note}")
+    if cfg.ppo.dual_clip is not None:
+        print(f"[selfplay] ppo dual_clip={cfg.ppo.dual_clip}")
 
     collector = make_collector(
         maps,
