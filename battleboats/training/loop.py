@@ -31,6 +31,12 @@ class PPOHyper:
     minibatch_size: int = 256
     max_grad_norm: float = 0.5
     target_kl: Optional[float] = None
+    # Dual-clip PPO constant (ppo_update.py). None = plain clip.
+    dual_clip: Optional[float] = None
+
+    def __post_init__(self) -> None:
+        if self.dual_clip is not None and float(self.dual_clip) <= 1.0:
+            raise ValueError("ppo.dual_clip must be > 1")
 
 
 def collect_episodes(
@@ -114,5 +120,6 @@ def apply_ppo(
         max_grad_norm=hyper.max_grad_norm,
         device=device,
         target_kl=hyper.target_kl,
+        dual_clip=hyper.dual_clip,
     )
     return metrics
