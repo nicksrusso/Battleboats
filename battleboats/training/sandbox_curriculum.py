@@ -347,6 +347,16 @@ class SandboxRunConfig:
     # merchant drill: an episode counts as a success when it hauls at least
     # this fraction of its max achievable gold (MerchantSandbox).
     merchant_success_frac: float = 0.5
+    # Potential-based progress shaping in the merchant drill (MerchantSandbox
+    # ``progress``): ~this fraction of each delivery's reward is paid along
+    # the way for closing water distance to the next delivery. 0 = off.
+    merchant_progress: float = 0.0
+    # Score the merchant success window with greedy (argmax) rollouts on the
+    # focus size, ``merchant_gate_episodes`` per update; training episodes
+    # stay sampled and do not enter the window. False = sampled training
+    # episodes fill the window (as other goal drills do).
+    merchant_greedy_gate: bool = True
+    merchant_gate_episodes: int = 4
     # Epsilon-uniform hull on training build decisions (hull_explore.py).
     # Never applied to eval episodes. eps 0 = off.
     hull_explore: HullExplore = field(default_factory=HullExplore)
@@ -377,6 +387,10 @@ class SandboxRunConfig:
             raise ValueError("max_updates_per_size must be >= 1")
         if not 0.0 < self.merchant_success_frac <= 1.0:
             raise ValueError("merchant_success_frac must be in (0, 1]")
+        if not 0.0 <= self.merchant_progress <= 1.0:
+            raise ValueError("merchant_progress must be in [0, 1]")
+        if self.merchant_gate_episodes < 1:
+            raise ValueError("merchant_gate_episodes must be >= 1")
         if self.landing_build_hulls not in ("all", "landing"):
             raise ValueError("landing_build_hulls must be 'all' or 'landing'")
         _check_decay(self.reward_decay, "reward_decay")
@@ -427,6 +441,9 @@ def load_sandbox_config(path: Path) -> SandboxRunConfig:
         allow_unmet=bool(raw.get("allow_unmet", False)),
         landing_build_hulls=str(raw.get("landing_build_hulls", "all")),
         merchant_success_frac=float(raw.get("merchant_success_frac", 0.5)),
+        merchant_progress=float(raw.get("merchant_progress", 0.0)),
+        merchant_greedy_gate=bool(raw.get("merchant_greedy_gate", True)),
+        merchant_gate_episodes=int(raw.get("merchant_gate_episodes", 4)),
         hull_explore=HullExplore.from_dict(raw.get("hull_explore")),
         save_every=int(raw.get("save_every", 10)),
         wandb=bool(raw.get("wandb", False)),
@@ -602,6 +619,12 @@ def _run_size(cfg, state, policy, envs, rng, device, logger):
                 if "merchant/deliveries" in metrics
                 else ""
             )
+            + (
+                f" merchant_greedy=deliv:{metrics['merchant/greedy_deliveries']:.1f}"
+                f",gold:{metrics['merchant/greedy_gold_frac']:.2f},succ:{metrics['merchant/greedy_success']:.2f}"
+                if "merchant/greedy_deliveries" in metrics
+                else ""
+            )
             + (f" {explore_line}" if explore_line else "")
         )
         logger.log(log_row, step=int(state.get("updates_total", 0)) + updates)
@@ -712,7 +735,7 @@ def _one_mixed_update(cfg, state, focus_size, policy, envs, rng, device, windows
                 hauls.append((float(env.deliveries), float(env.gold_frac), float(env.max_deliveries)))
             if role == "focus":
                 reward_window.append(raw)
-                if not _is_combat(skill):
+                if not _is_combat(skill) and not _greedy_gated(cfg, skill):
                     window.append(ok)
                     focus_hits.append(ok)
             episodes += 1
@@ -746,6 +769,14 @@ def _one_mixed_update(cfg, state, focus_size, policy, envs, rng, device, windows
         metrics[f"{skill}/episodes"] = float(state["episodes"].get(skill, 0))
         if focus_hits:
             metrics[f"{skill}/batch_success"] = sum(focus_hits) / len(focus_hits)
+        if _greedy_gated(cfg, skill):
+            greedy = _greedy_hauls(cfg, state, policy, _env(cfg, envs, skill, focus_size), focus_size, skill)
+            for ok_g, _d, _g in greedy:
+                window.append(ok_g)
+                focus_hits.append(ok_g)
+            metrics[f"{skill}/greedy_success"] = sum(g[0] for g in greedy) / len(greedy)
+            metrics[f"{skill}/greedy_deliveries"] = sum(g[1] for g in greedy) / len(greedy)
+            metrics[f"{skill}/greedy_gold_frac"] = sum(g[2] for g in greedy) / len(greedy)
         if hauls:
             metrics[f"{skill}/deliveries"] = sum(h[0] for h in hauls) / len(hauls)
             metrics[f"{skill}/gold_frac"] = sum(h[1] for h in hauls) / len(hauls)
@@ -777,6 +808,33 @@ def _one_mixed_update(cfg, state, focus_size, policy, envs, rng, device, windows
     ppo_metrics = apply_ppo(policy, optimizer, buffer, cfg.ppo, device)
     metrics.update(ppo_metrics)
     return metrics
+
+
+def _greedy_gated(cfg, skill: str) -> bool:
+    return skill == "merchant" and bool(cfg.merchant_greedy_gate)
+
+
+def _greedy_hauls(cfg, state, policy, env, size, skill) -> List[Tuple[float, float, float]]:
+    """Greedy (argmax) merchant rollouts on the focus size for the success
+    window. Not trained on; no hull exploration. Returns (ok, deliveries, gold_frac)."""
+    _turns, max_steps = horizon(skill, size)
+    out = []
+    saved = (
+        getattr(policy, "greedy", False),
+        getattr(policy, "hull_explore_eps", 0.0),
+        getattr(policy, "hull_explore_stats", None),
+    )
+    policy.greedy, policy.hull_explore_eps, policy.hull_explore_stats = True, 0.0, None
+    try:
+        for _ in range(cfg.merchant_gate_episodes):
+            k = int(state.get("greedy_counter", 0))
+            state["greedy_counter"] = k + 1
+            env.reset(seed=cfg.seed + 3_000_000 + k)
+            collect_trajectory(policy, None, env, 0, random.Random(k), max_steps=max_steps, use_env_reward=True)
+            out.append((1.0 if _succeeded(skill, env) else 0.0, float(env.deliveries), float(env.gold_frac)))
+    finally:
+        policy.greedy, policy.hull_explore_eps, policy.hull_explore_stats = saved
+    return out
 
 
 def _eval_rate(policy, env, cfg, size, skill) -> float:
@@ -814,6 +872,7 @@ def _env(cfg, envs, skill, size):
             decay_floor=decay.floor,
             landing_build_hulls=cfg.landing_build_hulls,
             merchant_success_frac=cfg.merchant_success_frac,
+            merchant_progress=cfg.merchant_progress,
         )
         # The pointer net has no skill embedding. Zero this so a task id is
         # not stored on the transition. Ship type still sits in the token.

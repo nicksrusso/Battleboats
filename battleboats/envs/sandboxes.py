@@ -8,7 +8,11 @@ are completion rewards scaled by ``turn_decay`` (game turns, not actions):
   the gold it made divided by this episode's max achievable gold (see
   ``merchant_max_deliveries``), so the episode return is the fraction of the
   best possible haul, ~0..1, and more round trips pay more. No turn decay.
-  Ship builds are not legal. Success = return >= ``success_frac``.
+  Ship builds are not legal. Success = gold fraction >= ``success_frac``.
+  Optional progress shaping (``progress``): a potential on the water
+  distance to the next delivery, so moving toward the current target
+  (satellite when empty, home when loaded) pays and moving away costs the
+  same; a full round trip nets 0.
 - builder: the decayed reward when a ship is bought. Cash starts at 0 and
   passive home-port income is removed, so the gold has to come from a merchant
   delivery. The buy itself is the real ``BuildShipAction``.
@@ -519,6 +523,23 @@ def water_leg(engine, a: Pos, b: Pos) -> Optional[int]:
     return None
 
 
+def water_distances(engine, port: Pos) -> Dict[Pos, int]:
+    """Moves from every reachable water tile to a water tile next to ``port``."""
+    m = engine.map
+    w, h = m.width, m.height
+    dist = {q: 0 for q in _neighbors(port, w, h) if m.is_water(q)}
+    frontier = list(dist)
+    while frontier:
+        nxt = []
+        for p in frontier:
+            for q in _neighbors(p, w, h):
+                if q not in dist and m.is_water(q):
+                    dist[q] = dist[p] + 1
+                    nxt.append(q)
+        frontier = nxt
+    return dist
+
+
 def merchant_max_deliveries(leg: int, turns: int, speed: int) -> int:
     """Upper bound on full deliveries in ``turns`` learner turns.
 
@@ -540,14 +561,39 @@ class MerchantSandbox(_Sandbox):
     best possible haul. The satellite starts with enough material for every
     one of those deliveries, so the stockpile never caps a good policy.
     Passive home income is not counted. Builds are not legal.
+
+    The satellite starts with 500 material (the pre-#31 drill and the scale
+    the warm start saw) and is topped back up to one full load after every
+    load, so the stockpile never caps a good policy and its observation
+    feature stays in range (it was up to 6000/1500 = 4.0 when the whole
+    episode's material sat there from turn 0).
+
+    ``progress`` > 0 adds potential-based shaping: potential
+    ``-coef * D`` with ``D`` = water moves to the next delivery (empty:
+    distance to the satellite + ``leg``; loaded: distance home) and
+    ``coef = progress / (speed * max_turns)``. One delivery's worth of
+    approach therefore pays about ``progress`` x that delivery's reward,
+    moving away costs the same as moving closer pays, and the potential
+    returns to its start value every round trip, so loops cannot farm it.
+    The shaping is part of the step reward; ``gold``/``gold_frac`` and
+    ``success`` never include it.
     """
 
     skill_name = "merchant"
+    START_STOCKPILE = 500
 
     def __init__(
-        self, map_json_path: str, *, width: int, height: int, max_turns: int = 40, success_frac: float = 0.5
+        self,
+        map_json_path: str,
+        *,
+        width: int,
+        height: int,
+        max_turns: int = 40,
+        success_frac: float = 0.5,
+        progress: float = 0.0,
     ) -> None:
         self.success_frac = float(success_frac)
+        self.progress = float(progress)
         self._reset_counters()
         super().__init__(map_json_path, width=width, height=height, max_turns=max_turns)
 
@@ -558,6 +604,11 @@ class MerchantSandbox(_Sandbox):
         self.leg = 0
         self.max_deliveries = 1
         self.max_gold = MERCHANT_CAPACITY * CASH_PER_MATERIAL
+        self.progress_total = 0.0
+        self._d_home: Dict[Pos, int] = {}
+        self._d_sat: Dict[Pos, int] = {}
+        self._satellite: Optional[Pos] = None
+        self._coef = 0.0
 
     @property
     def gold_frac(self) -> float:
@@ -607,7 +658,12 @@ class MerchantSandbox(_Sandbox):
         self.leg = int(leg)
         self.max_deliveries = merchant_max_deliveries(leg, self.max_turns, BASE_STATS[ShipType.MERCHANT].speed)
         self.max_gold = self.max_deliveries * MERCHANT_CAPACITY * CASH_PER_MATERIAL
-        self.engine.ports[satellite].stockpile = self.max_deliveries * MERCHANT_CAPACITY
+        self._satellite = satellite
+        self.engine.ports[satellite].stockpile = self.START_STOCKPILE
+        speed = BASE_STATS[ShipType.MERCHANT].speed
+        self._d_home = water_distances(self.engine, learner.home_port)
+        self._d_sat = water_distances(self.engine, satellite)
+        self._coef = self.progress / float(speed * self.max_turns)
         spawn = self._spawn_reaching(learner.home_port, satellite)
         if spawn is None:
             raise RuntimeError("MerchantSandbox: no water next to home")
@@ -628,22 +684,52 @@ class MerchantSandbox(_Sandbox):
                 cargo += ship.cargo
         return int(cargo)
 
+    def to_next_delivery(self) -> Optional[int]:
+        """Water moves to the next delivery (see class docstring); None if no merchant."""
+        assert self.engine is not None
+        for sid in self.engine.players[0].owned_ship_ids:
+            ship = self.engine.ships[sid]
+            if ship.type is ShipType.MERCHANT:
+                pos = ship.position
+                if ship.cargo > 0:
+                    return self._d_home.get(pos, 0)
+                return self._d_sat.get(pos, 0) + self.leg
+        return None
+
+    def _potential(self) -> float:
+        if self._coef <= 0.0:
+            return 0.0
+        d = self.to_next_delivery()
+        return 0.0 if d is None else -self._coef * float(d)
+
+    def _top_up(self) -> None:
+        assert self.engine is not None and self._satellite is not None
+        port = self.engine.ports[self._satellite]
+        if port.stockpile < MERCHANT_CAPACITY:
+            port.stockpile = MERCHANT_CAPACITY
+
     def _capture_reward_state(self) -> Dict:
         assert self.engine is not None
-        return {"cargo": self._cargo(), "turn": int(self.engine.turn)}
+        return {"cargo": self._cargo(), "turn": int(self.engine.turn), "phi": self._potential()}
 
     def _reward_after_step(self, agent, action, pre) -> Dict[str, float]:
         rewards = {a: 0.0 for a in self.agents}
         cargo = self._cargo()
         before = int(pre.get("cargo", 0))
+        reward = 0.0
         if cargo > before:
             self.loads += 1
+            self._top_up()
         elif cargo < before and isinstance(action, MerchantUnloadAction):
             prev = self.gold_frac
             self.deliveries += 1
             self.gold += (before - cargo) * CASH_PER_MATERIAL
-            # Capped so the episode return never exceeds 1.
-            rewards[self._agent_name(0)] = self.gold_frac - prev
+            # Capped so the gold part of the return never exceeds 1.
+            reward += self.gold_frac - prev
+        shaped = self._potential() - float(pre.get("phi", 0.0))
+        self.progress_total += shaped
+        reward += shaped
+        rewards[self._agent_name(0)] = reward
         return rewards
 
     def _is_terminated(self) -> bool:
@@ -1300,6 +1386,7 @@ def make_sandbox(
     decay_floor: float = 0.0,
     landing_build_hulls: str = "all",
     merchant_success_frac: float = 0.5,
+    merchant_progress: float = 0.0,
 ):
     """Build the sandbox named by ``skill`` (see ``SKILL_NAMES``).
 
@@ -1308,7 +1395,12 @@ def make_sandbox(
     """
     if skill == "merchant":
         env = MerchantSandbox(
-            map_json_path, width=width, height=height, max_turns=max_turns, success_frac=merchant_success_frac
+            map_json_path,
+            width=width,
+            height=height,
+            max_turns=max_turns,
+            success_frac=merchant_success_frac,
+            progress=merchant_progress,
         )
     elif skill == "builder":
         env = ShipBuildSandbox(map_json_path, width=width, height=height, max_turns=max_turns)
