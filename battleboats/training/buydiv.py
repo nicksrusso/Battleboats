@@ -325,6 +325,97 @@ def summarize_records(records: Sequence[Dict[str, Any]]) -> Dict[str, Any]:
     }
 
 
+def mean_ci(values: Sequence[float], z: float = 1.96) -> Dict[str, float]:
+    """Wald 95% CI for a mean (normal; fine at n≈100)."""
+    xs = [float(v) for v in values]
+    n = len(xs)
+    if n == 0:
+        return {
+            "n": 0,
+            "mean": 0.0,
+            "std": 0.0,
+            "sem": 0.0,
+            "lo": 0.0,
+            "hi": 0.0,
+            "min": 0.0,
+            "max": 0.0,
+        }
+    mean = sum(xs) / n
+    if n == 1:
+        return {
+            "n": 1,
+            "mean": mean,
+            "std": 0.0,
+            "sem": 0.0,
+            "lo": mean,
+            "hi": mean,
+            "min": mean,
+            "max": mean,
+        }
+    var = sum((x - mean) ** 2 for x in xs) / (n - 1)
+    std = math.sqrt(var)
+    sem = std / math.sqrt(n)
+    half = float(z) * sem
+    return {
+        "n": n,
+        "mean": mean,
+        "std": std,
+        "sem": sem,
+        "lo": mean - half,
+        "hi": mean + half,
+        "min": min(xs),
+        "max": max(xs),
+    }
+
+
+def summarize_validation(records: Sequence[Dict[str, Any]]) -> Dict[str, Any]:
+    """Unmasked sandbox report: counts, gold share, diversity CI, min/max types."""
+    base = summarize_records(records)
+    scores = [float(r["diversity"]) for r in records]
+    ci = mean_ci(scores)
+    buys = base["buy_counts"]
+    totals = [int(buys[name]) for name in BUYDIV_HULLS]
+    if totals:
+        tmin = min(totals)
+        tmax = max(totals)
+        min_type = [name for name in BUYDIV_HULLS if buys[name] == tmin]
+        max_type = [name for name in BUYDIV_HULLS if buys[name] == tmax]
+    else:
+        tmin = tmax = 0
+        min_type = max_type = []
+    mean_count = (sum(totals) / len(BUYDIV_HULLS)) if BUYDIV_HULLS else 0.0
+    # Per-episode spread across the eight types (zeros included).
+    ep_mins: List[int] = []
+    ep_maxs: List[int] = []
+    for rec in records:
+        vec = [int(rec["purchases"].get(name, 0)) for name in BUYDIV_HULLS]
+        ep_mins.append(min(vec) if vec else 0)
+        ep_maxs.append(max(vec) if vec else 0)
+    ratio = (float(tmax) / float(tmin)) if tmin > 0 else float("inf")
+    # Roughly even: every type is within a factor of 2 of the mean count,
+    # and no type is missing.
+    even = (
+        bool(totals)
+        and tmin > 0
+        and all(0.5 * mean_count <= c <= 2.0 * mean_count for c in totals)
+    )
+    base.update(
+        {
+            "diversity": ci,
+            "type_counts_min": tmin,
+            "type_counts_max": tmax,
+            "type_counts_min_types": min_type,
+            "type_counts_max_types": max_type,
+            "type_counts_ratio_max_min": ratio if math.isfinite(ratio) else None,
+            "type_counts_mean": mean_count,
+            "episode_type_min": mean_ci(ep_mins) if ep_mins else mean_ci([]),
+            "episode_type_max": mean_ci(ep_maxs) if ep_maxs else mean_ci([]),
+            "roughly_even": even,
+        }
+    )
+    return base
+
+
 def _env_for(cfg: BuyDivConfig, width: int, height: int):
     from battleboats.envs.sandboxes import BuyDiversitySandbox
 

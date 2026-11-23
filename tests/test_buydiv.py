@@ -185,3 +185,31 @@ def test_sum_counts() -> None:
     assert merged["landing"] == 3
     assert merged["destroyer"] == 4
     assert merged["carrier"] == 0
+
+
+def test_summarize_validation_ci_and_minmax() -> None:
+    from battleboats.training.buydiv import mean_ci, summarize_validation
+
+    even = {name: 2 for name in BUYDIV_HULLS}
+    recs = [
+        {
+            "purchases": dict(even),
+            "diversity": 1.0,
+            "reward_sum": 1.25,
+            "n_decisions": 10,
+            "gold_share": {},
+        }
+        for _ in range(20)
+    ]
+    summary = summarize_validation(recs)
+    assert summary["episodes"] == 20
+    assert summary["diversity"]["mean"] == pytest.approx(1.0)
+    assert summary["diversity"]["lo"] == pytest.approx(1.0)
+    assert summary["type_counts_min"] == 40
+    assert summary["type_counts_max"] == 40
+    assert summary["type_counts_ratio_max_min"] == pytest.approx(1.0)
+    assert summary["roughly_even"] is True
+
+    ci = mean_ci([0.0, 1.0, 0.5, 0.5])
+    assert ci["mean"] == pytest.approx(0.5)
+    assert ci["lo"] < 0.5 < ci["hi"]
