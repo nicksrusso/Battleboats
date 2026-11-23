@@ -487,7 +487,6 @@ def test_goal_gate_reopens_when_the_live_window_drops(tmp_path: Path) -> None:
         success_threshold=0.80,
         window=4,
         min_updates=1,
-        merchant_gate="success",  # this test is about the live success window
     )
     state = {
         "updates_this_size": 5,
