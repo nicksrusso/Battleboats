@@ -3,20 +3,20 @@
 from __future__ import annotations
 
 import random
-from collections import Counter
+from collections import Counter, deque
 from pathlib import Path
 
-from battleboats.agents.tactical import (TacticalConfig, choose_build_action,
+from battleboats.agents.tactical import (BUILDABLE_TYPES, TacticalConfig,
+                                         build_queue_for, choose_build_action,
                                          choose_builder_target,
-                                         inverse_cost_type_weights,
-                                         local_combat_power, should_engage,
+                                         local_combat_power,
+                                         sample_build_queue, should_engage,
                                          tactical_scripted_action)
 from battleboats.core.actions import (AttackAction, BuildPortAction,
                                       BuildShipAction, CapturePortAction,
                                       EndTurnAction, MerchantLoadAction,
                                       MerchantUnloadAction, MoveAction)
 from battleboats.core.gameEngine import gameEngine
-from battleboats.core.shipyard.ship_data import BASE_STATS
 from battleboats.core.shipyard.ship_type import ShipType
 from battleboats.envs.skill_maps import (write_full_map, write_merchant_map,
                                          write_two_home_map)
@@ -163,38 +163,86 @@ def test_landing_never_issues_attack_action(tmp_path: Path) -> None:
     assert not isinstance(action, AttackAction)
 
 
-def test_buy_weights_are_inverse_cost() -> None:
-    types = tuple(ShipType)
-    weights = inverse_cost_type_weights(types)
-    # Equal expected gold: weight * cost is constant.
-    spends = [weights[t] * BASE_STATS[t].cost for t in types]
-    assert max(spends) - min(spends) < 1e-12
-    # Cheap hulls must be more probable than expensive ones.
-    assert (
-        weights[ShipType.DESTROYER]
-        > weights[ShipType.CRUISER]
-        > weights[ShipType.CARRIER]
-    )
-    assert (
-        weights[ShipType.MERCHANT]
-        == weights[ShipType.DESTROYER]
-        == weights[ShipType.SUBMARINE]
-    )
+def test_build_queue_samples_are_uniform() -> None:
+    types = tuple(BUILDABLE_TYPES)
+    rng = random.Random(0)
+    counts = Counter(sample_build_queue(rng, 8000, types))
+    assert set(counts) == set(types)
+    expected = 8000 / len(types)
+    # Equal probability, not equal spend. 20% is plenty for 8000 draws.
+    for t, n in counts.items():
+        assert abs(n - expected) / expected < 0.20, (t, n, expected, dict(counts))
+    # Cheap and expensive hulls must be about equally frequent.
+    assert abs(counts[ShipType.DESTROYER] - counts[ShipType.CARRIER]) / expected < 0.20
 
 
-def test_choose_build_samples_inverse_cost() -> None:
-    # One legal buy per type, all affordable. Empirical spend should be even.
+def test_buy_follows_queue_order(tmp_path: Path) -> None:
+    # Two ports a side so later buys still have a spawn tile after the
+    # first ships occupy the water next to home (bought ships can't move).
+    engine = gameEngine(write_full_map(tmp_path / "q.json", 6, 6, seed=0))
+    engine.reset(seed=0)
+    engine.players[0].cash = 1000
+    engine.players[1].cash = 0
+    planned = [ShipType.LANDING, ShipType.DESTROYER, ShipType.MERCHANT]
+    queue = build_queue_for(engine, 0)
+    queue.clear()
+    queue.extend(planned)
+    rng = random.Random(0)
+    bought = []
+    for expected in planned:
+        action = _act(engine, 0, rng)
+        assert isinstance(action, BuildShipAction)
+        assert action.ship_type is expected
+        assert action in engine.enumerate_legal(0)
+        engine.step(action)
+        bought.append(action.ship_type)
+    assert bought == planned
+
+
+def test_saves_when_short_of_queue_head(tmp_path: Path) -> None:
+    engine = gameEngine(write_two_home_map(tmp_path / "q.json", 5, 3))
+    engine.reset(seed=0)
+    # Carrier costs 250; 200 can still buy a destroyer/merchant/sub, but must not.
+    engine.players[0].cash = 200
+    engine.players[1].cash = 0
+    queue = build_queue_for(engine, 0)
+    queue.clear()
+    queue.extend([ShipType.CARRIER, ShipType.DESTROYER])
+    legal = engine.enumerate_legal(0)
+    assert any(
+        isinstance(a, BuildShipAction) and a.ship_type is ShipType.DESTROYER
+        for a in legal
+    )
+    assert not any(
+        isinstance(a, BuildShipAction) and a.ship_type is ShipType.CARRIER
+        for a in legal
+    )
+    action = _act(engine, 0, random.Random(0))
+    assert action in legal
+    assert not isinstance(action, BuildShipAction)
+    assert isinstance(action, EndTurnAction)
+    assert engine.players[0].cash == 200
+    assert list(queue)[:2] == [ShipType.CARRIER, ShipType.DESTROYER]
+
+
+def test_skips_unbuildable_queue_head() -> None:
+    # Carrier is not available on this "map"; the destroyer behind it is.
     options = [
         BuildShipAction(port=(0, 0), spawn_position=(1, 0), ship_type=t)
-        for t in ShipType
+        for t in (ShipType.DESTROYER, ShipType.MERCHANT)
     ]
-    rng = random.Random(0)
-    counts = Counter(choose_build_action(options, rng).ship_type for _ in range(8000))
-    spends = {t: counts[t] * BASE_STATS[t].cost for t in ShipType}
-    mean = sum(spends.values()) / len(spends)
-    # Within 20% of the mean is plenty for 8000 inverse-cost draws.
-    for t, spend in spends.items():
-        assert abs(spend - mean) / mean < 0.20, (t, spend, mean, dict(counts))
+    queue = deque([ShipType.CARRIER, ShipType.DESTROYER, ShipType.MERCHANT])
+    action = choose_build_action(
+        engine=None,
+        player_id=0,
+        options=options,
+        rng=random.Random(0),
+        queue=queue,
+        types=(ShipType.DESTROYER, ShipType.MERCHANT),
+    )
+    assert isinstance(action, BuildShipAction)
+    assert action.ship_type is ShipType.DESTROYER
+    assert list(queue) == [ShipType.MERCHANT]
 
 
 def test_merchant_loads_at_satellite_and_unloads_at_home(tmp_path: Path) -> None:

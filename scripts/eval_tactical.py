@@ -45,6 +45,7 @@ from battleboats.training.checkpoints import load_checkpoint
 from battleboats.training.selfplay import load_selfplay_config
 from battleboats.training.selfplay_purchases import hull_name
 
+
 def wilson(k: int, n: int, z: float = 1.96) -> Tuple[float, float]:
     if n <= 0:
         return (0.0, 0.0)
@@ -574,7 +575,7 @@ def main() -> None:
         "config": str(args.config),
         "seed": args.seed,
         "design": {
-            "buys": "sample type with P proportional to 1/cost among legal builds; expected gold per type is even",
+            "buys": "per-game uniform build queue: sample types equally, buy the head when cash and a legal port allow it, otherwise save",
             "strength": "local power = sum strength * max(0, 1 - d/R) within R=max(6, attack_range); engage if ours > theirs * 1.2",
             "noise": "softmax over per-ship move scores with temperature 0.5",
             "landings": "target capturable ports (enemy home first); always flee combat ships; never AttackAction",
