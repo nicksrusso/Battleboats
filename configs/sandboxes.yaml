@@ -84,9 +84,17 @@ reward_decay:
 # merchant drill: fixed length (max(12, 4*size) turns, no early end). Each home
 # unload pays gold / this episode's max achievable gold (full 100-material
 # round trips on the shortest water leg), so the return is ~0..1 and more
-# round trips pay more. Builds are masked. An episode is a success when it
-# hauls >= merchant_success_frac of that max; the drill gates on the usual
-# success window (success_threshold over `window` episodes).
+# round trips pay more. Builds are masked.
+# Gate (merchant_gate: plateau): after combat_min_episodes on-size episodes,
+# the mean gold fraction of the last `window` on-size episodes must be >=
+# merchant_min_gold AND the smoothed per-update gold fraction must have
+# plateaued (plateau_updates / plateau_threshold, as for combat). A fixed
+# per-episode bar stalled: short legs (1 tile) need ~1.5 deliveries a turn,
+# and 8x8 sat at a 0.58-0.70 window for 0.5-of-max (runs/sandboxes_v006_frac050).
+# merchant_gate: success uses the success window with
+# success = gold >= merchant_success_frac of max (still logged as the rate).
+merchant_gate: plateau
+merchant_min_gold: 0.4
 merchant_success_frac: 0.5
 
 sizes: [3, 4, 5, 6, 8, 10]

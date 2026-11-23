@@ -172,3 +172,38 @@ def test_config_key(tmp_path):
     p.write_text(yaml.safe_dump(raw))
     with pytest.raises(ValueError):
         load_sandbox_config(p)
+
+
+# ---------------------------------------------------------------- gate
+from battleboats.training.sandbox_curriculum import SandboxRunConfig, _drill_done, merchant_plateau_done
+
+_GATE = dict(min_gold=0.4, min_episodes=32, plateau_updates=10, plateau_threshold=0.02)
+
+
+def test_plateau_gate_needs_episodes_floor_and_flat_curve():
+    flat = [0.6] * 40
+    assert merchant_plateau_done(episodes=64, gold_window=[0.6] * 64, gold_trace=flat, **_GATE)
+    assert not merchant_plateau_done(episodes=20, gold_window=[0.6] * 20, gold_trace=flat, **_GATE)
+    # single-haul policy: flat but far below the floor
+    assert not merchant_plateau_done(episodes=64, gold_window=[0.08] * 64, gold_trace=[0.08] * 40, **_GATE)
+    rising = [0.4 + 0.01 * i for i in range(40)]
+    assert not merchant_plateau_done(episodes=64, gold_window=[0.7] * 64, gold_trace=rising, **_GATE)
+
+
+def test_drill_done_routes_merchant_by_gate(tmp_path):
+    cfg = SandboxRunConfig(run_dir=tmp_path, skills=["merchant"], sizes=[3])
+    assert cfg.merchant_gate == "plateau"
+    state = {"updates_this_size": 50, "episodes": {"merchant": 60}, "combat_passed": {},
+             "gold_windows": {"merchant": [0.7] * 64}, "gold_trace": {"merchant": [0.7] * 40},
+             "reward_trace": {}, "value_trace": {}}
+    # success window is empty, the plateau gate still passes and latches
+    assert _drill_done(cfg, state, "merchant", window=[])
+    assert state["combat_passed"]["merchant"] is True
+    state["gold_windows"]["merchant"] = [0.0] * 64
+    assert _drill_done(cfg, state, "merchant", window=[])  # latched for this size
+    cfg2 = SandboxRunConfig(run_dir=tmp_path, skills=["merchant"], sizes=[3], merchant_gate="success")
+    state2 = dict(state, combat_passed={})
+    assert not _drill_done(cfg2, state2, "merchant", window=[0.0] * 64)
+    assert _drill_done(cfg2, state2, "merchant", window=[1.0] * 64)
+    with pytest.raises(ValueError):
+        SandboxRunConfig(run_dir=tmp_path, skills=["merchant"], sizes=[3], merchant_gate="x")
