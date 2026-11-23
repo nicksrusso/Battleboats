@@ -70,6 +70,8 @@ reward_shaping:
     port_capture: 0.1    # per enemy non-home port captured
     kill: 0.02           # zero-sum: +0.02 x cost/250 per enemy ship sunk, -0.02 x cost/250 per own ship lost
     landing_progress: 0.2  # potential: -0.2 x (water distance of nearest landing ship to enemy home) / (home-to-home distance)
+    landing_buy: 0.1     # per landing ship bought: 0.1 x 0.5^(landing ships alive before the buy)
+  landing_buy_decay: 0.5 # 1st 0.1, 2nd 0.05, 3rd 0.025, ...; a replacement for a sunk one pays 0.1 again
   caps:                  # per player per game, per component
     build: 0.2
     load: 0.05
@@ -78,6 +80,7 @@ reward_shaping:
     port_capture: 0.2
     kill: 0.3            # gains capped at +0.3 and losses at -0.3 per game
     landing_progress: 0.3  # running net sum clipped to [-0.3, 0.3]
+    landing_buy: 0.3     # at most 0.3 per game (3 full-price buys); also counts toward total_cap
   total_cap: 0.4         # positive non-kill shaping only; kill has its own cap
 
 # Landing progress is potential-based: phi = -0.2 x min(D, norm) / norm, where

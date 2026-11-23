@@ -272,6 +272,7 @@ def run_selfplay(cfg: SelfPlayConfig, *, resume: bool = True) -> Dict[str, Any]:
         print(
             "[selfplay] reward shaping ON "
             + " ".join(f"{k}={rs.weight(k)}" for k in COMPONENTS)
+            + f" landing_buy_decay={rs.landing_buy_decay}"
             + f" caps={rs.caps} total_cap={rs.total_cap}"
         )
     if cfg.fleet_starts.prob > 0:
@@ -373,6 +374,7 @@ def _train_loop(cfg, policy, optimizer, snapshots, collector, state, state_path,
             "ppo_s": ppo_s,
             # Learner purchases made during this update, finished games or not.
             **purchase_mix(aggregate_purchases([{"purchases": collected.purchases}])),
+            "landing_bought": int(collected.purchases.get("landing", 0)),
             **{f"shape_{k}": v for k, v in collected.shaping.items()},
             **{f"ppo_{k}": v for k, v in metrics.items()},
         }
@@ -409,7 +411,7 @@ def _train_loop(cfg, policy, optimizer, snapshots, collector, state, state_path,
                 else ""
             )
             + (f" mindist={row['min_fleet_dist_mean']:.1f}" if dists else "")
-            + f" land=alive:{row['landing_alive_mean']:.2f}"
+            + f" land=bought:{row['landing_bought']},alive:{row['landing_alive_mean']:.2f}"
             + f",mind:{collected.landing['min_dist'] if collected.landing['min_dist'] is not None else '-'}"
             + f",cap=L{collected.landing['learner_capture_attempts']}/{collected.landing['learner_captures']}"
             f"/{collected.landing['learner_home_captures']}"
