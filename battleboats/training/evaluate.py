@@ -1,4 +1,4 @@
-"""Play a checkpoint against random or the scripted baseline.
+"""Play a checkpoint against random, the greedy scripted baseline, or the tactical scripted agent.
 
 Used by ``scripts/eval_agent.py``. Not a league evaluator: one policy, one
 opponent kind, a win/loss/draw count.
@@ -11,6 +11,7 @@ from pathlib import Path
 from typing import Dict, Optional
 
 from battleboats.agents.scripted import scripted_action
+from battleboats.agents.tactical import tactical_scripted_action
 from battleboats.envs.battleboats_aec import BattleboatsAEC
 from battleboats.envs.skill_maps import write_full_map
 from battleboats.training.checkpoints import load_checkpoint
@@ -34,10 +35,13 @@ def evaluate_checkpoint(
 ) -> Dict[str, float]:
     """Return win/loss/draw rates for ``checkpoint`` over ``games`` matches.
 
-    ``opponent`` is ``random`` or ``scripted``. The learner alternates seats.
+    ``opponent`` is ``random``, ``scripted`` (greedy baseline), or ``tactical``.
+    The learner alternates seats.
     """
-    if opponent not in ("random", "scripted"):
-        raise ValueError(f"opponent must be random or scripted, got {opponent!r}")
+    if opponent not in ("random", "scripted", "tactical"):
+        raise ValueError(
+            f"opponent must be random, scripted, or tactical, got {opponent!r}"
+        )
     dev = resolve_device(device)
     policy, _ = load_checkpoint(checkpoint, dev)
     policy.eval()
@@ -50,7 +54,12 @@ def evaluate_checkpoint(
     rng = random.Random(seed)
     wins = losses = draws = 0
     steps = 0
-    action_fn = scripted_action if opponent == "scripted" else None
+    if opponent == "scripted":
+        action_fn = scripted_action
+    elif opponent == "tactical":
+        action_fn = tactical_scripted_action
+    else:
+        action_fn = None
     for g in range(games):
         env.map_json_path = maps[g % len(maps)]
         env.reset(seed=seed + g)

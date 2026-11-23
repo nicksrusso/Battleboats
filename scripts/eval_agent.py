@@ -1,4 +1,4 @@
-"""Play a checkpoint against the random or scripted baseline.
+"""Play a checkpoint against the random, scripted, or tactical baseline.
 
     poetry run python scripts/eval_agent.py \\
         --checkpoint runs/selfplay/latest.pt --opponent scripted --games 40
@@ -16,7 +16,9 @@ from battleboats.training.evaluate import evaluate_checkpoint
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--checkpoint", type=Path, required=True)
-    parser.add_argument("--opponent", choices=("random", "scripted"), default="random")
+    parser.add_argument(
+        "--opponent", choices=("random", "scripted", "tactical"), default="random"
+    )
     parser.add_argument("--games", type=int, default=20)
     parser.add_argument("--width", type=int, default=8)
     parser.add_argument("--height", type=int, default=8)
