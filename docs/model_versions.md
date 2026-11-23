@@ -24,6 +24,7 @@ experiment, not model versions; there is no tagged v0.2.1 model.
 | v0.1.1 | `runs/checkpoints/v0.1.1_cb0a0c7.pt` | cb0a0c7 | 16x8 self-play from v0.1.0, 700 updates. Old rules. |
 | v0.2.0 | `runs/checkpoints/v0.2.0_955f221.pt` | 955f221 | 16x8 self-play from v0.1.0, 700 updates, under the #38 rules (bought ships wait a turn; captured/built ports wait a turn). |
 | v0.3.0 | `runs/checkpoints/v0.3.0_26348ee.pt` | 26348ee | Mixed 16x8+20x10 self-play from v0.2.0, tagged at update 800 (the run's final u1000 collapsed and is not this version). Same #38 rules; ship_lost / draw penalty / distance-scaled landing_progress. |
+| v0.4.0 | `runs/checkpoints/v0.4.0_8ad2530.pt` | 8ad2530 | Behavior clone of the #46 tactical scripted agent (fog, uniform queue, nearest known capturable port). From-scratch v0.3.0 architecture; value head trained for a PPO warm start. Same #38 rules. |
 
 ## v0.1.0 (baseline)
 
@@ -67,3 +68,16 @@ experiment, not model versions; there is no tagged v0.2.1 model.
 - Self-play: `map_gen.min_port_enemy_home_water: 7`, land_fraction 0.02, hull_ent_coef 0.05, hull exploration eps 0.15, fleet starts prob 0.333, 7 workers x 8 games, 2048 decisions per update.
 - Training through update 800: 4684 games, W/L/D 2404/1727/553, mean turn 34.7, draw 11.8%, landing 27.9% of buys. Updates 701-800: 522 games, W/L/D 291/189/42, mean turn 32.1, draw 8.0%, entropy 2.28, hull-head entropy 0.80, landing 23.2% of buys.
 - Head-to-head vs v0.2.0 (200 games, alternating seats, on this run's 16x8+20x10 pool): 129/67/4, win rate 64.5% (Wilson 95% [57.7, 70.8]), score 0.655. As seat 0: 72/26/2; as seat 1: 57/41/2. Per size: 16x8 67/34/3, 20x10 62/33/1.
+
+## v0.4.0
+
+- Source: `runs/bc_tactical_v040/train/best.pt`, trained 2026-11-23 08:43-09:15 CST. Official copy at `runs/checkpoints/v0.4.0_8ad2530.pt`.
+- sha256 `101c699c71322d0126cfd57ee76e4019f03cf32772c2668cda1a387dc00152d1`.
+- Lineage: behavior clone of `tactical_scripted_action` at c1b9124 (#46). Initialized from scratch (PyTorch default) with the v0.3.0 pointer architecture (token_dim 76, d_model 64, 2 layers, 4 heads, globals_dim 8). Same #38 rules as v0.2.0 / v0.3.0.
+- Code: 8ad2530 (#48). Harvest and trainer live in `scripts/harvest_tactical.py` and `scripts/train_tactical_bc.py`.
+- Harvest: 2600 games on the v0.2.2 16x8+20x10 pool (2000 tactical self-play, 400 vs v0.3.0, 200 vs random). Only tactical-side actions are labels (1,482,329 kept; 29 MerchantLoadAction roundtrip mismatches dropped, 0.002%). 90/10 split by game (2340/260).
+- Training: 8 epochs, Adam 1e-3, batch 256, CPU. Masked cross-entropy plus value-head MSE (`vf_coef` 0.5) on discounted terminal returns `G_t = z * 0.99**(K-1-t)`, `z ∈ {+1, -1, 0}`. Train set was stratified to 250,000 rows (all rare verbs kept; move/endturn downsampled). The value head is in the official `save_checkpoint` state_dict, so `load_checkpoint` / PPO warm-start works with no special casing.
+- Held-out agreement (full val, 150,295 rows, natural verb mix): joint 44.8%, asset 78.3%, verb 84.2%, target 50.5%. By group: capture 99.7%, unload 99.9%, load 91.1%, build 78.5%, attack 76.0%, end-turn 58.1%, move 39.9%, buy 17.4%. Buy agreement is low because the teacher's uniform per-game build queue is hidden state, not in the observation. Value loss 0.0548.
+- Eval, 100 games vs each opponent (25 per BC seat × size) plus 40 BC self-play, v0.2.2 pool, seed 0:
+  - Greedy (argmax): vs tactical 1/52/47, score 0.245; vs v0.3.0 4/24/72, score 0.400; self-play 0/0/40. Buys collapse to destroyers (e.g. 3043 destroyers vs 27 landings against v0.3.0).
+  - Sampled (`policy.act`, as PPO and the opponent pool use it): vs tactical 24/28/48, win rate 24.0% (Wilson 95% [16.7, 33.2]), score 0.480; vs v0.3.0 11/50/39, win rate 11.0% (Wilson 95% [6.3, 18.6]), score 0.305 (the teacher was 29/46/25, score 0.415); self-play 9/6/25 (seat 0), score 0.538, 25 timeouts. All eight hulls appear in the buy mix; vs tactical the clone bought 98 landings (45 port captures, 24 home) and still overweighted destroyer / merchant / submarine.

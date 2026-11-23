@@ -23,7 +23,7 @@ win rate. "Score" counts a draw as half a win.
 | v0.1.1 | cb0a0c7 | 16x8 self-play from v0.1.0, old rules | vs v0.1.0 121/58/21 (old rules); also beat v0.2.0 124/68/8 under the #38 rules |
 | v0.2.0 | 955f221 | First 16x8 self-play under the #38 rules, from v0.1.0 | vs v0.1.0 108/70/22; lost to v0.1.1 68/124/8 (both under #38 rules) |
 | v0.3.0 | 26348ee | Mixed 16x8+20x10 self-play from v0.2.0, tagged at update 800 | vs v0.2.0 129/67/4 (current best tagged trained policy) |
-| v0.4.0 | — | Behavior clone of the latest tactical scripted agent | **In progress.** No tag, weights, or eval yet. |
+| v0.4.0 | 8ad2530 | Behavior clone of the #46 tactical scripted agent | Sampled vs tactical 24/28/48 (score 0.480); vs v0.3.0 11/50/39 (score 0.305). Use sampled play, not greedy. |
 
 An earlier sandbox-warmup tag, [v0.0.1](model_versions.md), exists at f4f7bef
 (`runs/checkpoints/v0.0.1_f4f7bef.pt`). It is not part of this self-play series.
@@ -96,9 +96,19 @@ An earlier sandbox-warmup tag, [v0.0.1](model_versions.md), exists at f4f7bef
   - It is focused on winning: landings close on the enemy home at +1.22 tiles/turn, and it captures 0.75 enemy ports per game (P(capture | able) 98.7%). It does not expand with builders.
 - **Recommended use:** Current best tagged trained policy under the #38 rules, on 16x8 and 20x10. Use it as the default learned opponent and as a warm start. Do not use `runs/selfplay_mixed_v0.2.2/latest.pt` or `update_1000.pt` in its place.
 
-## v0.4.0 (in progress)
+## v0.4.0
 
-**Placeholder.** v0.4.0 is planned as a behavior clone of the latest tactical scripted agent (uniform build queue, fog of war, landing ships target the nearest known capturable port; PRs #44–#46). There is no tag, no `runs/checkpoints/v0.4.0_*.pt`, and no eval for it yet. The scripted teacher itself is described below; against v0.3.0 that teacher went 29/46/25.
+- **Tag / commit:** annotated tag `v0.4.0` → 8ad2530 (`8ad25302417e8ea7810914853a8a44a5c9c980f7`, PR #48).
+- **Weights:** `runs/checkpoints/v0.4.0_8ad2530.pt`, sha256 prefix `101c699c`. Config and metadata sit beside it (`.config.yaml`, `.json`). Same bytes as `runs/bc_tactical_v040/train/best.pt`.
+- **How it was produced:** Behavior clone of `tactical_scripted_action` at c1b9124 (#46: uniform queue, fog of war, landings target the nearest known capturable port). Initialized **from scratch** with the v0.3.0 pointer architecture. Harvested 2600 games on the v0.2.2 16x8+20x10 pool (2000 tactical self-play, 400 vs v0.3.0, 200 vs random); only tactical-side actions were labels (1,482,329 kept; 29 MerchantLoadAction roundtrip mismatches dropped, 0.002%). Trained 2026-11-23 08:43–09:15 CST, 8 epochs, Adam 1e-3, batch 256, CPU. Same **#38 rules** as v0.3.0.
+- **Value head / PPO warm start:** the official checkpoint includes the value head, trained with `vf_coef` 0.5 MSE on discounted terminal returns `G_t = z * 0.99**(K-1-t)` (`z` = +1 / −1 / 0 for the acting tactical player). `load_checkpoint` reconstructs the full `PolicyNetwork`, so PPO can set `init_checkpoint` to these weights and Adam will see every parameter, value head included. Saved `model_config` dropout is 0.1 (the training value); `model.eval()` disables it, and PPO can `set_dropout` as it did for v0.3.0.
+- **Held-out agreement** (full val, 150,295 rows, natural verb mix, from `runs/bc_tactical_v040/train/metrics.json`): joint 44.8%, asset 78.3%, verb 84.2%, target 50.5%. By group: capture 99.7%, unload 99.9%, load 91.1%, build 78.5%, attack 76.0%, end-turn 58.1%, move 39.9%, **buy 17.4%**. Buy agreement is low because the teacher's uniform per-game build queue is hidden state, not in the observation. Value loss 0.0548.
+- **Headline eval** (v0.2.2 pool, 25 games per BC seat × size at N=100, 40 self-play, seed 0):
+  - **Greedy (argmax):** vs tactical **1/52/47**, score 0.245; vs v0.3.0 **4/24/72**, score 0.400; self-play **0/0/40**. Buys collapse to a modal hull (vs v0.3.0: destroyer 3043, landing 27). This is expected: argmax on a nearly uniform teacher buy policy picks one type.
+  - **Sampled (`policy.act`, `torch.manual_seed(0)` — how PPO and the opponent pool will use it):** vs tactical **24/28/48**, win rate 24.0% (Wilson 95% [16.7, 33.2]), score 0.480. vs v0.3.0 **11/50/39**, win rate 11.0% (Wilson 95% [6.3, 18.6]), score 0.305 (the #46 teacher was 29/46/25, score 0.415). Self-play 9/6/25 (seat 0), score 0.538, 25 timeouts.
+  - Sampled buy mix vs tactical (2,872 buys): destroyer 764, merchant 698, submarine 665, cruiser 312, battleship 135, carrier 101, builder 99, landing 98. All eight types appear, but destroyer / merchant / submarine are overweight relative to the uniform teacher. Landings: 98 bought, 27 killed, 71 survived, 45 port captures (24 home). vs v0.3.0: 95 landings bought, 20 port captures (11 home).
+  - Sources: `runs/checkpoints/v0.4.0_8ad2530.json`, `runs/eval/bc_v0.4.0/summary.json`, `runs/eval/bc_v0.4.0_sampled/summary.json`, `runs/bc_tactical_v040/train/metrics.json`.
+- **Recommended use:** PPO warm start and a sampled opponent-pool member, not a stronger policy than v0.3.0 or the #46 teacher. Always use sampled `policy.act` (or PPO rollouts), not greedy `argmax`.
 
 ---
 
@@ -135,9 +145,9 @@ to sit on a nearby captured port instead of pushing on, which is why draws
 went up. Builders are bought often and usually build when they reach a legal
 tile (88%), but only about 11% of them ever get there.
 
-**Recommended use:** #46 is the current scripted teacher (and the planned
-v0.4.0 clone target). For a closer match to v0.3.0, the #45 home-first fog
-agent is the stronger measured opponent.
+**Recommended use:** #46 is the current scripted teacher and the agent cloned
+as v0.4.0. For a closer match to v0.3.0, the #45 home-first fog agent is the
+stronger measured opponent.
 
 ---
 
