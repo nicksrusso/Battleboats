@@ -153,12 +153,24 @@ def test_success_threshold_and_curriculum_gate(tmp_path):
     assert env.success and _succeeded("merchant", env)
 
 
-def test_satellite_stock_covers_every_delivery(tmp_path):
+def test_satellite_stock_starts_in_range_and_tops_up(tmp_path):
     env = _env(tmp_path, size=10, seed=3)
     home = env.engine.players[0].home_port
     sat = next(p for p in env.engine.players[0].owned_port_positions if p != home)
-    assert env.engine.ports[sat].stockpile == env.max_deliveries * 100
-    assert env.max_gold == env.max_deliveries * 200
+    assert env.engine.ports[sat].stockpile == MerchantSandbox.START_STOCKPILE
+    seen = []
+    raw = env.step
+
+    def step(a):
+        raw(a)
+        seen.append(env.engine.ports[sat].stockpile)
+
+    env.step = step
+    _drive(env)
+    # every load is full (top-up), and the observed stockpile stays near the
+    # warm-start scale instead of max_deliveries * 100 (up to 6000)
+    assert env.gold == env.deliveries * 200 and env.deliveries > 5
+    assert min(seen) >= 100 and max(seen) <= 500 + 25 * env.max_turns
 
 
 def test_config_key(tmp_path):
@@ -172,3 +184,109 @@ def test_config_key(tmp_path):
     p.write_text(yaml.safe_dump(raw))
     with pytest.raises(ValueError):
         load_sandbox_config(p)
+
+
+# ---------------------------------------------------------------- progress shaping
+def _progress_env(tmp_path, progress, size=6, seed=2):
+    path = write_two_home_map(tmp_path / f"p_{size}.json", size, size)
+    turns, _ = horizon("merchant", size)
+    env = make_sandbox("merchant", str(path), width=size, height=size, max_turns=turns, merchant_progress=progress)
+    env.reset(seed=seed)
+    return env
+
+
+def test_progress_shaping_is_potential_based(tmp_path):
+    env = _progress_env(tmp_path, 0.25)
+    coef = 0.25 / (3 * env.max_turns)
+    d0 = env.to_next_delivery()
+    total = _drive(env)
+    d1 = env.to_next_delivery()
+    # telescopes: return = gold fraction + coef * (D_start - D_end)
+    assert total == pytest.approx(env.gold_frac + coef * (d0 - d1), abs=1e-9)
+    assert env.progress_total == pytest.approx(coef * (d0 - d1), abs=1e-9)
+    assert abs(env.progress_total) <= coef * (2 * env.leg + 3 * 8)
+    off = _progress_env(tmp_path, 0.0)
+    assert _drive(off) == pytest.approx(off.gold_frac, abs=1e-12) and off.progress_total == 0.0
+
+
+def test_progress_toward_pays_away_costs_and_loops_net_zero(tmp_path):
+    env = _progress_env(tmp_path, 0.25, size=8, seed=4)
+    coef = 0.25 / (3 * env.max_turns)
+    home = env.engine.players[0].home_port
+    sat = next(p for p in env.engine.players[0].owned_port_positions if p != home)
+    to_sat = _water_dist(env, sat)
+    ship = next(env.engine.ships[s] for s in env.engine.players[0].owned_ship_ids)
+    legal = _legal(env)
+    here = to_sat[ship.position]
+    toward = [a for a in legal if isinstance(a, MoveAction) and to_sat.get(a.destination, 99) < here]
+    away = [a for a in legal if isinstance(a, MoveAction) and to_sat.get(a.destination, -1) > here]
+    assert toward
+    start = ship.position
+    env.step(toward[0])
+    assert env.rewards["player_0"] == pytest.approx(coef)
+    back = next(a for a in _legal(env) if isinstance(a, MoveAction) and a.destination == start)
+    env.step(back)
+    assert env.rewards["player_0"] == pytest.approx(-coef)  # the loop nets 0
+    if away:
+        env.step(away[0])
+        assert env.rewards["player_0"] == pytest.approx(-coef)
+
+
+def test_delivery_step_stays_clearly_positive_with_shaping(tmp_path):
+    env = _progress_env(tmp_path, 0.25, size=8, seed=4)
+    home = env.engine.players[0].home_port
+    rewards = []
+    raw = env.step
+
+    def step(a):
+        raw(a)
+        if isinstance(a, MerchantUnloadAction):
+            rewards.append(env.rewards["player_0"])
+
+    env.step = step
+    _drive(env)
+    per_delivery = 1.0 / env.max_deliveries
+    # The unload step pays the delivery minus the potential jump to the next
+    # delivery (larger when unloading on a home tile far from the satellite),
+    # so it stays positive but below a full delivery.
+    assert rewards and all(0.0 < r < per_delivery for r in rewards)
+
+
+# ---------------------------------------------------------------- greedy + gate
+def test_greedy_policy_is_deterministic_argmax(tmp_path):
+    import random as _random
+    import torch
+    from battleboats.envs import observation as obs
+    from battleboats.training.policy import PolicyNetwork
+    from battleboats.training.rollout import collect_trajectory
+
+    torch.manual_seed(0)
+    net = PolicyNetwork(token_dim=obs.TOKEN_DIM, d_model=32, nhead=2, num_layers=1, dim_feedforward=64, dropout=0.0)
+    net.eval()
+    net.greedy = True
+    runs = []
+    for k in range(2):
+        env = _env(tmp_path, size=4, seed=1)
+        torch.manual_seed(100 + k)  # different RNG; greedy must not care
+        traj, _ = collect_trajectory(net, None, env, 0, _random.Random(k), max_steps=200, use_env_reward=True)
+        runs.append([(t.asset_idx, t.verb_idx, t.target_idx) for t in traj])
+    assert runs[0] == runs[1]
+
+
+def test_greedy_gate_fills_window_not_training_episodes(tmp_path):
+    from battleboats.training.sandbox_curriculum import run_sandboxes
+
+    raw = yaml.safe_load((ROOT / "configs" / "sandboxes_smoke.yaml").read_text())
+    raw.update(run_dir=str(tmp_path / "sb"), init_checkpoint=None, skills=["merchant"], sizes=[3],
+               max_updates_per_size=2, min_updates=1, allow_unmet=True, decisions_per_update=64,
+               eval_episodes=1, wandb=False, merchant_greedy_gate=True, merchant_gate_episodes=3,
+               merchant_progress=0.25)
+    (tmp_path / "sb.yaml").write_text(yaml.safe_dump(raw))
+    cfg = load_sandbox_config(tmp_path / "sb.yaml")
+    assert cfg.merchant_greedy_gate and cfg.merchant_gate_episodes == 3 and cfg.merchant_progress == 0.25
+    run_sandboxes(cfg)
+    import json as _json
+    rows = [_json.loads(l) for l in (tmp_path / "sb" / "history.jsonl").read_text().splitlines()]
+    assert rows and all("merchant/greedy_success" in r for r in rows)
+    state = _json.loads((tmp_path / "sb" / "state.json").read_text())
+    assert state["greedy_counter"] == 3 * len(rows)

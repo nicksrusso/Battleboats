@@ -264,6 +264,15 @@ class PolicyNetwork(nn.Module):
         self.hull_explore_mode = "policy"
         self.hull_explore_stats = None
         self.last_hull_explored = False
+        # Greedy (argmax) action selection for evaluation rollouts. Plain
+        # attribute, off by default; training rollouts always sample.
+        self.greedy = False
+
+    def _pick(self, dist) -> torch.Tensor:
+        """Sample from ``dist``, or take its argmax when ``self.greedy``."""
+        if getattr(self, "greedy", False):
+            return dist.probs.argmax(dim=-1)
+        return dist.sample()
 
     def _explore_hull(self, dist, legal: torch.Tensor, t: torch.Tensor):
         """Epsilon-uniform over legal hulls. ``legal`` (R, K) bool, ``t`` (R,)
@@ -418,7 +427,7 @@ class PolicyNetwork(nn.Module):
         # -inf so they can't be chosen.
         asset_logits = self.head_asset(context, embeddings, masks.asset)
         asset_dist = masked_categorical(asset_logits)  # logits -> distribution
-        asset_idx = asset_dist.sample()  # (B,) chosen entity index
+        asset_idx = self._pick(asset_dist)  # (B,) chosen entity index
         lp_a = asset_dist.log_prob(asset_idx)  # (B,) log π(asset | s)
         # Gather the chosen entity's embedding to FEED the next head (prefix-feeding).
         # arange(B) pairs each board b with ITS choice asset_idx[b] -> row b, col idx.
@@ -432,7 +441,7 @@ class PolicyNetwork(nn.Module):
         verb_cond = torch.cat([context, e_asset], dim=-1)  # (B, 2*d_model)
         verb_logits = self.head_verb(verb_cond, masks.verbs_for(asset_idx))
         verb_dist = masked_categorical(verb_logits)
-        verb_idx = verb_dist.sample()  # (B,) chosen verb index
+        verb_idx = self._pick(verb_dist)  # (B,) chosen verb index
         lp_v = verb_dist.log_prob(verb_idx)  # (B,) log π(verb | s, asset)
         e_verb = self.verb_embedding(verb_idx)  # (B, d_model) verb as a vector
 
@@ -454,7 +463,7 @@ class PolicyNetwork(nn.Module):
             # `embeddings`; the categorical sub-heads ignore them and use target_cond.
             target_logits = self.head_target(verb_name, target_cond, target_mask, embeddings)
             target_dist = masked_categorical(target_logits)
-            target_idx = target_dist.sample()  # (B,)
+            target_idx = self._pick(target_dist)  # (B,)
             lp_t = target_dist.log_prob(target_idx)  # (B,) log π(target | s, a, v)
             self.last_hull_explored = False
             if verb_name == "build_ship":
@@ -507,14 +516,14 @@ class PolicyNetwork(nn.Module):
         for i, row in enumerate(asset_rows):
             asset_mask[i, : row.shape[0]] = row
         asset_dist = masked_categorical(self.head_asset(context, embeddings, asset_mask))
-        asset_idx = asset_dist.sample()
+        asset_idx = self._pick(asset_dist)
         lp_a = asset_dist.log_prob(asset_idx)
         e_asset = embeddings[torch.arange(B, device=dev), asset_idx]
         assets = asset_idx.tolist()
 
         verb_mask = torch.cat([m.verbs_for(a) for m, a in zip(masks_list, assets)], dim=0).to(dev)
         verb_dist = masked_categorical(self.head_verb(torch.cat([context, e_asset], dim=-1), verb_mask))
-        verb_idx = verb_dist.sample()
+        verb_idx = self._pick(verb_dist)
         lp_v = verb_dist.log_prob(verb_idx)
         e_verb = self.verb_embedding(verb_idx)
         verbs = verb_idx.tolist()
@@ -539,7 +548,7 @@ class PolicyNetwork(nn.Module):
             r = torch.tensor(rows, dtype=torch.long, device=dev)
             sub_emb = embeddings[r] if verb_name == "attack" else None
             dist = masked_categorical(self.head_target(verb_name, target_cond[r], sub_mask, sub_emb))
-            t = dist.sample()
+            t = self._pick(dist)
             if verb_name == "build_ship":
                 t, lp, explored = self._explore_hull(dist, sub_mask, t)
                 hull_explored[r] = explored

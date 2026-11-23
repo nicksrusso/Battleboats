@@ -88,6 +88,16 @@ reward_decay:
 # hauls >= merchant_success_frac of that max; the drill gates on the usual
 # success window (success_threshold over `window` episodes).
 merchant_success_frac: 0.5
+# The success window is filled by greedy (argmax) rollouts on the focus size,
+# merchant_gate_episodes per update; training stays sampled. Sampled play on
+# 1-tile legs makes ~10 of 48 possible deliveries where argmax makes 47-48.
+merchant_greedy_gate: true
+merchant_gate_episodes: 4
+# Potential-based progress shaping: ~25% of each delivery's reward is paid
+# along the way for closing water distance to the next delivery (satellite
+# when empty, home when loaded); moving away costs the same, and a full round
+# trip nets 0, so loops cannot farm it. 0 turns it off.
+merchant_progress: 0.25
 
 sizes: [3, 4, 5, 6, 8, 10]
 skills:
