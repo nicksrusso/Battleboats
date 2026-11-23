@@ -104,6 +104,11 @@ class SelfPlayConfig:
     # Per-event shaped rewards (battleboats/training/reward_shaping.py). Off
     # unless the config's reward_shaping block sets enabled: true.
     reward_shaping: RewardShaping = field(default_factory=RewardShaping)
+    # Terminal reward for a timeout draw (no winner at the turn cap or the
+    # step cap). 0 keeps the old +1/-1/0 terminals. Applied in the collector
+    # to the learner's last decision (both sides would get the same value).
+    # Win/draw statistics still treat these games as draws.
+    draw_reward: float = 0.0
     # Random equal-cost fleets for both sides on a fraction of games
     # (battleboats/training/fleet_starts.py). prob 0 = normal starts only.
     fleet_starts: FleetStarts = field(default_factory=FleetStarts)
@@ -115,6 +120,15 @@ class SelfPlayConfig:
         self.run_dir = Path(self.run_dir)
         if self.init_checkpoint is not None:
             self.init_checkpoint = Path(self.init_checkpoint)
+
+
+def _draw_reward(raw: Dict[str, Any]) -> float:
+    """``reward.draw`` in a self-play YAML; default 0, unknown keys error."""
+    block = dict(raw.get("reward") or {})
+    unknown = set(block) - {"draw"}
+    if unknown:
+        raise ValueError(f"reward: unknown keys {sorted(unknown)}")
+    return float(block.get("draw", 0.0) or 0.0)
 
 
 def load_selfplay_config(path: Path) -> SelfPlayConfig:
@@ -153,6 +167,7 @@ def load_selfplay_config(path: Path) -> SelfPlayConfig:
         reward_shaping=RewardShaping.from_dict(raw.get("reward_shaping")),
         fleet_starts=FleetStarts.from_dict(raw.get("fleet_starts")),
         hull_explore=HullExplore.from_dict(raw.get("hull_explore")),
+        draw_reward=_draw_reward(raw),
     )
 
 
@@ -326,6 +341,8 @@ def run_selfplay(cfg: SelfPlayConfig, *, resume: bool = True) -> Dict[str, Any]:
             print(f"[selfplay] {note}")
     if cfg.ppo.dual_clip is not None:
         print(f"[selfplay] ppo dual_clip={cfg.ppo.dual_clip}")
+    if cfg.draw_reward:
+        print(f"[selfplay] reward.draw={cfg.draw_reward}")
 
     collector = make_collector(
         maps,
@@ -341,6 +358,7 @@ def run_selfplay(cfg: SelfPlayConfig, *, resume: bool = True) -> Dict[str, Any]:
         lam=cfg.ppo.lam,
         shaping=cfg.reward_shaping,
         fleet_starts=cfg.fleet_starts,
+        draw_reward=cfg.draw_reward,
     )
     try:
         return _train_loop(cfg, policy, optimizer, snapshots, collector, state, state_path, latest, history, device, use_wandb)

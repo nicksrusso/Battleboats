@@ -25,7 +25,16 @@ pays for what the engine actually did:
   by diffing the player's fleet at its next decision (``settle_losses``) and
   charged to the player's previous transition, the one whose outcome included
   the opponent's reply. A loss before the player's first decision has no
-  transition to land on and is dropped.
+  transition to land on and is dropped. ``shape_kill`` is the learner's net
+  (gains minus these losses), so it can go negative even though each sink is
+  zero-sum between the two trackers.
+- ``ship_lost``: an extra, one-sided penalty when one of your ships is sunk,
+  ``-ship_lost * cost / 250``, settled at the same time as the kill loss.
+  It is not paid to the attacker, so a 1-for-1 trade is net ``-ship_lost *
+  cost / 250`` for each side (plus the already-zero-sum kill terms). Default
+  0 leaves old configs unchanged. A builder spent on a port is not a loss.
+  Capped on its own (``caps.ship_lost`` is a maximum magnitude); not part of
+  ``total_cap``.
 - ``landing_progress`` (potential-based): with D the water (BFS) distance
   from the nearest of the player's landing ships to the enemy home port
   (1 = adjacent, can capture), and ``norm`` the water distance from the
@@ -45,8 +54,9 @@ pays for what the engine actually did:
   full weight, the second half of it (decay 0.5), and so on. A replacement
   for a sunk ship is worth as much as the first again. That replacement is the
   only repeatable part; its per-game cap and ``total_cap`` bound it, and the
-  lost ship's kill penalty and landing_progress drop are charged separately.
-  It counts toward ``total_cap`` like the other positive non-kill components.
+  lost ship's kill penalty, optional ship_lost penalty, and landing_progress
+  drop are charged separately. It counts toward ``total_cap`` like the other
+  positive non-kill components.
 
 Exploit guards: each port position pays ``port_build``/``port_capture`` at
 most once per player per game (so a port traded back and forth pays once),
@@ -74,7 +84,7 @@ from battleboats.core.gameEngine import MERCHANT_CAPACITY
 from battleboats.core.shipyard.ship_data import BASE_STATS
 from battleboats.core.shipyard.ship_type import ShipType
 
-COMPONENTS = ("build", "load", "unload", "port_build", "port_capture", "kill", "landing_progress", "landing_buy")
+COMPONENTS = ("build", "load", "unload", "port_build", "port_capture", "kill", "ship_lost", "landing_progress", "landing_buy")
 MAX_HULL_COST = float(max(s.cost for s in BASE_STATS.values()))
 
 
@@ -91,6 +101,7 @@ class RewardShaping:
     port_build: float = 0.0
     port_capture: float = 0.0
     kill: float = 0.0
+    ship_lost: float = 0.0
     landing_progress: float = 0.0
     landing_buy: float = 0.0
     # landing_buy pays landing_buy * landing_buy_decay ** (landing ships alive).
@@ -98,7 +109,8 @@ class RewardShaping:
     # Per-game cap on each component's summed reward (None = no cap).
     caps: Dict[str, Optional[float]] = field(default_factory=dict)
     # Cap on one player's summed positive non-kill shaping in one game
-    # (None = no cap). Kill has its own symmetric cap in ``caps``.
+    # (None = no cap). Kill has its own symmetric cap in ``caps``; ship_lost
+    # has a separate magnitude cap and is excluded from this total.
     total_cap: Optional[float] = None
 
     @classmethod
@@ -135,6 +147,7 @@ class ShapingTracker:
         self.ports_paid: Set[Tuple[str, Tuple[int, int]]] = set()
         self.kill_gain = 0.0
         self.kill_loss = 0.0
+        self.ship_lost_paid = 0.0
         self.fleet: Optional[Dict[int, Any]] = None
         self.phi: Optional[float] = None
         self.phi0: Optional[float] = None
@@ -209,9 +222,13 @@ class ShapingTracker:
         on the opponent's turn, landing progress). Credit them to that
         decision's transition."""
         out: Dict[str, float] = {}
-        loss = self.settle_losses(engine, pid)
-        if loss:
-            out["kill"] = loss
+        lost = self._consume_lost(engine, pid)
+        kill = self._penalize_losses("kill", self.cfg.kill, lost, "kill_loss")
+        if kill:
+            out["kill"] = kill
+        ship_lost = self._penalize_losses("ship_lost", self.cfg.ship_lost, lost, "ship_lost_paid")
+        if ship_lost:
+            out["ship_lost"] = ship_lost
         if self.cfg.enabled and self.cfg.landing_progress:
             new = self.potential(engine, pid)
             if self.phi is not None:
@@ -232,30 +249,49 @@ class ShapingTracker:
     def scores_kills(self) -> bool:
         return self.cfg.enabled and self.cfg.kill != 0.0
 
+    @property
+    def tracks_fleet(self) -> bool:
+        return self.cfg.enabled and (self.cfg.kill != 0.0 or self.cfg.ship_lost != 0.0)
+
     def mark_fleet(self, engine, pid: int) -> None:
         """Remember ``pid``'s fleet (call after its own step and at game start)."""
-        if self.scores_kills:
+        if self.tracks_fleet:
             self.fleet = {sid: engine.ships[sid].type for sid in engine.players[pid].owned_ship_ids}
 
-    def settle_losses(self, engine, pid: int) -> float:
-        """Negative kill reward for ships ``pid`` lost since ``mark_fleet``.
-        Re-marks the fleet. Returns 0 when nothing was lost."""
-        if not self.scores_kills:
-            return 0.0
+    def _consume_lost(self, engine, pid: int) -> list:
+        """Ship types lost since ``mark_fleet``. Re-marks the fleet."""
+        if not self.tracks_fleet:
+            return []
         before = self.fleet
         self.mark_fleet(engine, pid)
         if before is None:
+            return []
+        return [t for sid, t in before.items() if sid not in self.fleet]
+
+    def _penalize_losses(self, name: str, coef: float, lost, paid_attr: str) -> float:
+        """Apply a cost-scaled loss penalty for ``lost`` types. Returns the
+        (negative) reward, or 0 if nothing is charged."""
+        if not lost or not self.cfg.enabled or coef == 0.0:
             return 0.0
-        lost = [t for sid, t in before.items() if sid not in self.fleet]
-        if not lost:
-            return 0.0
-        penalty = sum(self.cfg.kill * BASE_STATS[t].cost / MAX_HULL_COST for t in lost)
-        cap = self.cfg.caps.get("kill")
+        penalty = sum(coef * BASE_STATS[t].cost / MAX_HULL_COST for t in lost)
+        cap = self.cfg.caps.get(name)
+        paid = float(getattr(self, paid_attr))
         if cap is not None:
-            penalty = min(penalty, max(0.0, cap - self.kill_loss))
-        self.kill_loss += penalty
-        self.totals["kill"] -= penalty
-        return -penalty
+            penalty = min(penalty, max(0.0, cap - paid))
+        setattr(self, paid_attr, paid + penalty)
+        if penalty:
+            self.totals[name] -= penalty
+            return -penalty
+        return 0.0
+
+    def settle_losses(self, engine, pid: int) -> float:
+        """Negative kill reward for ships ``pid`` lost since ``mark_fleet``.
+        Also applies ``ship_lost`` when that weight is set. Re-marks the fleet.
+        Returns the kill component only (0 when nothing was lost or kill is off)."""
+        lost = self._consume_lost(engine, pid)
+        kill = self._penalize_losses("kill", self.cfg.kill, lost, "kill_loss")
+        self._penalize_losses("ship_lost", self.cfg.ship_lost, lost, "ship_lost_paid")
+        return kill
 
     def snapshot(self, engine, pid: int, action) -> Optional[Dict[str, Any]]:
         """State needed to score ``action`` (taken by ``pid``), read before the step."""
@@ -324,6 +360,8 @@ class ShapingTracker:
         if cap is not None:
             value = min(value, max(0.0, cap - self.totals[name]))
         if self.cfg.total_cap is not None:
-            positive = sum(v for k, v in self.totals.items() if k not in ("kill", "landing_progress"))
+            positive = sum(
+                v for k, v in self.totals.items() if k not in ("kill", "ship_lost", "landing_progress")
+            )
             value = min(value, max(0.0, self.cfg.total_cap - positive))
         return value
