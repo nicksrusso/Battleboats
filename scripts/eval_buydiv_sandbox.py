@@ -31,6 +31,7 @@ from battleboats.training.buydiv import (BUYDIV_HULLS, BuyDivConfig, _env_for,
                                          run_unmasked_eval,
                                          summarize_validation)
 from battleboats.training.checkpoints import load_checkpoint
+from battleboats.training.manifest import append_eval
 from battleboats.training.policy import set_dropout
 
 
@@ -149,6 +150,17 @@ def main() -> None:
         }
     (out / "summary.json").write_text(json.dumps(short, indent=2))
     (out / "episodes.json").write_text(json.dumps(payload, indent=2))
+    append_eval(
+        short.get("checkpoint") or short,
+        checkpoint=args.checkpoint,
+        name=args.label,
+    )
+    if args.baseline is not None:
+        append_eval(
+            short.get("baseline") or {},
+            checkpoint=args.baseline,
+            name=args.baseline_label,
+        )
     print(f"wrote {out / 'summary.json'}", flush=True)
 
 

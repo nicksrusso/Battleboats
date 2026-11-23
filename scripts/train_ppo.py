@@ -33,6 +33,7 @@ from battleboats.training.policy import PolicyNetwork
 from battleboats.training.ppo_buffer import RolloutBuffer
 from battleboats.training.ppo_update import ppo_update
 from battleboats.training.rollout import collect_trajectory, compute_gae
+from battleboats.training.manifest import ManifestSession, canonical_run_dir
 
 DEFAULT_TOKEN_DIM = 28  # 64x32 harvest w/ cash-on-home-port token (see observation.py)
 
@@ -229,6 +230,12 @@ def main() -> None:
     env = BattleboatsAEC(map_json_path=scenarios[0]["map_path"], max_turns=args.max_steps)
 
     args.save_dir.mkdir(parents=True, exist_ok=True)
+    session = ManifestSession(
+        canonical_run_dir(args.save_dir),
+        kind="selfplay",
+        config=vars(args),
+        init_checkpoint=getattr(args, "bc_checkpoint", None),
+    ).start()
 
     use_wandb = args.wandb
     if use_wandb:
@@ -296,6 +303,11 @@ def main() -> None:
 
     if use_wandb:
         wandb.finish()
+    latest = args.save_dir / f"ppo_update_{args.updates}.pt"
+    session.complete(
+        final_checkpoint=latest if latest.is_file() else None,
+        updates_completed=args.updates,
+    )
 
 
 if __name__ == "__main__":

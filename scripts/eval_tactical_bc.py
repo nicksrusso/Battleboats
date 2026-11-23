@@ -34,6 +34,7 @@ from battleboats.envs.battleboats_aec import BattleboatsAEC
 from battleboats.training.checkpoints import load_checkpoint
 from battleboats.training.selfplay import load_selfplay_config
 from battleboats.training.selfplay_purchases import hull_name
+from battleboats.training.manifest import append_eval
 from scripts.eval_tactical import (_finalize_survivors, _list_maps,
                                    _new_tracker, _note_births, _note_deaths,
                                    _schedule, summarize)
@@ -331,6 +332,7 @@ def main() -> None:
     (out / "games.json").write_text(
         json.dumps({**payload, "games": games_out}, indent=2, default=str)
     )
+    append_eval(payload, checkpoint=args.checkpoint, name=out.name)
     print(f"wrote {out / 'summary.json'}", flush=True)
 
 

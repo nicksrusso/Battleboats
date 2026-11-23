@@ -32,6 +32,7 @@ from torch.utils.data import DataLoader, Subset
 from battleboats.envs.action_masks import BatchedMasks
 from battleboats.envs.observation import TOKEN_DIM
 from battleboats.training.checkpoints import model_config_of, save_checkpoint
+from battleboats.training.manifest import ManifestSession, canonical_run_dir
 from battleboats.training.policy import (
     VERB_NAMES,
     VERB_TO_IDX,
@@ -272,6 +273,11 @@ def main() -> None:
     model = new_policy(arch, device)
     opt = torch.optim.Adam(model.parameters(), lr=args.lr)
     args.save_dir.mkdir(parents=True, exist_ok=True)
+    session = ManifestSession(
+        canonical_run_dir(args.save_dir),
+        kind="bc",
+        config=vars(args),
+    ).start()
 
     curve: List[Dict[str, Any]] = []
     best_joint = -1.0
@@ -400,6 +406,11 @@ def main() -> None:
         json.dumps(
             {k: v for k, v in summary.items() if k != "curve"}, indent=2, default=str
         )
+    )
+    final = best_path if best_path is not None else (args.save_dir / "latest.pt")
+    session.complete(
+        final_checkpoint=final if Path(final).is_file() else None,
+        updates_completed=args.epochs,
     )
     print(f"wrote {args.save_dir / 'metrics.json'}", flush=True)
 

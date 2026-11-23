@@ -37,6 +37,7 @@ from battleboats.training.policy import PolicyNetwork
 from battleboats.training.ppo_buffer import RolloutBuffer
 from battleboats.training.rollout import Transition
 from battleboats.training.wandb_log import init_wandb
+from battleboats.training.manifest import ManifestSession
 
 SANDBOX_SKILLS = tuple(s for s in SKILLS if s != "full")
 FINAL_NAME = "final.pt"
@@ -150,6 +151,25 @@ def normalize_advantages(transitions: List[Transition]) -> None:
 
 
 def run_pipeline(cfg: PipelineConfig, *, resume: bool = True) -> Dict[str, Any]:
+    cfg.run_dir.mkdir(parents=True, exist_ok=True)
+    with ManifestSession(
+        cfg.run_dir,
+        kind="skill_pipeline",
+        config=cfg,
+        init_checkpoint=cfg.init_checkpoint,
+    ) as session:
+        result = _run_pipeline(cfg, resume=resume)
+        final = cfg.run_dir / "final.pt"
+        latest = cfg.run_dir / "latest.pt"
+        ckpt = final if final.is_file() else (latest if latest.is_file() else None)
+        session.complete(
+            final_checkpoint=ckpt,
+            updates_completed=None,
+        )
+        return result
+
+
+def _run_pipeline(cfg: PipelineConfig, *, resume: bool = True) -> Dict[str, Any]:
     """Train every stage. Returns ``{"ok", "reason", "checkpoint", "summary"}``."""
     import random
 

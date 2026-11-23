@@ -11,6 +11,7 @@ import json
 from pathlib import Path
 
 from battleboats.training.evaluate import evaluate_checkpoint
+from battleboats.training.manifest import append_eval
 
 
 def main() -> None:
@@ -44,6 +45,7 @@ def main() -> None:
         seed=args.seed,
         device=args.device,
     )
+    append_eval(stats, checkpoint=args.checkpoint, name=f"vs_{args.opponent}")
     print(json.dumps(stats, indent=2))
 
 

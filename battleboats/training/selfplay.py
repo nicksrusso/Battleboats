@@ -54,6 +54,7 @@ from battleboats.training.selfplay_purchases import (
     purchase_mix,
 )
 from battleboats.training.vec_collect import make_collector
+from battleboats.training.manifest import ManifestSession
 
 
 @dataclass
@@ -245,6 +246,24 @@ class RecentSnapshots:
 
 
 def run_selfplay(cfg: SelfPlayConfig, *, resume: bool = True) -> Dict[str, Any]:
+    cfg.run_dir.mkdir(parents=True, exist_ok=True)
+    with ManifestSession(
+        cfg.run_dir,
+        kind="selfplay",
+        config=cfg,
+        init_checkpoint=cfg.init_checkpoint,
+    ) as session:
+        result = _run_selfplay(cfg, resume=resume)
+        latest = cfg.run_dir / "latest.pt"
+        updates = result.get("updates") if isinstance(result, dict) else None
+        session.complete(
+            final_checkpoint=latest if latest.is_file() else None,
+            updates_completed=updates,
+        )
+        return result
+
+
+def _run_selfplay(cfg: SelfPlayConfig, *, resume: bool = True) -> Dict[str, Any]:
     cfg.run_dir.mkdir(parents=True, exist_ok=True)
     device = resolve_device(cfg.device)
     rng = random.Random(cfg.seed)

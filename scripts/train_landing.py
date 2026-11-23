@@ -30,6 +30,7 @@ from battleboats.training.policy import PolicyNetwork
 from battleboats.training.ppo_buffer import RolloutBuffer
 from battleboats.training.ppo_update import ppo_update
 from battleboats.training.rollout import collect_trajectory, compute_gae
+from battleboats.training.manifest import ManifestSession, canonical_run_dir
 
 DEFAULT_MAP = "battleboats/core/config/maps/map_landing_2x3.json"
 LEARNER_PID = 0
@@ -207,8 +208,13 @@ def main() -> None:
 
     optimizer = torch.optim.Adam(policy.parameters(), lr=args.lr)
     buffer = RolloutBuffer()
-    if not args.no_save:
-        args.save_dir.mkdir(parents=True, exist_ok=True)
+    args.save_dir.mkdir(parents=True, exist_ok=True)
+    session = ManifestSession(
+        canonical_run_dir(args.save_dir),
+        kind="sandbox",
+        config=vars(args),
+        init_checkpoint=getattr(args, "load_checkpoint", None),
+    ).start()
 
     # ----------------------------------------------------------------- main loop
     # Sanity signals on this sandbox: capture_rate should climb from the ~0.63
@@ -266,6 +272,11 @@ def main() -> None:
 
     if not args.no_save:
         save_checkpoint(policy, args, args.save_dir / "landing_latest.pt")
+    latest = args.save_dir / "landing_latest.pt"
+    session.complete(
+        final_checkpoint=latest if latest.is_file() else None,
+        updates_completed=args.updates,
+    )
 
 
 if __name__ == "__main__":

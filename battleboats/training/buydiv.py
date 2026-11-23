@@ -50,6 +50,7 @@ from battleboats.training.ppo_buffer import RolloutBuffer
 from battleboats.training.rollout import collect_trajectory, compute_gae
 from battleboats.training.selfplay_purchases import (empty_purchase_counts,
                                                      hull_name)
+from battleboats.training.manifest import ManifestSession
 
 # All eight buildable hulls, ShipType enum order. Include landing and builder:
 # the warm start under-buys both 250-cost types, and "equal rate" is over
@@ -479,6 +480,28 @@ def run_unmasked_eval(
 
 
 def run_buydiv(cfg: BuyDivConfig) -> Dict[str, Any]:
+    """Fine-tune ``cfg.init_checkpoint`` in the buy-diversity sandbox."""
+    if cfg.device != "cpu":
+        raise ValueError("buy-diversity fine-tune is CPU-only")
+    run_dir = Path(cfg.run_dir)
+    run_dir.mkdir(parents=True, exist_ok=True)
+    (run_dir / "config.yaml").write_text(yaml.safe_dump(asdict(cfg), sort_keys=False))
+    with ManifestSession(
+        run_dir,
+        kind="buydiv",
+        config=cfg,
+        init_checkpoint=cfg.init_checkpoint,
+    ) as session:
+        summary = _run_buydiv(cfg)
+        latest = run_dir / "latest.pt"
+        session.complete(
+            final_checkpoint=latest if latest.is_file() else None,
+            updates_completed=summary.get("updates_run"),
+        )
+        return summary
+
+
+def _run_buydiv(cfg: BuyDivConfig) -> Dict[str, Any]:
     """Fine-tune ``cfg.init_checkpoint`` in the buy-diversity sandbox."""
     if cfg.device != "cpu":
         raise ValueError("buy-diversity fine-tune is CPU-only")
