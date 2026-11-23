@@ -17,3 +17,6 @@ class Port:
     owner: int
     is_home: bool = False
     stockpile: int = 0
+    # Captured or built this turn: no BuildShipAction here until the owner's
+    # next turn. Cleared when the owner ends a turn.
+    locked_this_turn: bool = False

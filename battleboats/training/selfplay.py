@@ -89,7 +89,7 @@ class SelfPlayConfig:
     ref_home_distance: int = 14
     # map_gen.min_port_enemy_home_water: pool maps need every port's spawn tile
     # (home and satellites) at least this many water moves from the enemy
-    # home. 7 stops a turn-0 landing buy from capturing before turn 2. 0 keeps
+    # home. 7 stops a turn-0 landing buy from capturing before turn 3. 0 keeps
     # the old pools (so resuming an older run regenerates the same maps).
     min_port_enemy_home_water: int = 0
     # Collection: 0 workers plays in this process. Each worker keeps

@@ -142,15 +142,21 @@ def test_builder_owned_by_enemy_cannot_build_on_p0_turn(engine):
 
 
 def test_new_port_is_enumerated_for_build_ship(engine):
-    """After construction, the new port appears in legal BuildShipActions."""
+    """A new port can't build ships on the turn it is built; from the owner's
+    next turn it appears in legal BuildShipActions."""
+    from battleboats.core.actions import EndTurnAction
+
     target, spawn = _find_water_adjacent_to_empty_land(engine)
     builder = engine._spawn_ship(0, ShipType.BUILDER, spawn)
     engine.step(BuildPortAction(builder.id, target))
-    legal = engine.enumerate_legal(0)
-    builds_from_new_port = [
-        a for a in legal if isinstance(a, BuildShipAction) and a.port == target
-    ]
-    assert len(builds_from_new_port) > 0
+
+    def builds_from_new_port():
+        return [a for a in engine.enumerate_legal(0) if isinstance(a, BuildShipAction) and a.port == target]
+
+    assert builds_from_new_port() == []
+    engine.step(EndTurnAction())
+    engine.step(EndTurnAction())
+    assert len(builds_from_new_port()) > 0
 
 
 def test_witnessed_builder_self_destruct_clears_enemy_sighting(engine):
