@@ -55,6 +55,7 @@ from battleboats.training.policy import PolicyNetwork
 from battleboats.training.fleet_starts import FleetStarts, apply_fleet_start
 from battleboats.training.reward_shaping import RewardShaping, ShapingTracker, empty_totals
 from battleboats.training.selfplay_purchases import hull_name
+from battleboats.training.hull_explore import empty_explore_stats, merge_explore_stats, record_build
 from battleboats.training.rollout import Transition, compute_gae
 from battleboats.training.selfplay_purchases import empty_purchase_counts, record_purchase
 
@@ -118,6 +119,8 @@ class CollectResult:
     shaping: Dict[str, float] = field(default_factory=empty_totals)
     combat: Dict[str, Any] = field(default_factory=empty_combat)
     landing: Dict[str, Any] = field(default_factory=empty_landing)
+    # Learner build_ship decisions: explored (uniform hull) vs policy, by hull.
+    hull_explore: Dict[str, Any] = field(default_factory=empty_explore_stats)
     decisions: int = 0
     env_steps: int = 0
     open_games: int = 0
@@ -197,8 +200,18 @@ class GameCollector:
         return net
 
     # ------------------------------------------------------------- weights
-    def set_weights(self, learner_state, opponent_states: Dict[str, Any], ring: Sequence[str]) -> None:
+    def set_weights(
+        self,
+        learner_state,
+        opponent_states: Dict[str, Any],
+        ring: Sequence[str],
+        explore: Optional[Sequence[Any]] = None,
+    ) -> None:
         self.policy.load_state_dict(learner_state)
+        # Hull exploration is learner-only; opponents keep eps=0.
+        eps, mode = explore if explore is not None else (0.0, "policy")
+        self.policy.hull_explore_eps = float(eps)
+        self.policy.hull_explore_mode = str(mode)
         self.ring = sorted(ring)
         for tag in self.ring:
             if tag not in self.opponents:
@@ -330,6 +343,7 @@ class GameCollector:
         targets = out["target_idx"].tolist()
         logps = out["logp"].tolist()
         values = out["value"].tolist()
+        explored = out["hull_explored"].tolist() if "hull_explored" in out else [False] * len(assets)
         recorded = 0
         for i, (slot, masks) in enumerate(zip(live, masks_list)):
             if key == LEARNER:
@@ -361,6 +375,7 @@ class GameCollector:
             if key == LEARNER and isinstance(action, BuildShipAction):
                 record_purchase(slot.purchases, action.ship_type)
                 record_purchase(result.purchases, action.ship_type)
+                record_build(result.hull_explore, hull_name(action.ship_type), bool(explored[i]))
             pre = slot.tracker.snapshot(slot.env.engine, pid_of[i], action) if key == LEARNER else None
             self._step(slot, pid_of[i], action, result)
             if pre is not None:
@@ -541,6 +556,7 @@ def merge_results(results: Sequence[CollectResult]) -> CollectResult:
             out.shaping[k] = out.shaping.get(k, 0.0) + v
         merge_combat(out.combat, r.combat)
         merge_landing(out.landing, r.landing)
+        merge_explore_stats(out.hull_explore, r.hull_explore)
         out.decisions += r.decisions
         out.env_steps += r.env_steps
         out.open_games += r.open_games
@@ -566,7 +582,9 @@ class LocalCollector:
         )
 
     def collect(self, policy: PolicyNetwork, opponents: Dict[str, PolicyNetwork], budget: int) -> CollectResult:
-        self.inner.set_weights(policy.state_dict(), _snapshot_states(opponents), list(opponents))
+        self.inner.set_weights(
+            policy.state_dict(), _snapshot_states(opponents), list(opponents), explore=_explore_of(policy)
+        )
         return self.inner.collect(budget)
 
     def next_episode(self) -> int:
@@ -574,6 +592,10 @@ class LocalCollector:
 
     def close(self) -> None:
         pass
+
+
+def _explore_of(policy) -> tuple:
+    return (float(getattr(policy, "hull_explore_eps", 0.0) or 0.0), str(getattr(policy, "hull_explore_mode", "policy")))
 
 
 def _worker_main(conn, kwargs: Dict[str, Any], threads: int) -> None:
@@ -588,10 +610,10 @@ def _worker_main(conn, kwargs: Dict[str, Any], threads: int) -> None:
         msg = conn.recv()
         if msg[0] == "close":
             break
-        _, learner, opponents, ring, budget = msg
+        _, learner, opponents, ring, budget, explore = msg
         try:
             collector.set_weights(
-                numpy_to_state(learner), {t: numpy_to_state(s) for t, s in opponents.items()}, ring
+                numpy_to_state(learner), {t: numpy_to_state(s) for t, s in opponents.items()}, ring, explore=explore
             )
             result = collector.collect(budget)
             conn.send(("ok", _pack(result), collector.episodes_started))
@@ -642,7 +664,7 @@ class ParallelCollector:
         opp = {tag: state_to_numpy(net.state_dict()) for tag, net in opponents.items()}
         ring = list(opponents)
         for conn, b in zip(self.conns, split_budget(budget, self.num_workers)):
-            conn.send(("collect", learner, opp, ring, b))
+            conn.send(("collect", learner, opp, ring, b, _explore_of(policy)))
         results, errors = [], []
         for w, conn in enumerate(self.conns):
             msg = conn.recv()

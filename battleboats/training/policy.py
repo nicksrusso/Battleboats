@@ -257,6 +257,41 @@ class PolicyNetwork(nn.Module):
         # Value head: NON-autoregressive, pooled context only -> scalar in [-1,1].
         self.value_head = nn.Sequential(nn.Linear(d_model, d_model), nn.ReLU(), nn.Linear(d_model, 1))
 
+        # Build-hull exploration (see hull_explore.py). Plain attributes, not
+        # parameters: off unless a trainer sets them on the learner, and not in
+        # the state_dict. Stats count act() build decisions since last reset.
+        self.hull_explore_eps = 0.0
+        self.hull_explore_mode = "policy"
+        self.hull_explore_stats = None
+        self.last_hull_explored = False
+
+    def _explore_hull(self, dist, legal: torch.Tensor, t: torch.Tensor):
+        """Epsilon-uniform over legal hulls. ``legal`` (R, K) bool, ``t`` (R,)
+        sampled from ``dist``. Returns (target, stored log-prob, explored (R,) bool)."""
+        eps = float(getattr(self, "hull_explore_eps", 0.0) or 0.0)
+        if eps <= 0.0:
+            return t, dist.log_prob(t), torch.zeros_like(t, dtype=torch.bool)
+        legal = legal.to(t.device)
+        explored = torch.rand(t.shape[0], device=t.device) < eps
+        uniform = torch.multinomial(legal.float(), 1).squeeze(1)
+        t = torch.where(explored, uniform, t)
+        lp = dist.log_prob(t)
+        if getattr(self, "hull_explore_mode", "policy") == "mixture":
+            n = legal.sum(dim=1).clamp(min=1).float()
+            lp = torch.log((1.0 - eps) * lp.exp() + eps / n)
+        return t, lp, explored
+
+    def _count_hulls(self, targets, explored) -> None:
+        stats = getattr(self, "hull_explore_stats", None)
+        if stats is None:
+            return
+        from battleboats.envs.action_masks import SHIP_TYPE_ORDER
+        from battleboats.training.hull_explore import record_build
+        from battleboats.training.selfplay_purchases import hull_name
+
+        for t, e in zip(targets, explored):
+            record_build(stats, hull_name(SHIP_TYPE_ORDER[int(t)]), bool(e))
+
     # --- Encoder ---------------------------------------------------------------
     def encode(self, tokens: torch.Tensor, pad_mask: torch.Tensor, globals=None):
         """tokens: (B, N, token_dim)   pad_mask: (B, N) bool, True = real token.
@@ -421,6 +456,12 @@ class PolicyNetwork(nn.Module):
             target_dist = masked_categorical(target_logits)
             target_idx = target_dist.sample()  # (B,)
             lp_t = target_dist.log_prob(target_idx)  # (B,) log π(target | s, a, v)
+            self.last_hull_explored = False
+            if verb_name == "build_ship":
+                legal = target_mask.reshape(B, -1)
+                target_idx, lp_t, explored = self._explore_hull(target_dist, legal, target_idx)
+                self.last_hull_explored = bool(explored.any())
+                self._count_hulls(target_idx.tolist(), explored.tolist())
         else:
             # capture/load/unload/endturn have an implicit-or-no target: nothing to
             # sample, and this factor contributes log-prob 0. Keep lp_t a TENSOR of
@@ -482,6 +523,7 @@ class PolicyNetwork(nn.Module):
         target_idx = torch.full((B,), -1, dtype=torch.long, device=dev)
         lp_t = torch.zeros(B, device=dev)
         target_masks = [None] * B
+        hull_explored = torch.zeros(B, dtype=torch.bool, device=dev)
         for verb_name in VERBS_WITH_TARGET:
             v = VERB_TO_IDX[verb_name]
             rows = [i for i in range(B) if verbs[i] == v]
@@ -498,8 +540,13 @@ class PolicyNetwork(nn.Module):
             sub_emb = embeddings[r] if verb_name == "attack" else None
             dist = masked_categorical(self.head_target(verb_name, target_cond[r], sub_mask, sub_emb))
             t = dist.sample()
+            if verb_name == "build_ship":
+                t, lp, explored = self._explore_hull(dist, sub_mask, t)
+                hull_explored[r] = explored
+            else:
+                lp = dist.log_prob(t)
             target_idx[r] = t
-            lp_t[r] = dist.log_prob(t)
+            lp_t[r] = lp
             for j, i in enumerate(rows):
                 target_masks[i] = per_row[j]
 
@@ -512,6 +559,7 @@ class PolicyNetwork(nn.Module):
             "asset_masks": asset_rows,
             "verb_mask": verb_mask,
             "target_masks": target_masks,
+            "hull_explored": hull_explored,
         }
 
     # --- PPO update (parallel re-evaluation of stored actions) -----------------
