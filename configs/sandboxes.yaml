@@ -81,6 +81,14 @@ reward_decay:
   horizon: 0
   floor: 0.0
 
+# merchant drill: fixed length (max(12, 4*size) turns, no early end). Each home
+# unload pays gold / this episode's max achievable gold (full 100-material
+# round trips on the shortest water leg), so the return is ~0..1 and more
+# round trips pay more. Builds are masked. An episode is a success when it
+# hauls >= merchant_success_frac of that max; the drill gates on the usual
+# success window (success_threshold over `window` episodes).
+merchant_success_frac: 0.5
+
 sizes: [3, 4, 5, 6, 8, 10]
 skills:
   - merchant
