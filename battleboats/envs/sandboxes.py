@@ -11,6 +11,11 @@ are completion rewards scaled by ``turn_decay`` (game turns, not actions):
   delivery. The buy itself is the real ``BuildShipAction``.
 - landing: the decayed reward when the landing ship captures the enemy home.
   No enemy ships. Sightings are the engine's real fog.
+- landing_build: no ships and enough cash for one landing ship (250). Every
+  hull is buyable by default (``hulls="all"``), so the drill teaches picking
+  the landing ship; ``hulls="landing"`` allows only landing-ship builds. The
+  decayed reward when a landing ship it built captures the enemy home. A
+  wrong hull pays nothing and delays the landing ship until income catches up.
 - scouting: random hull vs random hull. The decayed reward on the first fresh
   sighting of the enemy ship, and the episode ends. The enemy holds still and
   starts outside the learner ship's sight.
@@ -729,6 +734,95 @@ class LandingSandbox(_Sandbox):
         self._pass_opponent(scripted=False, stop=lambda: self._captured)
 
 
+class LandingBuildSandbox(_Sandbox):
+    """Build a landing ship at home, sail it over, capture the enemy home.
+
+    No ships at the start, cash for exactly one landing ship (its cost), real
+    home income, no enemy ships. Verbs: build, move, capture, end turn.
+    ``hulls="all"`` leaves every hull buyable (it has to pick the landing
+    ship); ``hulls="landing"`` filters builds to landing ships only.
+    Success is the capture.
+    """
+
+    skill_name = "landing_build"
+    HULLS = ("all", "landing")
+
+    def __init__(self, map_json_path: str, *, width: int, height: int, max_turns: int = 30, hulls: str = "all") -> None:
+        if hulls not in self.HULLS:
+            raise ValueError(f"LandingBuildSandbox: hulls must be one of {self.HULLS}, got {hulls!r}")
+        self.hulls = hulls
+        self._captured = False
+        self._built_landing = False
+        super().__init__(map_json_path, width=width, height=height, max_turns=max_turns)
+
+    @property
+    def captured(self) -> bool:
+        return self._captured
+
+    @property
+    def built_landing(self) -> bool:
+        return self._built_landing
+
+    def reset(self, seed: Optional[int] = None, options=None) -> None:
+        if not (options or {}).get("scenario"):
+            rng = random.Random(seed)
+            placed = False
+            for _ in range(40):
+                home, opp = _sample_lands(rng, self.width, self.height, 2)
+                if _ports_connected({home, opp}, self.width, self.height, home, opp):
+                    self._write_map([home, opp], [home], [opp])
+                    placed = True
+                    break
+            if not placed:
+                raise RuntimeError("LandingBuildSandbox: no route to the enemy home")
+        super().reset(seed=seed, options=options)
+
+    def _configure_scenario(self, seed, options) -> None:
+        assert self.engine is not None
+        self._captured = False
+        self._built_landing = False
+        if self._spawn_reaching(self.engine.players[0].home_port, self.engine.players[1].home_port) is None:
+            raise RuntimeError("LandingBuildSandbox: no water next to home that reaches the enemy home")
+        self.engine.players[0].cash = int(BASE_STATS[ShipType.LANDING].cost)
+        self.engine.players[1].cash = 0
+        self.engine.current_player = 0
+        self.engine.turn = 0
+        self.engine.winner = None
+        self.engine._refresh_sightings()
+        self._filter((BuildShipAction, MoveAction, CapturePortAction, EndTurnAction))
+        if self.hulls == "landing":
+            raw = self.engine.enumerate_legal
+
+            def enumerate_legal(player_id: int, _raw=raw) -> List[Action]:
+                return [
+                    a for a in _raw(player_id)
+                    if not isinstance(a, BuildShipAction) or a.ship_type == ShipType.LANDING
+                ]
+
+            self.engine.enumerate_legal = enumerate_legal
+
+    def _capture_reward_state(self) -> Dict:
+        assert self.engine is not None
+        return {"turn": int(self.engine.turn), "ships": set(self.engine.players[0].owned_ship_ids)}
+
+    def _reward_after_step(self, agent, action, pre) -> Dict[str, float]:
+        rewards = {a: 0.0 for a in self.agents}
+        assert self.engine is not None
+        new = set(self.engine.players[0].owned_ship_ids) - set(pre.get("ships", ()))
+        if any(self.engine.ships[s].type == ShipType.LANDING for s in new):
+            self._built_landing = True
+        if not self._captured and self.engine.winner == 0:
+            self._captured = True
+            rewards[self._agent_name(0)] = self._turn_scale(int(pre.get("turn", 0)))
+        return rewards
+
+    def _is_terminated(self) -> bool:
+        return self._captured
+
+    def _after_engine_step(self, agent, action) -> None:
+        self._pass_opponent(scripted=False, stop=lambda: self._captured)
+
+
 class CombatSandbox(_Sandbox):
     """One combat ship versus a scripted enemy of the same type.
 
@@ -1124,6 +1218,7 @@ def make_sandbox(
     max_turns: int,
     decay_horizon: int = 0,
     decay_floor: float = 0.0,
+    landing_build_hulls: str = "all",
 ):
     """Build the sandbox named by ``skill`` (see ``SKILL_NAMES``).
 
@@ -1136,6 +1231,10 @@ def make_sandbox(
         env = ShipBuildSandbox(map_json_path, width=width, height=height, max_turns=max_turns)
     elif skill == "landing":
         env = LandingSandbox(map_json_path, width=width, height=height, max_turns=max_turns)
+    elif skill == "landing_build":
+        env = LandingBuildSandbox(
+            map_json_path, width=width, height=height, max_turns=max_turns, hulls=landing_build_hulls
+        )
     elif skill == "scouting":
         env = ScoutingSandbox(map_json_path, width=width, height=height, max_turns=max_turns)
     elif skill.startswith("combat_"):
@@ -1174,6 +1273,11 @@ def horizon(skill: str, size: int) -> Tuple[int, int]:
         return max(10, size * 4), max(36, size * 12)
     if skill == "merchant":
         return max(8, size * 4), max(24, size * 12)
+    if skill == "landing_build":
+        # The landing drill's 3 turns per board side, plus a few for the build
+        # (and for income to refill after a wrong hull).
+        turns = max(10, int(size) * 3 + 3)
+        return turns, max(24, turns * 8)
     if skill == "scouting":
         turns = max(8, int(size) * 4)
         return turns, max(32, turns * 8)

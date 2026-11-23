@@ -2,7 +2,7 @@
 
 Every sandbox is in the batch together. An update gives each sandbox the
 same decision budget, then a size advances only when every sandbox's own
-gate currently clears (a fresh check). Merchant, builder, landing,
+gate currently clears (a fresh check). Merchant, builder, landing, landing_build,
 scouting, and each ``build_<type>`` drill clear on a live success window:
 on-size episodes keep appending after a pass, and a drop below the
 threshold reopens the drill. Combat clears on a plateau of smoothed
@@ -246,7 +246,7 @@ def drill_done(
 ) -> bool:
     """Goal drills use the success window. Combat drills use a smoothed plateau.
 
-    Merchant, builder, landing, scouting, and ``build_<type>`` need ``need``
+    Merchant, builder, landing, landing_build, scouting, and ``build_<type>`` need ``need``
     on-size episodes at ``success_threshold``. Scouting's success bit is
     detection. A build drill's bit is buying the cued hull, not the speed reward.
 
@@ -278,7 +278,7 @@ def _succeeded(skill: str, env) -> bool:
         return bool(env.hauled)
     if skill == "builder":
         return bool(env.built)
-    if skill == "landing":
+    if skill in ("landing", "landing_build"):
         return bool(env.captured)
     if skill == "scouting":
         return bool(env.found)
@@ -333,6 +333,8 @@ class SandboxRunConfig:
     arch: ArchSpec = field(default_factory=ArchSpec)
     ppo: PPOHyper = field(default_factory=PPOHyper)
     init_checkpoint: Optional[Path] = None
+    # landing_build drill: "all" hulls buyable, or "landing" only.
+    landing_build_hulls: str = "all"
 
     def decay_for(self, skill: str) -> DecaySpec:
         return self.reward_decay_drills.get(skill, self.reward_decay)
@@ -358,6 +360,8 @@ class SandboxRunConfig:
             raise ValueError("plateau_updates must be >= 1")
         if self.max_updates_per_size < 1:
             raise ValueError("max_updates_per_size must be >= 1")
+        if self.landing_build_hulls not in ("all", "landing"):
+            raise ValueError("landing_build_hulls must be 'all' or 'landing'")
         _check_decay(self.reward_decay, "reward_decay")
         for name, spec in self.reward_decay_drills.items():
             skill_index(name)
@@ -404,6 +408,7 @@ def load_sandbox_config(path: Path) -> SandboxRunConfig:
         eval_every=int(raw.get("eval_every", 5)),
         eval_episodes=int(raw.get("eval_episodes", 8)),
         allow_unmet=bool(raw.get("allow_unmet", False)),
+        landing_build_hulls=str(raw.get("landing_build_hulls", "all")),
         save_every=int(raw.get("save_every", 10)),
         wandb=bool(raw.get("wandb", False)),
         wandb_project=str(raw.get("wandb_project", "battleboats-skill-pipeline")),
@@ -733,6 +738,7 @@ def _env(cfg, envs, skill, size):
             max_turns=turns,
             decay_horizon=decay.horizon,
             decay_floor=decay.floor,
+            landing_build_hulls=cfg.landing_build_hulls,
         )
         # The pointer net has no skill embedding. Zero this so a task id is
         # not stored on the transition. Ship type still sits in the token.
