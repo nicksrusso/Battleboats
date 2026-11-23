@@ -106,6 +106,10 @@ def test_move_emerges_after_build_and_respects_speed_cap(engine):
             if isinstance(a, MoveAction) and a.ship_id == sid
         ]
 
+    # Bought this turn: no moves until P0's next turn.
+    assert moves_for_ship() == []
+    engine.step(EndTurnAction())
+    engine.step(EndTurnAction())
     assert len(moves_for_ship()) >= 1
     for _ in range(ship.stats.speed):
         engine.step(moves_for_ship()[0])

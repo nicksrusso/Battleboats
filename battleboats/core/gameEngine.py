@@ -136,7 +136,7 @@ class gameEngine:
         ship = self.ships.get(a.ship_id)
         if ship is None or ship.owner != self.current_player:
             return
-        if ship.tiles_moved_this_turn >= ship.stats.speed:
+        if ship.bought_this_turn or ship.tiles_moved_this_turn >= ship.stats.speed:
             return
         if not self.map.in_bounds(a.destination):
             return
@@ -154,7 +154,7 @@ class gameEngine:
         attacker = self.ships.get(a.attacker_id)
         if attacker is None or attacker.owner != self.current_player:
             return
-        if attacker.has_attacked:
+        if attacker.has_attacked or attacker.bought_this_turn:
             return
         if attacker.stats.attack_range <= 0:
             return
@@ -176,6 +176,8 @@ class gameEngine:
         player = self.players[self.current_player]
         if a.port not in player.owned_port_positions:
             return
+        if self.ports[a.port].locked_this_turn:
+            return
         if not self.map.in_bounds(a.spawn_position):
             return
         if self.map.manhattan(a.spawn_position, a.port) != 1:
@@ -188,13 +190,19 @@ class gameEngine:
         if player.cash < cost:
             return
         player.cash -= cost
-        self._spawn_ship(self.current_player, a.ship_type, a.spawn_position)
+        ship = self._spawn_ship(self.current_player, a.ship_type, a.spawn_position)
+        # Bought ships act from the owner's next turn. Spent move/attack flags
+        # keep the observation's ship-state features honest (no shape change).
+        ship.bought_this_turn = True
+        ship.built_turn = self.turn
+        ship.tiles_moved_this_turn = ship.stats.speed
+        ship.has_attacked = True
 
     def _do_build_port(self, a: BuildPortAction) -> None:
         ship = self.ships.get(a.builder_ship_id)
         if ship is None or ship.owner != self.current_player:
             return
-        if ship.type != ShipType.BUILDER:
+        if ship.type != ShipType.BUILDER or ship.bought_this_turn:
             return
         if not self.map.in_bounds(a.target):
             return
@@ -212,6 +220,7 @@ class gameEngine:
             owner=self.current_player,
             is_home=False,
             stockpile=0,
+            locked_this_turn=True,
         )
         self._destroy_ship(a.builder_ship_id)
 
@@ -219,7 +228,7 @@ class gameEngine:
         ship = self.ships.get(a.landing_ship_id)
         if ship is None or ship.owner != self.current_player:
             return
-        if ship.type != ShipType.LANDING:
+        if ship.type != ShipType.LANDING or ship.bought_this_turn:
             return
         if not self.map.in_bounds(a.target):
             return
@@ -238,6 +247,7 @@ class gameEngine:
         port = self.ports[a.target]
         port.owner = self.current_player
         port.stockpile = 0  # captured port's stockpile is lost
+        port.locked_this_turn = True  # no builds here until the captor's next turn
         if a.target == prev_owner.home_port:
             self.winner = self.current_player
 
@@ -245,7 +255,7 @@ class gameEngine:
         merchant = self.ships.get(a.merchant_id)
         if merchant is None or merchant.owner != self.current_player:
             return
-        if merchant.type != ShipType.MERCHANT:
+        if merchant.type != ShipType.MERCHANT or merchant.bought_this_turn:
             return
         if not self.map.in_bounds(a.port):
             return
@@ -267,7 +277,7 @@ class gameEngine:
         merchant = self.ships.get(a.merchant_id)
         if merchant is None or merchant.owner != self.current_player:
             return
-        if merchant.type != ShipType.MERCHANT:
+        if merchant.type != ShipType.MERCHANT or merchant.bought_this_turn:
             return
         if merchant.cargo <= 0:
             return
@@ -302,6 +312,8 @@ class gameEngine:
         # Outgoing player's per-turn ship bookkeeping.
         for sid in self.players[self.current_player].owned_ship_ids:
             self.ships[sid].reset_turn_flags()
+        for pos in self.players[self.current_player].owned_port_positions:
+            self.ports[pos].locked_this_turn = False
         # self.turn counts rounds; increments after player 1 finishes their turn.
         if self.current_player == 1:
             self.turn += 1
@@ -469,6 +481,8 @@ class gameEngine:
 
         for sid in player.owned_ship_ids:
             ship = self.ships[sid]
+            if ship.bought_this_turn:
+                continue  # bought this turn: no actions until the owner's next turn
             sx, sy = ship.position
             can_move = ship.tiles_moved_this_turn < ship.stats.speed
             is_builder = ship.type == ShipType.BUILDER
@@ -529,6 +543,8 @@ class gameEngine:
             # they'll move anyway and the one-tile delta is irrelevant.
             opp_home = self.players[1 - player_id].home_port
             for port in player.owned_port_positions:
+                if self.ports[port].locked_this_turn:
+                    continue  # captured or built this turn
                 px, py = port
                 candidate_spawns = []
                 for dx, dy in _CARDINAL_OFFSETS:

@@ -1,6 +1,6 @@
 """map_gen.min_port_enemy_home_water: every port's spawn tile (home and
 satellites) must be at least N water moves from a tile next to the enemy home,
-so a landing ship bought on turn 0 cannot rush the enemy home on turn 0/1."""
+so a landing ship bought on turn 0 cannot rush the enemy home before turn 3."""
 
 import json
 from pathlib import Path
@@ -47,7 +47,9 @@ def test_port_enemy_home_water_routes_around_land():
     assert port_enemy_home_water(5, 3, [[0, 0], [4, 0]], ports) == 2
 
 
-@pytest.mark.parametrize("moves,turn", [(0, 0), (3, 0), (4, 1), (6, 1), (7, 2), (9, 2), (10, 3)])
+# A bought ship cannot act on its build turn, so every rush lands a turn later than
+# under the old buy-then-move rule (old: 0,0,1,1,2,2,3).
+@pytest.mark.parametrize("moves,turn", [(0, 1), (3, 1), (4, 2), (6, 2), (7, 3), (9, 3), (10, 4)])
 def test_earliest_capture_turn(moves, turn):
     assert earliest_capture_turn(moves) == turn
 
@@ -90,7 +92,7 @@ def test_12x6_pool_has_no_turn0_or_turn1_capture(tmp_path):
         data = json.loads(Path(p).read_text())
         d = spawn_enemy_home_water(data)
         assert d is not None and d >= 7
-        assert earliest_capture_turn(d) >= 2
+        assert earliest_capture_turn(d) >= 3
         assert water_path_length(data) >= 7
         assert check_map(data, 7)[0]
 
@@ -139,6 +141,6 @@ def test_selfplay_pool_uses_and_logs_the_minimum(tmp_path, capsys):
     )
     assert run_selfplay(run)["ok"]
     out = capsys.readouterr().out
-    assert "map_gen min_port_enemy_home_water=7" in out and "earliest_capture_turn>=2" in out
+    assert "map_gen min_port_enemy_home_water=7" in out and "earliest_capture_turn>=3" in out
     for p in (tmp_path / "run" / "maps").glob("map_*.json"):
         assert spawn_enemy_home_water(json.loads(p.read_text())) >= 7

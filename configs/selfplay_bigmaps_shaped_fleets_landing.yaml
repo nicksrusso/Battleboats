@@ -27,7 +27,8 @@ map_pool:
   - {width: 48, height: 24, count: 30, ports: 4}
 land_fraction: 0.02
 # Every port's spawn tile (home and satellites) is at least this many water
-# moves from a tile next to the enemy home: no landing capture before turn 2.
+# moves from a tile next to the enemy home: no landing capture before turn 3
+# (a bought ship cannot act on its build turn).
 map_gen:
   min_port_enemy_home_water: 7
 ref_home_distance: 14

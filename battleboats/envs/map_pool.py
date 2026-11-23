@@ -13,8 +13,9 @@ kept when:
 - (when ``min_port_enemy_home_water`` > 0) every port's spawn tile, home and
   satellites, is at least that many water moves from a tile next to the
   enemy home. At 7 with landing speed 3, a landing ship bought on turn 0
-  cannot capture before turn 2. The generator redraws ports to meet it; a
-  size where it cannot be met fails with RuntimeError instead of looping.
+  cannot capture before turn 3 (it cannot act on its build turn). The
+  generator redraws ports to meet it; a size where it cannot be met fails
+  with RuntimeError instead of looping.
 
 Seats alternate every episode, so any leftover asymmetry is played from both
 sides.
@@ -95,9 +96,10 @@ def spawn_enemy_home_water(data: dict) -> Optional[int]:
 
 def earliest_capture_turn(moves: int, speed: int = 3) -> int:
     """Earliest game turn a landing ship bought on turn 0 can capture, given the
-    water moves from its spawn tile to a tile next to the enemy home. It moves
-    ``speed`` tiles on its build turn and every turn after; capturing is free."""
-    return 0 if moves <= speed else (moves - 1) // speed
+    water moves from its spawn tile to a tile next to the enemy home. A bought
+    ship cannot act on its build turn, then moves ``speed`` tiles a turn;
+    capturing is free once adjacent. So ceil(moves / speed), and at least 1."""
+    return max(1, -(-int(moves) // int(speed)))
 
 
 def check_map(data: dict, min_port_enemy_home_water: int = 0) -> Tuple[bool, str]:
