@@ -43,6 +43,7 @@ from battleboats.envs.map_pool import episode_limits
 from battleboats.training.checkpoints import load_checkpoint
 from battleboats.training.selfplay import load_selfplay_config
 from battleboats.training.selfplay_purchases import hull_name
+from battleboats.training.manifest import append_eval
 
 
 def wilson(k: int, n: int, z: float = 1.96) -> Tuple[float, float]:
@@ -598,6 +599,7 @@ def main() -> None:
     summary_path.write_text(json.dumps(summary, indent=2, default=_jsonable))
     full_path.write_text(json.dumps(payload, indent=2, default=_jsonable))
     print(json.dumps(summary, indent=2, default=_jsonable))
+    append_eval(summary, checkpoint=args.checkpoint, name=out_dir.name)
     print(f"wrote {summary_path} and {full_path}", flush=True)
 
 

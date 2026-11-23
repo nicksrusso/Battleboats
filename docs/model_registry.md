@@ -10,7 +10,9 @@ number below is taken from a file (checkpoint `.json` metadata,
 `docs/model_versions.md`, a `runs/eval/*/summary.json`, or
 `runs/eval/behavior_scripted_v_v0.3.0/REPORT.md`). sha256 prefixes were
 recomputed from the `.pt` files and match the metadata. Anything not found in
-those files is called out as unverified or omitted.
+those files is called out as unverified or omitted. The live catalog of what
+was trained how — full configs, parent checkpoints, and evals — is the run
+index described in [Training run index](#training-run-index).
 
 W/L/D is wins/losses/draws for the named side. Wilson intervals are 95% on the
 win rate. "Score" counts a draw as half a win.
@@ -171,6 +173,47 @@ as v0.4.0. For a closer match to v0.3.0, the #45 home-first fog agent is the
 stronger measured opponent.
 
 ---
+
+
+---
+
+## Training run index
+
+Every trainer writes `runs/<run-name>/run.json` when it starts and updates it
+when it finishes. That file is the source of record for a run: the resolved
+config, git commit and dirty flag, the exact command line, the parent / init
+checkpoint (path, sha256, and tag if it matches `runs/checkpoints/vX.Y.Z_*`),
+reward settings, updates completed, the final checkpoint, and an `evals` list
+that eval scripts append to.
+
+Those manifests are gitignored along with the rest of `runs/`. Rebuild the
+index from a checkout that can see the run directories:
+
+```bash
+poetry run python scripts/runs_index.py --runs-root runs
+poetry run python scripts/runs_index.py --runs-root runs --backfill
+poetry run python scripts/runs_index.py --runs-root runs --format mermaid
+```
+
+`--backfill` writes a best-effort `run.json` for older run directories from
+`config.yaml`, logs, history, and the tagged checkpoint sidecars. Unknown
+fields stay `null`; a run whose `train.pid` process is still alive is skipped;
+existing non-backfilled manifests are left alone.
+
+The command writes `runs/index.csv` and `runs/index.sqlite` and prints a
+lineage tree from parent links, for example:
+
+```
+v0.4.0 [tagged]
+  └─ sandbox_buydiv_v0.4.1 [buydiv]
+       └─ selfplay_v0.4.1_winloss [selfplay]
+```
+
+The tagged sidecars in `runs/checkpoints/` are included in the index (kind
+`tagged`) so official names like v0.4.0 show up as nodes between their source
+run and later fine-tunes. This page keeps the human-readable write-up of each
+tagged checkpoint; the index is what keeps the training configs and family
+tree straight.
 
 ## Not found in files
 

@@ -55,6 +55,7 @@ from battleboats.training.hull_explore import (
 from battleboats.training.rollout import collect_trajectory, compute_gae
 from battleboats.training.sandbox_skills import SKILL_NAMES, skill_index
 from battleboats.training.wandb_log import init_wandb
+from battleboats.training.manifest import ManifestSession
 
 Role = str  # focus | mix | rehearsal
 
@@ -457,6 +458,26 @@ def load_sandbox_config(path: Path) -> SandboxRunConfig:
 
 
 def run_sandboxes(cfg: SandboxRunConfig, *, resume: bool = True) -> Dict:
+    cfg.run_dir.mkdir(parents=True, exist_ok=True)
+    with ManifestSession(
+        cfg.run_dir,
+        kind="sandbox",
+        config=cfg,
+        init_checkpoint=cfg.init_checkpoint,
+    ) as session:
+        result = _run_sandboxes(cfg, resume=resume)
+        latest = cfg.run_dir / "latest.pt"
+        updates = None
+        if isinstance(result, dict) and isinstance(result.get("summary"), dict):
+            updates = result["summary"].get("updates")
+        session.complete(
+            final_checkpoint=latest if latest.is_file() else None,
+            updates_completed=updates,
+        )
+        return result
+
+
+def _run_sandboxes(cfg: SandboxRunConfig, *, resume: bool = True) -> Dict:
     cfg.run_dir.mkdir(parents=True, exist_ok=True)
     device = resolve_device(cfg.device)
     rng = random.Random(cfg.seed)

@@ -30,6 +30,7 @@ from battleboats.training.checkpoints import frozen_copy, load_checkpoint, save_
 from battleboats.training.device import resolve_device
 from battleboats.training.loop import PPOHyper, apply_ppo, collect_episodes
 from battleboats.training.policy import PolicyNetwork
+from battleboats.training.manifest import ManifestSession
 
 SKILLS = (
     "move",
@@ -197,6 +198,27 @@ def _metric_value(skill: str, infos: List[dict], env) -> Dict[str, float]:
 
 
 def run_curriculum(cfg: CurriculumConfig, *, resume: bool = True) -> Dict[str, Any]:
+    cfg.run_dir.mkdir(parents=True, exist_ok=True)
+    with ManifestSession(
+        cfg.run_dir,
+        kind="curriculum",
+        config=cfg,
+        init_checkpoint=cfg.init_checkpoint,
+    ) as session:
+        result = _run_curriculum(cfg, resume=resume)
+        latest = cfg.run_dir / "latest.pt"
+        updates = None
+        state = result.get("state") if isinstance(result, dict) else None
+        if isinstance(state, dict):
+            updates = state.get("update") or state.get("updates")
+        session.complete(
+            final_checkpoint=latest if latest.is_file() else None,
+            updates_completed=updates,
+        )
+        return result
+
+
+def _run_curriculum(cfg: CurriculumConfig, *, resume: bool = True) -> Dict[str, Any]:
     """Train every stage. Returns ``{"ok": bool, ...}``. Does not raise on a missed gate."""
     import random
 
