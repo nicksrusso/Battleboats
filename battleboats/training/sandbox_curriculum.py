@@ -44,6 +44,13 @@ from battleboats.training.device import resolve_device
 from battleboats.training.loop import PPOHyper, apply_ppo
 from battleboats.training.policy import PolicyNetwork
 from battleboats.training.ppo_buffer import RolloutBuffer
+from battleboats.training.hull_explore import (
+    HullExplore,
+    empty_explore_stats,
+    format_explore,
+    merge_explore_stats,
+    set_policy_explore,
+)
 from battleboats.training.rollout import collect_trajectory, compute_gae
 from battleboats.training.sandbox_skills import SKILL_NAMES, skill_index
 from battleboats.training.wandb_log import init_wandb
@@ -335,6 +342,9 @@ class SandboxRunConfig:
     init_checkpoint: Optional[Path] = None
     # landing_build drill: "all" hulls buyable, or "landing" only.
     landing_build_hulls: str = "all"
+    # Epsilon-uniform hull on training build decisions (hull_explore.py).
+    # Never applied to eval episodes. eps 0 = off.
+    hull_explore: HullExplore = field(default_factory=HullExplore)
 
     def decay_for(self, skill: str) -> DecaySpec:
         return self.reward_decay_drills.get(skill, self.reward_decay)
@@ -409,6 +419,7 @@ def load_sandbox_config(path: Path) -> SandboxRunConfig:
         eval_episodes=int(raw.get("eval_episodes", 8)),
         allow_unmet=bool(raw.get("allow_unmet", False)),
         landing_build_hulls=str(raw.get("landing_build_hulls", "all")),
+        hull_explore=HullExplore.from_dict(raw.get("hull_explore")),
         save_every=int(raw.get("save_every", 10)),
         wandb=bool(raw.get("wandb", False)),
         wandb_project=str(raw.get("wandb_project", "battleboats-skill-pipeline")),
@@ -454,6 +465,8 @@ def run_sandboxes(cfg: SandboxRunConfig, *, resume: bool = True) -> Dict:
         f"mixed size_index={state['size_index']} skill_count=0 "
         f"wandb={'on' if logger.enabled else 'off'}"
     )
+    if cfg.hull_explore.enabled:
+        print(f"[sandboxes] hull exploration ON {cfg.hull_explore.describe()} (training episodes only)")
     try:
         while state["size_index"] < len(cfg.sizes):
             done, policy = _run_size(cfg, state, policy, envs, rng, device, logger)
@@ -563,12 +576,14 @@ def _run_size(cfg, state, policy, envs, rng, device, logger):
             log_row[f"{skill}/value_plateau_gain"] = metrics.get(f"{skill}/value_plateau_gain", 1.0)
             log_row[f"{skill}/gate"] = metrics[f"{skill}/gate"]
             log_row[f"{skill}/return_scale"] = metrics.get(f"{skill}/return_scale", 1.0)
+        metrics.pop("_explore_line", None)
         record = {"size": size, "update": updates, **metrics}
         _append_history(cfg, record)
         print(
             f"[size {size}x{size} u{updates}] "
             + " | ".join(parts)
             + f" ent={metrics.get('entropy', 0):.3f}"
+            + (f" {metrics['_explore_line']}" if metrics.get("_explore_line") else "")
         )
         logger.log(log_row, step=int(state.get("updates_total", 0)) + updates)
         save_checkpoint(policy, cfg.run_dir / "latest.pt", extra={"size": size, "skill_count": 0})
@@ -614,7 +629,16 @@ def _one_mixed_update(cfg, state, focus_size, policy, envs, rng, device, windows
     buffer = RolloutBuffer()
     policy.eval()
     metrics: Dict[str, float] = {}
+    explore_on = cfg.hull_explore.enabled
+    # Anneal on a run-wide update counter (updates_this_size resets per size).
+    explore_update = int(state.get("explore_updates", 0))
+    state["explore_updates"] = explore_update + 1
+    eps = cfg.hull_explore.eps_at(explore_update)
+    explore_total = empty_explore_stats()
     for skill in cfg.skills:
+        if explore_on:
+            set_policy_explore(policy, eps, cfg.hull_explore.logprob)
+            policy.hull_explore_stats = empty_explore_stats()
         decisions = 0
         episodes = 0
         raw_returns: List[float] = []
@@ -700,11 +724,28 @@ def _one_mixed_update(cfg, state, focus_size, policy, envs, rng, device, windows
         metrics[f"{skill}/episodes"] = float(state["episodes"].get(skill, 0))
         if focus_hits:
             metrics[f"{skill}/batch_success"] = sum(focus_hits) / len(focus_hits)
+        if explore_on:
+            st = policy.hull_explore_stats
+            metrics[f"{skill}/hull_builds"] = float(st["build"])
+            metrics[f"{skill}/hull_explored"] = float(st["explored"])
+            metrics[f"{skill}/landing_explored"] = float(st["explored_hulls"].get("landing", 0))
+            metrics[f"{skill}/landing_policy"] = float(st["policy_hulls"].get("landing", 0))
+            merge_explore_stats(explore_total, st)
+            policy.hull_explore_stats = None
+            set_policy_explore(policy, 0.0, cfg.hull_explore.logprob)
     if cfg.eval_episodes and int(state.get("updates_this_size", 0)) % max(1, cfg.eval_every) == 0:
         for skill in cfg.skills:
             metrics[f"{skill}/eval_success"] = _eval_rate(
                 policy, _env(cfg, envs, skill, focus_size), cfg, focus_size, skill
             )
+    if explore_on:
+        metrics["hull_explore/eps"] = eps
+        metrics["hull_explore/builds"] = float(explore_total["build"])
+        metrics["hull_explore/explored"] = float(explore_total["explored"])
+        for src in ("explored_hulls", "policy_hulls"):
+            for name, n in explore_total[src].items():
+                metrics[f"hull_explore/{src}/{name}"] = float(n)
+        metrics["_explore_line"] = format_explore(explore_total, eps)
     optimizer = state["_optimizer"]
     ppo_metrics = apply_ppo(policy, optimizer, buffer, cfg.ppo, device)
     metrics.update(ppo_metrics)
@@ -716,10 +757,16 @@ def _eval_rate(policy, env, cfg, size, skill) -> float:
     hits = 0
     rng = random.Random(10_000 + size)
     policy.eval()
-    for i in range(cfg.eval_episodes):
-        env.reset(seed=20_000 + i)
-        collect_trajectory(policy, None, env, 0, rng, max_steps=max_steps, use_env_reward=True)
-        hits += 1 if _succeeded(skill, env) else 0
+    # Eval measures the policy itself: no hull exploration, not counted.
+    saved = (getattr(policy, "hull_explore_eps", 0.0), getattr(policy, "hull_explore_stats", None))
+    policy.hull_explore_eps, policy.hull_explore_stats = 0.0, None
+    try:
+        for i in range(cfg.eval_episodes):
+            env.reset(seed=20_000 + i)
+            collect_trajectory(policy, None, env, 0, rng, max_steps=max_steps, use_env_reward=True)
+            hits += 1 if _succeeded(skill, env) else 0
+    finally:
+        policy.hull_explore_eps, policy.hull_explore_stats = saved
     return hits / max(1, cfg.eval_episodes)
 
 

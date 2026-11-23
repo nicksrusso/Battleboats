@@ -40,6 +40,7 @@ from battleboats.training.loop import PPOHyper, apply_ppo
 from battleboats.training.policy import PolicyNetwork, set_dropout
 from battleboats.training.ppo_buffer import RolloutBuffer
 from battleboats.training.fleet_starts import FleetStarts
+from battleboats.training.hull_explore import HullExplore, format_explore, set_policy_explore
 from battleboats.training.reward_shaping import COMPONENTS, RewardShaping
 from battleboats.training.selfplay_purchases import (
     aggregate_purchases,
@@ -95,6 +96,9 @@ class SelfPlayConfig:
     # Random equal-cost fleets for both sides on a fraction of games
     # (battleboats/training/fleet_starts.py). prob 0 = normal starts only.
     fleet_starts: FleetStarts = field(default_factory=FleetStarts)
+    # Epsilon-uniform hull on learner build decisions
+    # (battleboats/training/hull_explore.py). eps 0 = off.
+    hull_explore: HullExplore = field(default_factory=HullExplore)
 
     def __post_init__(self) -> None:
         self.run_dir = Path(self.run_dir)
@@ -136,6 +140,7 @@ def load_selfplay_config(path: Path) -> SelfPlayConfig:
         dropout=None if raw.get("dropout", 0.0) is None else float(raw.get("dropout", 0.0)),
         reward_shaping=RewardShaping.from_dict(raw.get("reward_shaping")),
         fleet_starts=FleetStarts.from_dict(raw.get("fleet_starts")),
+        hull_explore=HullExplore.from_dict(raw.get("hull_explore")),
     )
 
 
@@ -288,6 +293,9 @@ def run_selfplay(cfg: SelfPlayConfig, *, resume: bool = True) -> Dict[str, Any]:
             if small:
                 print(f"[selfplay] fleet starts OFF on {small} (below min_board {fs.min_width}x{fs.min_height}); those games are normal starts")
 
+    if cfg.hull_explore.enabled:
+        print(f"[selfplay] hull exploration ON {cfg.hull_explore.describe()} (learner build decisions only)")
+
     collector = make_collector(
         maps,
         map_info,
@@ -319,7 +327,10 @@ def _train_loop(cfg, policy, optimizer, snapshots, collector, state, state_path,
         if cfg.num_workers <= 0:
             torch.set_num_threads(max(1, cfg.collect_threads))
         policy.eval()
+        eps = cfg.hull_explore.eps_at(update)
+        set_policy_explore(policy, eps, cfg.hull_explore.logprob)
         collected = collector.collect(policy, snapshots.ring(), cfg.rollout_decisions)
+        set_policy_explore(policy, 0.0, cfg.hull_explore.logprob)
         collect_s = time.perf_counter() - t0
         buffer = RolloutBuffer()
         for segment in collected.segments:
@@ -375,6 +386,13 @@ def _train_loop(cfg, policy, optimizer, snapshots, collector, state, state_path,
             # Learner purchases made during this update, finished games or not.
             **purchase_mix(aggregate_purchases([{"purchases": collected.purchases}])),
             "landing_bought": int(collected.purchases.get("landing", 0)),
+            "hull_explore_eps": eps,
+            "hull_explore_builds": int(collected.hull_explore["build"]),
+            "hull_explore_fired": int(collected.hull_explore["explored"]),
+            "hull_explore_explored_hulls": dict(collected.hull_explore["explored_hulls"]),
+            "hull_explore_policy_hulls": dict(collected.hull_explore["policy_hulls"]),
+            "landing_bought_explored": int(collected.hull_explore["explored_hulls"].get("landing", 0)),
+            "landing_bought_policy": int(collected.hull_explore["policy_hulls"].get("landing", 0)),
             **{f"shape_{k}": v for k, v in collected.shaping.items()},
             **{f"ppo_{k}": v for k, v in metrics.items()},
         }
@@ -417,11 +435,12 @@ def _train_loop(cfg, policy, optimizer, snapshots, collector, state, state_path,
             f"/{collected.landing['learner_home_captures']}"
             f",O{collected.landing['opp_capture_attempts']}/{collected.landing['opp_captures']}"
             f"/{collected.landing['opp_home_captures']}"
+            + (" " + format_explore(collected.hull_explore, eps) if cfg.hull_explore.enabled else "")
         )
         if use_wandb:
             import wandb
 
-            wandb.log({k: v for k, v in row.items() if k not in ("pool", "by_size", "by_start", "combat", "landing", "purchases")})
+            wandb.log({k: v for k, v in row.items() if k not in ("pool", "by_size", "by_start", "combat", "landing", "purchases", "hull_explore_explored_hulls", "hull_explore_policy_hulls")})
         save_checkpoint(policy, latest, extra={"update": update + 1})
         if cfg.save_every and (update + 1) % cfg.save_every == 0:
             save_checkpoint(policy, cfg.run_dir / f"update_{update + 1}.pt")
