@@ -39,6 +39,8 @@ SKILL_NAMES = (
     "combat_carrier",
     "scouting",
     *(f"build_{name}" for name in _BUILD_HULLS),
+    # Appended so earlier slots keep their index.
+    "landing_build",
 )
 
 SKILL_INDEX = {name: i for i, name in enumerate(SKILL_NAMES)}

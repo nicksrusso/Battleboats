@@ -626,7 +626,9 @@ def test_load_real_config() -> None:
     assert cfg.success_threshold == 0.8
     assert cfg.window == 64
     assert cfg.min_updates == 3
-    assert cfg.skills[3] == "scouting"
+    assert cfg.skills[3] == "landing_build"
+    assert cfg.skills[4] == "scouting"
+    assert cfg.landing_build_hulls == "all"
     # The registry still names a typed-build drill per hull, but the
     # training curriculum omits the expensive ones that collapsed on 4x4.
     cheap_builds = ["build_merchant", "build_destroyer", "build_submarine"]
