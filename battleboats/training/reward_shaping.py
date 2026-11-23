@@ -39,6 +39,14 @@ pays for what the engine actually did:
   earned, and building a new one at home is worth ~0, so there is no free
   refund. The full trip pays about ``coef`` once. The per-game cap clips the
   running net sum to [-cap, +cap]; it is not part of ``total_cap``.
+- ``landing_buy`` (diminishing returns): buying a landing ship pays
+  ``landing_buy * landing_buy_decay ** n``, where n is the number of the
+  player's landing ships alive just before the buy. The first one pays the
+  full weight, the second half of it (decay 0.5), and so on. A replacement
+  for a sunk ship is worth as much as the first again. That replacement is the
+  only repeatable part; its per-game cap and ``total_cap`` bound it, and the
+  lost ship's kill penalty and landing_progress drop are charged separately.
+  It counts toward ``total_cap`` like the other positive non-kill components.
 
 Exploit guards: each port position pays ``port_build``/``port_capture`` at
 most once per player per game (so a port traded back and forth pays once),
@@ -66,7 +74,7 @@ from battleboats.core.gameEngine import MERCHANT_CAPACITY
 from battleboats.core.shipyard.ship_data import BASE_STATS
 from battleboats.core.shipyard.ship_type import ShipType
 
-COMPONENTS = ("build", "load", "unload", "port_build", "port_capture", "kill", "landing_progress")
+COMPONENTS = ("build", "load", "unload", "port_build", "port_capture", "kill", "landing_progress", "landing_buy")
 MAX_HULL_COST = float(max(s.cost for s in BASE_STATS.values()))
 
 
@@ -84,6 +92,9 @@ class RewardShaping:
     port_capture: float = 0.0
     kill: float = 0.0
     landing_progress: float = 0.0
+    landing_buy: float = 0.0
+    # landing_buy pays landing_buy * landing_buy_decay ** (landing ships alive).
+    landing_buy_decay: float = 0.5
     # Per-game cap on each component's summed reward (None = no cap).
     caps: Dict[str, Optional[float]] = field(default_factory=dict)
     # Cap on one player's summed positive non-kill shaping in one game
@@ -97,6 +108,9 @@ class RewardShaping:
         caps = dict(raw.pop("caps", {}) or {})
         enabled = bool(raw.pop("enabled", False))
         total_cap = raw.pop("total_cap", None)
+        decay = float(raw.pop("landing_buy_decay", 0.5))
+        if not 0.0 <= decay <= 1.0:
+            raise ValueError("reward_shaping.landing_buy_decay must be in [0, 1]")
         unknown = set(raw) | (set(weights) - set(COMPONENTS)) | (set(caps) - set(COMPONENTS))
         if unknown:
             raise ValueError(f"reward_shaping: unknown keys {sorted(unknown)}")
@@ -104,6 +118,7 @@ class RewardShaping:
             enabled=enabled,
             caps={k: (None if v is None else float(v)) for k, v in caps.items()},
             total_cap=None if total_cap is None else float(total_cap),
+            landing_buy_decay=decay,
             **{k: float(v) for k, v in weights.items()},
         )
 
@@ -252,7 +267,8 @@ class ShapingTracker:
             hit = target is not None and target.owner != pid and self.cfg.kill != 0.0
             return {"type": target.type if hit else None}
         if isinstance(action, BuildShipAction):
-            return {"cash": player.cash, "ships": len(player.owned_ship_ids)}
+            landings = sum(1 for sid in player.owned_ship_ids if engine.ships[sid].type == ShipType.LANDING)
+            return {"cash": player.cash, "ships": len(player.owned_ship_ids), "landings": landings}
         if isinstance(action, (MerchantLoadAction, MerchantUnloadAction)):
             ship = engine.ships.get(action.merchant_id)
             return {"cargo": None if ship is None else int(ship.cargo)}
@@ -273,6 +289,8 @@ class ShapingTracker:
             cost = BASE_STATS[action.ship_type].cost
             if pre["cash"] - player.cash == cost and len(player.owned_ship_ids) == pre["ships"] + 1:
                 raw["build"] = self.cfg.build * cost / MAX_HULL_COST
+                if action.ship_type == ShipType.LANDING and self.cfg.landing_buy:
+                    raw["landing_buy"] = self.cfg.landing_buy * self.cfg.landing_buy_decay ** pre["landings"]
         elif isinstance(action, MerchantLoadAction):
             ship = engine.ships.get(action.merchant_id)
             if ship is not None and pre["cargo"] is not None and ship.cargo > pre["cargo"]:
