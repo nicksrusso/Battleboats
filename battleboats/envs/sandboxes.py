@@ -4,8 +4,11 @@ Each one is a 1-player episode on a freshly randomized map. The opponent seat
 is auto-end-turned, except combat, where it plays ``scripted_action``. Rewards
 are completion rewards scaled by ``turn_decay`` (game turns, not actions):
 
-- merchant: the decayed reward only after the ship has loaded cargo and then
-  unloaded it at home. Loading alone pays 0.
+- merchant: a fixed number of turns (no early end). Each home unload pays
+  the gold it made divided by this episode's max achievable gold (see
+  ``merchant_max_deliveries``), so the episode return is the fraction of the
+  best possible haul, ~0..1, and more round trips pay more. No turn decay.
+  Ship builds are not legal. Success = return >= ``success_frac``.
 - builder: the decayed reward when a ship is bought. Cash starts at 0 and
   passive home-port income is removed, so the gold has to come from a merchant
   delivery. The buy itself is the real ``BuildShipAction``.
@@ -55,7 +58,7 @@ from battleboats.core.actions import (
     MerchantUnloadAction,
     MoveAction,
 )
-from battleboats.core.gameEngine import CASH_PER_MATERIAL, PORT_PRODUCTION
+from battleboats.core.gameEngine import CASH_PER_MATERIAL, MERCHANT_CAPACITY, PORT_PRODUCTION
 from battleboats.core.map.Map import WATER
 from battleboats.core.shipyard.ship_data import BASE_STATS
 from battleboats.core.shipyard.ship_stats import ShipStats
@@ -494,27 +497,96 @@ class _Sandbox(BattleboatsBaseAEC):
         return self.engine is not None and self.engine.turn >= self.max_turns
 
 
+def water_leg(engine, a: Pos, b: Pos) -> Optional[int]:
+    """Fewest moves between a water tile next to port ``a`` and one next to
+    port ``b`` (0 when one tile touches both). None if not connected."""
+    m = engine.map
+    w, h = m.width, m.height
+    starts = [q for q in _neighbors(a, w, h) if m.is_water(q)]
+    goals = {q for q in _neighbors(b, w, h) if m.is_water(q)}
+    dist = {q: 0 for q in starts}
+    frontier = list(starts)
+    while frontier:
+        nxt = []
+        for p in frontier:
+            if p in goals:
+                return dist[p]
+            for q in _neighbors(p, w, h):
+                if q not in dist and m.is_water(q):
+                    dist[q] = dist[p] + 1
+                    nxt.append(q)
+        frontier = nxt
+    return None
+
+
+def merchant_max_deliveries(leg: int, turns: int, speed: int) -> int:
+    """Upper bound on full deliveries in ``turns`` learner turns.
+
+    The merchant starts next to home with no cargo. Load and unload cost no
+    movement, so one delivery is a round trip of ``2 * leg`` tiles and the
+    whole episode has at most ``speed * turns`` tiles. A leg of 0 (one tile
+    touches both ports) is counted as 1 so the bound stays finite.
+    """
+    leg = max(1, int(leg))
+    return max(1, (int(speed) * int(turns)) // (2 * leg))
+
+
 class MerchantSandbox(_Sandbox):
-    """Load at a resource port, then unload at home. +1 on that unload."""
+    """Haul as much gold home as possible in a fixed number of turns.
+
+    Reward on each home unload: gold made / ``max_gold``. ``max_gold`` is
+    ``merchant_max_deliveries`` full loads (100 material = 200 gold each) for
+    this episode's map and turn count, so the return is the fraction of the
+    best possible haul. The satellite starts with enough material for every
+    one of those deliveries, so the stockpile never caps a good policy.
+    Passive home income is not counted. Builds are not legal.
+    """
 
     skill_name = "merchant"
 
-    def __init__(self, map_json_path: str, *, width: int, height: int, max_turns: int = 40) -> None:
-        self._hauled = False
-        self._loaded = False
+    def __init__(
+        self, map_json_path: str, *, width: int, height: int, max_turns: int = 40, success_frac: float = 0.5
+    ) -> None:
+        self.success_frac = float(success_frac)
+        self._reset_counters()
         super().__init__(map_json_path, width=width, height=height, max_turns=max_turns)
+
+    def _reset_counters(self) -> None:
+        self.deliveries = 0
+        self.loads = 0
+        self.gold = 0
+        self.leg = 0
+        self.max_deliveries = 1
+        self.max_gold = MERCHANT_CAPACITY * CASH_PER_MATERIAL
+
+    @property
+    def gold_frac(self) -> float:
+        return min(1.0, self.gold / max(1, self.max_gold))
 
     @property
     def hauled(self) -> bool:
-        return self._hauled
+        """At least one delivery (the old single-haul goal)."""
+        return self.deliveries > 0
+
+    @property
+    def success(self) -> bool:
+        return self.gold_frac >= self.success_frac
 
     def reset(self, seed: Optional[int] = None, options=None) -> None:
         if not (options or {}).get("scenario"):
             rng = random.Random(seed)
             placed = False
-            for _ in range(40):
+            for _ in range(200):
                 home, satellite, opp = _sample_lands(rng, self.width, self.height, 3)
                 land = {home, satellite, opp}
+                # No water tile touching both ports: there a merchant could
+                # load and unload without moving, so trips would be free.
+                shared = (
+                    set(_neighbors(home, self.width, self.height))
+                    & set(_neighbors(satellite, self.width, self.height))
+                ) - land
+                if shared:
+                    continue
                 if _ports_connected(land, self.width, self.height, home, satellite):
                     self._write_map([home, satellite, opp], [home, satellite], [opp])
                     placed = True
@@ -526,11 +598,16 @@ class MerchantSandbox(_Sandbox):
     def _configure_scenario(self, seed, options) -> None:
         assert self.engine is not None
         self._rng = random.Random((seed or 0) + 1)
-        self._hauled = False
-        self._loaded = False
+        self._reset_counters()
         learner = self.engine.players[0]
         satellite = next(p for p in learner.owned_port_positions if p != learner.home_port)
-        self.engine.ports[satellite].stockpile = 500
+        leg = water_leg(self.engine, learner.home_port, satellite)
+        if leg is None:
+            raise RuntimeError("MerchantSandbox: no water route from home to the satellite")
+        self.leg = int(leg)
+        self.max_deliveries = merchant_max_deliveries(leg, self.max_turns, BASE_STATS[ShipType.MERCHANT].speed)
+        self.max_gold = self.max_deliveries * MERCHANT_CAPACITY * CASH_PER_MATERIAL
+        self.engine.ports[satellite].stockpile = self.max_deliveries * MERCHANT_CAPACITY
         spawn = self._spawn_reaching(learner.home_port, satellite)
         if spawn is None:
             raise RuntimeError("MerchantSandbox: no water next to home")
@@ -539,38 +616,41 @@ class MerchantSandbox(_Sandbox):
         self.engine.turn = 0
         self.engine.winner = None
         self.engine._refresh_sightings()
+        # No BuildShipAction (or any build): move, load, unload, end turn only.
         self._filter((MoveAction, MerchantLoadAction, MerchantUnloadAction, EndTurnAction))
+
+    def _cargo(self) -> int:
+        assert self.engine is not None
+        cargo = 0
+        for sid in self.engine.players[0].owned_ship_ids:
+            ship = self.engine.ships[sid]
+            if ship.type is ShipType.MERCHANT:
+                cargo += ship.cargo
+        return int(cargo)
 
     def _capture_reward_state(self) -> Dict:
         assert self.engine is not None
-        cargo = 0
-        for sid in self.engine.players[0].owned_ship_ids:
-            ship = self.engine.ships[sid]
-            if ship.type is ShipType.MERCHANT:
-                cargo += ship.cargo
-        return {"cargo": int(cargo), "turn": int(self.engine.turn)}
+        return {"cargo": self._cargo(), "turn": int(self.engine.turn)}
 
     def _reward_after_step(self, agent, action, pre) -> Dict[str, float]:
         rewards = {a: 0.0 for a in self.agents}
-        assert self.engine is not None
-        cargo = 0
-        for sid in self.engine.players[0].owned_ship_ids:
-            ship = self.engine.ships[sid]
-            if ship.type is ShipType.MERCHANT:
-                cargo += ship.cargo
+        cargo = self._cargo()
         before = int(pre.get("cargo", 0))
         if cargo > before:
-            self._loaded = True
-        if self._loaded and cargo < before and not self._hauled:
-            self._hauled = True
-            rewards[self._agent_name(0)] = self._turn_scale(int(pre.get("turn", 0)))
+            self.loads += 1
+        elif cargo < before and isinstance(action, MerchantUnloadAction):
+            prev = self.gold_frac
+            self.deliveries += 1
+            self.gold += (before - cargo) * CASH_PER_MATERIAL
+            # Capped so the episode return never exceeds 1.
+            rewards[self._agent_name(0)] = self.gold_frac - prev
         return rewards
 
     def _is_terminated(self) -> bool:
-        return self._hauled
+        return False
 
     def _after_engine_step(self, agent, action) -> None:
-        self._pass_opponent(scripted=False, stop=lambda: self._hauled)
+        self._pass_opponent(scripted=False, stop=lambda: False)
 
 
 class ShipBuildSandbox(_Sandbox):
@@ -1219,6 +1299,7 @@ def make_sandbox(
     decay_horizon: int = 0,
     decay_floor: float = 0.0,
     landing_build_hulls: str = "all",
+    merchant_success_frac: float = 0.5,
 ):
     """Build the sandbox named by ``skill`` (see ``SKILL_NAMES``).
 
@@ -1226,7 +1307,9 @@ def make_sandbox(
     multiplier once that many turns have passed.
     """
     if skill == "merchant":
-        env = MerchantSandbox(map_json_path, width=width, height=height, max_turns=max_turns)
+        env = MerchantSandbox(
+            map_json_path, width=width, height=height, max_turns=max_turns, success_frac=merchant_success_frac
+        )
     elif skill == "builder":
         env = ShipBuildSandbox(map_json_path, width=width, height=height, max_turns=max_turns)
     elif skill == "landing":
@@ -1272,7 +1355,12 @@ def horizon(skill: str, size: int) -> Tuple[int, int]:
     if skill == "builder":
         return max(10, size * 4), max(36, size * 12)
     if skill == "merchant":
-        return max(8, size * 4), max(24, size * 12)
+        # Fixed length, no early end: 4 turns per board side (12 on 3x3, 40 on
+        # 10x10). At speed 3 that is 12*size tiles, several home<->satellite
+        # round trips even when the leg is most of the board. Load, unload
+        # and up to 3 moves per turn need ~6 decisions a turn; 10 leaves room.
+        turns = max(12, size * 4)
+        return turns, turns * 10
     if skill == "landing_build":
         # The landing drill's 3 turns per board side, plus a few for the build
         # (and for income to refill after a wrong hull).

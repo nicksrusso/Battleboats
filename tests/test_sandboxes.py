@@ -4,6 +4,7 @@ import json
 import random
 from pathlib import Path
 
+import pytest
 import torch
 
 from battleboats.core.actions import (
@@ -94,7 +95,7 @@ def _step_toward(env, goal):
     env.step(next(a for a in legal if isinstance(a, EndTurnAction)))
 
 
-def test_merchant_rewards_only_a_completed_haul(tmp_path: Path) -> None:
+def test_merchant_pays_per_delivery_not_per_load(tmp_path: Path) -> None:
     path = write_two_home_map(tmp_path / "m.json", 3, 3)
     env = MerchantSandbox(str(path), width=3, height=3, max_turns=20)
     env.reset(seed=1)
@@ -112,6 +113,7 @@ def test_merchant_rewards_only_a_completed_haul(tmp_path: Path) -> None:
             env.step(loads[0])
             loaded = True
             assert env.hauled is False
+            assert env.rewards["player_0"] == 0.0  # loading pays nothing
             assert env.terminations["player_0"] is False
             continue
         if unloads and loaded:
@@ -119,11 +121,13 @@ def test_merchant_rewards_only_a_completed_haul(tmp_path: Path) -> None:
             break
         _step_toward(env, satellite if not loaded else home)
     assert loaded
-    assert env.hauled
+    assert env.hauled and env.deliveries == 1
     paid = env.rewards["player_0"]
-    assert paid == env._turn_scale(env.engine.turn)
+    # Fixed-length drill: a delivery pays gold / max gold and does not end it.
+    assert paid == pytest.approx(env.gold / env.max_gold)
     assert 0.0 < paid <= 1.0
-    assert env.terminations["player_0"] is True
+    assert env.terminations["player_0"] is False
+    assert "player_0" in env.agents  # episode continues after the delivery
     env.close()
 
 
@@ -1094,11 +1098,14 @@ def test_turn_decay_prefers_a_fast_finish(tmp_path: Path) -> None:
                 break
             _step_toward(env, satellite if not loaded else home)
         paid = env.rewards["player_0"]
-        assert env.hauled and paid == env._turn_scale(env.engine.turn)
+        assert env.hauled and paid == pytest.approx(env.gold / env.max_gold)
         env.close()
         return paid
 
-    assert 1.0 >= haul(0) > haul(1) > 0.0
+    # The merchant drill is not turn-decayed: it pays gold hauled over a fixed
+    # number of turns, so a late delivery is worth the same as an early one
+    # (the lost turns cost the deliveries that could have followed).
+    assert 1.0 >= haul(0) == haul(1) > 0.0
 
     stalled = MerchantSandbox(str(board), width=3, height=3, max_turns=4)
     stalled.reset(seed=1)

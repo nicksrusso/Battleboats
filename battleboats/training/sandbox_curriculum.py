@@ -283,7 +283,8 @@ def drill_done(
 
 def _succeeded(skill: str, env) -> bool:
     if skill == "merchant":
-        return bool(env.hauled)
+        # Fixed-length haul: success = gold >= success_frac of the episode max.
+        return bool(env.success)
     if skill == "builder":
         return bool(env.built)
     if skill in ("landing", "landing_build"):
@@ -343,6 +344,9 @@ class SandboxRunConfig:
     init_checkpoint: Optional[Path] = None
     # landing_build drill: "all" hulls buyable, or "landing" only.
     landing_build_hulls: str = "all"
+    # merchant drill: an episode counts as a success when it hauls at least
+    # this fraction of its max achievable gold (MerchantSandbox).
+    merchant_success_frac: float = 0.5
     # Epsilon-uniform hull on training build decisions (hull_explore.py).
     # Never applied to eval episodes. eps 0 = off.
     hull_explore: HullExplore = field(default_factory=HullExplore)
@@ -371,6 +375,8 @@ class SandboxRunConfig:
             raise ValueError("plateau_updates must be >= 1")
         if self.max_updates_per_size < 1:
             raise ValueError("max_updates_per_size must be >= 1")
+        if not 0.0 < self.merchant_success_frac <= 1.0:
+            raise ValueError("merchant_success_frac must be in (0, 1]")
         if self.landing_build_hulls not in ("all", "landing"):
             raise ValueError("landing_build_hulls must be 'all' or 'landing'")
         _check_decay(self.reward_decay, "reward_decay")
@@ -420,6 +426,7 @@ def load_sandbox_config(path: Path) -> SandboxRunConfig:
         eval_episodes=int(raw.get("eval_episodes", 8)),
         allow_unmet=bool(raw.get("allow_unmet", False)),
         landing_build_hulls=str(raw.get("landing_build_hulls", "all")),
+        merchant_success_frac=float(raw.get("merchant_success_frac", 0.5)),
         hull_explore=HullExplore.from_dict(raw.get("hull_explore")),
         save_every=int(raw.get("save_every", 10)),
         wandb=bool(raw.get("wandb", False)),
@@ -589,6 +596,12 @@ def _run_size(cfg, state, policy, envs, rng, device, logger):
             f"[size {size}x{size} u{updates}] "
             + " | ".join(parts)
             + f" ent={metrics.get('entropy', 0):.3f}"
+            + (
+                f" merchant_haul=deliv:{metrics['merchant/deliveries']:.1f}/max:{metrics['merchant/max_deliveries']:.1f}"
+                f",gold:{metrics['merchant/gold_frac']:.2f}"
+                if "merchant/deliveries" in metrics
+                else ""
+            )
             + (f" {explore_line}" if explore_line else "")
         )
         logger.log(log_row, step=int(state.get("updates_total", 0)) + updates)
@@ -654,6 +667,7 @@ def _one_mixed_update(cfg, state, focus_size, policy, envs, rng, device, windows
         reward_window = reward_windows[skill]
         squared = 0.0
         valued = 0
+        hauls: List[Tuple[float, float, float]] = []  # merchant focus: (deliveries, gold_frac, max_deliveries)
         while decisions < budget and episodes < 32:
             _name, size, role = choose_mixed_episode(
                 rng,
@@ -694,6 +708,8 @@ def _one_mixed_update(cfg, state, focus_size, policy, envs, rng, device, windows
             # Goal-drill windows stay live after a pass so a collapse can
             # reopen the gate. Combat has no success window; its plateau
             # latch is separate (combat_passed).
+            if role == "focus" and hasattr(env, "deliveries") and hasattr(env, "gold_frac"):
+                hauls.append((float(env.deliveries), float(env.gold_frac), float(env.max_deliveries)))
             if role == "focus":
                 reward_window.append(raw)
                 if not _is_combat(skill):
@@ -730,6 +746,11 @@ def _one_mixed_update(cfg, state, focus_size, policy, envs, rng, device, windows
         metrics[f"{skill}/episodes"] = float(state["episodes"].get(skill, 0))
         if focus_hits:
             metrics[f"{skill}/batch_success"] = sum(focus_hits) / len(focus_hits)
+        if hauls:
+            metrics[f"{skill}/deliveries"] = sum(h[0] for h in hauls) / len(hauls)
+            metrics[f"{skill}/gold_frac"] = sum(h[1] for h in hauls) / len(hauls)
+            metrics[f"{skill}/max_deliveries"] = sum(h[2] for h in hauls) / len(hauls)
+            metrics[f"{skill}/haul_episodes"] = float(len(hauls))
         if explore_on:
             st = policy.hull_explore_stats
             metrics[f"{skill}/hull_builds"] = float(st["build"])
@@ -792,6 +813,7 @@ def _env(cfg, envs, skill, size):
             decay_horizon=decay.horizon,
             decay_floor=decay.floor,
             landing_build_hulls=cfg.landing_build_hulls,
+            merchant_success_frac=cfg.merchant_success_frac,
         )
         # The pointer net has no skill embedding. Zero this so a task id is
         # not stored on the transition. Ship type still sits in the token.
