@@ -408,7 +408,8 @@ def _train_loop(cfg, policy, optimizer, snapshots, collector, state, state_path,
             f"win={row['win_rate']:.2f} draw={row['draw_rate']:.2f} "
             f"games={row['games']} max_turn={row['max_turn']} "
             f"mean_steps={row['mean_steps']:.0f} pool={len(snapshots.paths)} "
-            f"ent={metrics['entropy']:.3f} dec={collected.decisions} env_steps={collected.env_steps} "
+            f"ent={metrics['entropy']:.3f} hull_ent={metrics.get('hull_entropy', 0):.3f} "
+            f"dec={collected.decisions} env_steps={collected.env_steps} "
             f"collect={collect_s:.1f}s ppo={ppo_s:.1f}s"
             + (
                 " sizes=" + ",".join(f"{k}:{v['games']}" for k, v in sorted(by_size.items()))

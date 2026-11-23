@@ -31,6 +31,10 @@ ppo:
   clip_eps: 0.2
   vf_coef: 0.5
   ent_coef: 0.01
+  # Extra bonus on the build_ship (hull) head, averaged only over build
+  # decisions so it is not diluted by asset/verb/move entropy. Joint
+  # ent_coef alone left that head at ~0 nats after the sandboxes.
+  hull_ent_coef: 0.05
   epochs: 4
   minibatch_size: 256
   max_grad_norm: 0.5

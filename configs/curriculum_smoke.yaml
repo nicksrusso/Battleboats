@@ -20,6 +20,10 @@ ppo:
   epochs: 1
   minibatch_size: 8
   ent_coef: 0.01
+  # Extra bonus on the build_ship (hull) head, averaged only over build
+  # decisions so it is not diluted by asset/verb/move entropy. Joint
+  # ent_coef alone left that head at ~0 nats after the sandboxes.
+  hull_ent_coef: 0.05
 
 stages:
   - {skill: merchant, width: 2, height: 3, success_threshold: 0.0, max_updates: 1,

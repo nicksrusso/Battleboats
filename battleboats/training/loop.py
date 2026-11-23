@@ -33,6 +33,8 @@ class PPOHyper:
     target_kl: Optional[float] = None
     # Dual-clip PPO constant (ppo_update.py). None = plain clip.
     dual_clip: Optional[float] = None
+    # Extra entropy bonus on the build_ship head only (ppo_update.py). 0 = off.
+    hull_ent_coef: float = 0.0
 
     def __post_init__(self) -> None:
         if self.dual_clip is not None and float(self.dual_clip) <= 1.0:
@@ -103,6 +105,7 @@ def apply_ppo(
             "policy_loss": 0.0,
             "value_loss": 0.0,
             "entropy": 0.0,
+            "hull_entropy": 0.0,
             "approx_kl": 0.0,
             "clip_frac": 0.0,
             "epochs_run": 0.0,
@@ -121,5 +124,6 @@ def apply_ppo(
         device=device,
         target_kl=hyper.target_kl,
         dual_clip=hyper.dual_clip,
+        hull_ent_coef=hyper.hull_ent_coef,
     )
     return metrics

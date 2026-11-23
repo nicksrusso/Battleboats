@@ -613,6 +613,7 @@ def _run_size(cfg, state, policy, envs, rng, device, logger):
             f"[size {size}x{size} u{updates}] "
             + " | ".join(parts)
             + f" ent={metrics.get('entropy', 0):.3f}"
+            + f" hull_ent={metrics.get('hull_entropy', 0):.3f}"
             + (
                 f" merchant_haul=deliv:{metrics['merchant/deliveries']:.1f}/max:{metrics['merchant/max_deliveries']:.1f}"
                 f",gold:{metrics['merchant/gold_frac']:.2f}"
