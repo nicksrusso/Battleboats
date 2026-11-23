@@ -11,15 +11,15 @@ yardstick, not a fog-of-war agent.
 Design
 ------
 Buys
-    Inverse-cost weights so expected gold per hull type is even. Among
-    legal ``BuildShipAction``s, a type is sampled with probability
-    proportional to ``1/cost``, then a port that can build that type is
-    chosen uniformly. Types that are not currently affordable, or that
-    have no unlocked spawn tile, get zero weight and the distribution is
-    renormalized over the legal set. Destroyers, subs, and merchants
-    (cost 100) are therefore bought more often than carriers, landings,
-    and builders (cost 250), but when every type is affordable the
-    expected spend per type is the same.
+    Per-game, per-player build queue. Each entry is a ship type sampled
+    uniformly from every buildable type (equal probability, no cost
+    weighting), using the caller's seeded ``rng``. Each turn, if gold
+    covers the cost of the queue head and a legal unlocked port can
+    spawn it, buy it at a uniformly chosen such port, pop the head, and
+    repeat while still affordable. Otherwise save — do not buy a cheaper
+    or different type. A head that can never be built on this map (type
+    not in the buildable set) is skipped and resampled; a head that is
+    only unaffordable or blocked this turn is held.
 
 Merchants
     The BAT-7 / merchant-sandbox loop: load at an owned non-home port
@@ -135,23 +135,100 @@ def should_engage(
     return ours > theirs * margin
 
 
-def inverse_cost_type_weights(ship_types: Sequence[ShipType]) -> Dict[ShipType, float]:
-    """``1/cost`` weights, unnormalized. Used so expected gold per type is even."""
-    return {t: 1.0 / float(BASE_STATS[t].cost) for t in ship_types}
+# Types the rules allow to be bought. A map may drop some; the queue
+# skips a head that is not in the engine's current buildable set.
+BUILDABLE_TYPES: Tuple[ShipType, ...] = tuple(ShipType)
+_QUEUE_FILL = 32
+
+
+def buildable_types(engine=None) -> Tuple[ShipType, ...]:
+    """Ship types that can ever be built in this game (not just this turn)."""
+    types = tuple(t for t in BUILDABLE_TYPES if t in BASE_STATS)
+    extra = (
+        getattr(engine, "_tactical_buildable_types", None)
+        if engine is not None
+        else None
+    )
+    if extra is not None:
+        allowed = set(extra)
+        types = tuple(t for t in types if t in allowed)
+    return types
+
+
+def sample_build_queue(
+    rng: random.Random,
+    n: int,
+    types: Optional[Sequence[ShipType]] = None,
+) -> List[ShipType]:
+    """``n`` types drawn independently and uniformly. Used to fill a queue."""
+    pool = tuple(types) if types is not None else buildable_types()
+    if not pool or n <= 0:
+        return []
+    return [rng.choice(pool) for _ in range(n)]
+
+
+def build_queue_for(engine, player_id: int) -> deque:
+    """Per-game, per-player queue stored on the engine.
+
+    Reset is detected via ``id(engine.players[0])``, which changes both
+    when a new ``gameEngine`` is constructed and when ``engine.reset()``
+    rebuilds the player list.
+    """
+    marker = id(engine.players[0])
+    state = getattr(engine, "_tactical_buy_state", None)
+    if state is None or state["marker"] != marker:
+        state = {"marker": marker, "queues": {0: deque(), 1: deque()}}
+        engine._tactical_buy_state = state
+    return state["queues"][player_id]
+
+
+def _discard_unbuildable(queue: deque, types: Sequence[ShipType]) -> None:
+    allowed = set(types)
+    while queue and queue[0] not in allowed:
+        queue.popleft()
+
+
+def _ensure_queue_head(
+    queue: deque,
+    rng: random.Random,
+    types: Sequence[ShipType],
+) -> Optional[ShipType]:
+    _discard_unbuildable(queue, types)
+    if not queue:
+        queue.extend(sample_build_queue(rng, _QUEUE_FILL, types))
+        _discard_unbuildable(queue, types)
+    return queue[0] if queue else None
 
 
 def choose_build_action(
-    options: Sequence[Action], rng: random.Random
+    engine,
+    player_id: int,
+    options: Sequence[Action],
+    rng: random.Random,
+    *,
+    queue: Optional[deque] = None,
+    types: Optional[Sequence[ShipType]] = None,
 ) -> Optional[Action]:
-    """Sample a legal buy with probability proportional to ``1/cost`` of its type."""
+    """Buy the queue head if it is legal and affordable this turn; else save.
+
+    ``options`` should be the current legal actions (or just the builds).
+    The head is popped only when a buy is actually returned. A uniformly
+    random legal port is chosen when more than one can spawn the head.
+    """
     builds = [a for a in options if isinstance(a, BuildShipAction)]
-    if not builds:
+    buildable = tuple(types) if types is not None else buildable_types(engine)
+    q = queue if queue is not None else build_queue_for(engine, player_id)
+    head = _ensure_queue_head(q, rng, buildable)
+    if head is None:
         return None
-    types = tuple(dict.fromkeys(a.ship_type for a in builds))
-    weights = [inverse_cost_type_weights(types)[t] for t in types]
-    chosen = rng.choices(types, weights=weights, k=1)[0]
-    matching = [a for a in builds if a.ship_type is chosen]
-    return rng.choice(matching)
+    matching = [a for a in builds if a.ship_type is head]
+    if not matching:
+        return None
+    chosen = rng.choice(matching)
+    q.popleft()
+    if not q:
+        q.extend(sample_build_queue(rng, _QUEUE_FILL, buildable))
+    return chosen
 
 
 def choose_builder_target(
@@ -262,7 +339,7 @@ def _choose(
     if move is not None:
         return move
 
-    buy = choose_build_action(by_cls.get(BuildShipAction, []), rng)
+    buy = choose_build_action(engine, player_id, by_cls.get(BuildShipAction, []), rng)
     if buy is not None:
         return buy
 
