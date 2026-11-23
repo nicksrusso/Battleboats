@@ -270,7 +270,7 @@ def test_landing_config_and_logging(tmp_path, capsys):
     for r in rows:
         assert "shape_landing_progress" in r and "landing" in r and "landing_alive_mean" in r
     out = capsys.readouterr().out
-    assert ",landing_progress:" in out and " land=alive:" in out and "landing_forward_prob=0.5" in out
+    assert ",landing_progress:" in out and " land=bought:" in out and ",alive:" in out and "landing_forward_prob=0.5" in out
 
 
 def test_forward_start_is_tagged(tmp_path):
