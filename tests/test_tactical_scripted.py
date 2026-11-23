@@ -6,20 +6,34 @@ import random
 from collections import Counter, deque
 from pathlib import Path
 
-from battleboats.agents.tactical import (BUILDABLE_TYPES, TacticalConfig,
-                                         build_queue_for, choose_build_action,
-                                         choose_builder_target,
-                                         local_combat_power,
-                                         sample_build_queue, should_engage,
-                                         tactical_scripted_action)
-from battleboats.core.actions import (AttackAction, BuildPortAction,
-                                      BuildShipAction, CapturePortAction,
-                                      EndTurnAction, MerchantLoadAction,
-                                      MerchantUnloadAction, MoveAction)
+from battleboats.agents.tactical import (
+    BUILDABLE_TYPES,
+    TacticalConfig,
+    build_queue_for,
+    choose_build_action,
+    choose_builder_target,
+    local_combat_power,
+    sample_build_queue,
+    should_engage,
+    tactical_scripted_action,
+)
+from battleboats.core.actions import (
+    AttackAction,
+    BuildPortAction,
+    BuildShipAction,
+    CapturePortAction,
+    EndTurnAction,
+    MerchantLoadAction,
+    MerchantUnloadAction,
+    MoveAction,
+)
 from battleboats.core.gameEngine import gameEngine
 from battleboats.core.shipyard.ship_type import ShipType
-from battleboats.envs.skill_maps import (write_full_map, write_merchant_map,
-                                         write_two_home_map)
+from battleboats.envs.skill_maps import (
+    write_full_map,
+    write_merchant_map,
+    write_two_home_map,
+)
 
 # Near-greedy so tests of flee / attack / builder pathing are deterministic.
 GREEDY = TacticalConfig(radius=6, margin=1.2, temperature=0.0)
@@ -349,3 +363,94 @@ def test_landing_explores_far_side_not_unsighted_home(tmp_path: Path) -> None:
     # x and keeps y or moves y toward 5. From (1, 4) that's +x, not -y.
     assert action.destination[1] >= landing.position[1]
     assert after_home <= before_home or after_explore < before_explore
+
+
+def test_landing_targets_nearest_known_port_not_home(tmp_path: Path) -> None:
+    """A landing walks toward the nearest known capturable port, not a farther sighted home."""
+    # Satellite at (8, 4) is 2 west of the landing; P1 home at (15, 4) is 5 east.
+    # Both are inside detection range 16, so both are known. Old home-first
+    # targeting would step east; nearest-port targeting steps west.
+    path = tmp_path / "nearest.json"
+    path.write_text(
+        '{"width": 20, "height": 10, "seed": 0,'
+        ' "land": [[0, 4], [8, 4], [15, 4]],'
+        ' "ports": {"0": [[0, 4]], "1": [[15, 4], [8, 4]]}}'
+    )
+    engine = gameEngine(str(path))
+    engine.reset(seed=0)
+    engine.players[0].cash = 0
+    engine.players[1].cash = 0
+    landing = engine._spawn_ship(0, ShipType.LANDING, (10, 4))
+    engine._refresh_sightings()
+    known = {s.position for s in engine.known_enemy_ports(0)}
+    assert (8, 4) in known
+    assert (15, 4) in known
+    assert any(s.is_home and s.position == (15, 4) for s in engine.known_enemy_ports(0))
+
+    action = _act(engine, 0, random.Random(0))
+    assert isinstance(action, MoveAction)
+    assert action.ship_id == landing.id
+    satellite, home = (8, 4), (15, 4)
+    assert engine.map.manhattan(action.destination, satellite) < engine.map.manhattan(
+        landing.position, satellite
+    )
+    assert engine.map.manhattan(action.destination, home) > engine.map.manhattan(
+        landing.position, home
+    )
+    # A greedy west step from (10, 4) is (9, 4).
+    assert action.destination[0] < landing.position[0]
+
+
+def test_landing_goes_to_known_satellite_not_unsighted_home(tmp_path: Path) -> None:
+    """A lone known non-home port is the goal; do not explore or chase a hidden home."""
+    # P1 home (29, 0) is 24 away from the landing, outside detection 16.
+    # The satellite at (8, 4) is adjacent to the west of the landing.
+    path = tmp_path / "satellite.json"
+    path.write_text(
+        '{"width": 30, "height": 10, "seed": 0,'
+        ' "land": [[0, 4], [8, 4], [29, 0]],'
+        ' "ports": {"0": [[0, 4]], "1": [[29, 0], [8, 4]]}}'
+    )
+    engine = gameEngine(str(path))
+    engine.reset(seed=0)
+    engine.players[0].cash = 0
+    engine.players[1].cash = 0
+    landing = engine._spawn_ship(0, ShipType.LANDING, (9, 4))
+    engine._refresh_sightings()
+    known = {s.position for s in engine.known_enemy_ports(0)}
+    assert known == {(8, 4)}
+    assert not any(s.is_home for s in engine.known_enemy_ports(0))
+
+    action = _act(engine, 0, random.Random(0))
+    # Adjacent to the satellite and unthreatened: capture it, don't walk
+    # toward the far-side explore tile (21, 5) or the hidden home (29, 0).
+    assert isinstance(action, CapturePortAction)
+    assert action.landing_ship_id == landing.id
+    assert action.target == (8, 4)
+    assert action in engine.enumerate_legal(0)
+
+
+def test_landing_captures_adjacent_satellite_even_if_home_is_known(
+    tmp_path: Path,
+) -> None:
+    """An unthreatened landing adjacent to a satellite captures it, not walking to a known home."""
+    path = tmp_path / "cap.json"
+    path.write_text(
+        '{"width": 20, "height": 10, "seed": 0,'
+        ' "land": [[0, 4], [8, 4], [15, 4]],'
+        ' "ports": {"0": [[0, 4]], "1": [[15, 4], [8, 4]]}}'
+    )
+    engine = gameEngine(str(path))
+    engine.reset(seed=0)
+    engine.players[0].cash = 0
+    engine.players[1].cash = 0
+    landing = engine._spawn_ship(0, ShipType.LANDING, (9, 4))
+    engine._refresh_sightings()
+    known = {s.position for s in engine.known_enemy_ports(0)}
+    assert (8, 4) in known and (15, 4) in known
+
+    action = _act(engine, 0, random.Random(0))
+    assert isinstance(action, CapturePortAction)
+    assert action.landing_ship_id == landing.id
+    assert action.target == (8, 4)
+    assert action in engine.enumerate_legal(0)
