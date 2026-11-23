@@ -11,7 +11,10 @@ game is advanced to the learner's next decision, the current policy's V(s)
 at that state bootstraps the segment's GAE, and the game carries on in the
 next update with the new weights. Finished games get the sparse terminal
 reward (+1/-1/0) on their last learner decision and bootstrap with 0; hitting
-the per-map step cap still counts as a draw, as before.
+the per-map step cap still counts as a draw, as before. ``draw_reward``
+(default 0) is added on top of that 0 when a game ends with no winner
+(turn cap or step cap). Win/loss terminals are unchanged. Mid-update
+budget cuts are not draws and do not get this term.
 
 With ``shaping`` enabled (``reward_shaping``), each learner decision also gets
 the shaped reward its own action earned (``ShapingTracker.score``), added to
@@ -173,6 +176,7 @@ class GameCollector:
         lam: float = 0.95,
         shaping: Optional[RewardShaping] = None,
         fleet_starts: Optional[FleetStarts] = None,
+        draw_reward: float = 0.0,
     ) -> None:
         self.maps = [str(m) for m in maps]
         self.map_info = list(map_info)
@@ -186,6 +190,7 @@ class GameCollector:
         self.gamma, self.lam = float(gamma), float(lam)
         self.shaping = shaping if shaping is not None else RewardShaping()
         self.fleet_starts = fleet_starts if fleet_starts is not None else FleetStarts()
+        self.draw_reward = float(draw_reward)
         self.policy = self._new_net()
         self.opponents: Dict[str, PolicyNetwork] = {}
         self.ring: List[str] = []
@@ -277,10 +282,14 @@ class GameCollector:
     def _finish(self, slot: _Slot, result: CollectResult) -> None:
         engine = slot.env.engine
         winner = engine.winner
+        # outcome stays +1/-1/0 so win/draw rates are unchanged. A configured
+        # draw_reward (typically negative) is added only on timeout draws;
+        # both seats would receive it, and here it lands on the learner.
         outcome = 1.0 if winner == slot.agent_pid else (-1.0 if winner is not None else 0.0)
+        terminal = outcome if winner is not None else self.draw_reward
         if slot.segment:
             self._settle(slot, result)
-            slot.segment[-1].reward += outcome
+            slot.segment[-1].reward += terminal
             compute_gae(slot.segment, gamma=self.gamma, lam=self.lam, last_value=0.0)
             result.segments.append(slot.segment)
         result.finished.append(

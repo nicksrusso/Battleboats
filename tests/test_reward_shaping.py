@@ -207,13 +207,20 @@ def test_config_parsing_and_defaults():
     shaped = load_selfplay_config(ROOT / "configs" / "selfplay_bigmaps_shaped.yaml")
     rs = shaped.reward_shaping
     assert rs.enabled and rs.total_cap is not None and rs.total_cap < 1.0
-    old = [k for k in COMPONENTS if k not in ("kill", "landing_progress", "landing_buy")]
+    old = [k for k in COMPONENTS if k not in ("kill", "ship_lost", "landing_progress", "landing_buy")]
     assert all(rs.weight(k) > 0 for k in old)
-    assert rs.kill == 0.0 and rs.landing_progress == 0.0 and rs.landing_buy == 0.0  # added in later configs
+    # later-added components default to 0 so older YAMLs stay unchanged
+    assert rs.kill == 0.0 and rs.ship_lost == 0.0 and rs.landing_progress == 0.0 and rs.landing_buy == 0.0
     assert sum(rs.caps[k] for k in old) > rs.total_cap
     assert shaped.init_checkpoint == base.init_checkpoint
     with pytest.raises(ValueError):
         RewardShaping.from_dict({"enabled": True, "weights": {"bogus": 1.0}})
+    assert base.draw_reward == 0.0 and shaped.draw_reward == 0.0
+    from battleboats.training.selfplay import _draw_reward
+    assert _draw_reward({}) == 0.0
+    assert _draw_reward({"reward": {"draw": -0.15}}) == pytest.approx(-0.15)
+    with pytest.raises(ValueError, match="unknown"):
+        _draw_reward({"reward": {"draw": -0.1, "bogus": 1}})
 
 
 def _policy(seed):
@@ -336,3 +343,53 @@ def test_selfplay_logs_shaping_components(tmp_path, capsys):
     rows = [json.loads(l) for l in (tmp_path / "run" / "history.jsonl").read_text().splitlines()]
     assert all(f"shape_{k}" in r for r in rows for k in COMPONENTS)
     assert " shape=build:" in capsys.readouterr().out
+
+
+def test_draw_reward_applies_only_on_timeout_draws(tmp_path):
+    """Timeout draws (no winner) add reward.draw to the last transition.
+    Win/loss terminals stay +1/-1. Logged outcome stays 0 on a draw so
+    draw_rate is unchanged.
+    """
+    maps, info = _pool(tmp_path)
+    net = _policy(4)
+    draw_r = -0.15
+    col = GameCollector(
+        maps, info, model_config=model_config_of(net), seed=0, games=1, random_opponent_frac=1.0,
+        shaping=RewardShaping(enabled=True, build=0.05),
+        draw_reward=draw_r,
+    )
+    col.set_weights(net.state_dict(), {}, [])
+    torch.manual_seed(11)
+    res = col.collect(800)
+    assert res.finished
+    n_draw = n_dec = 0
+    for fin, seg in zip(res.finished, res.segments):
+        extra = draw_r if fin["outcome"] == 0 else 0.0
+        assert sum(t.reward for t in seg) == pytest.approx(
+            fin["outcome"] + sum(fin["shaping"].values()) + extra
+        )
+        if fin["outcome"] == 0:
+            n_draw += 1
+            assert fin["truncated"] is True
+            assert fin["winner"] is None
+        else:
+            n_dec += 1
+            assert fin["winner"] is not None
+    assert n_draw > 0  # max_turns=6 in this pool, most games should time out
+
+
+def test_draw_reward_default_zero_matches_old_terminal(tmp_path):
+    maps, info = _pool(tmp_path)
+    net = _policy(2)
+    col = GameCollector(
+        maps, info, model_config=model_config_of(net), seed=0, games=1, random_opponent_frac=1.0,
+        shaping=RewardShaping(enabled=True, build=0.05),
+    )
+    col.set_weights(net.state_dict(), {}, [])
+    torch.manual_seed(7)
+    res = col.collect(400)
+    assert res.finished
+    assert col.draw_reward == 0.0
+    fin, seg = res.finished[0], res.segments[0]
+    assert sum(t.reward for t in seg) == pytest.approx(fin["outcome"] + sum(fin["shaping"].values()))
+

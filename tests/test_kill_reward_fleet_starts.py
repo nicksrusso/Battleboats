@@ -339,3 +339,134 @@ def test_fleets_config_and_logging(tmp_path, capsys):
         assert set(r["combat"]) >= {"learner_attacks", "learner_sinks", "opp_attacks", "opp_sinks"}
     out = capsys.readouterr().out
     assert "fleet starts ON" in out and ",kill:" in out and " atk=L" in out
+
+
+def test_ship_lost_defaults_to_zero_and_kill_stays_zero_sum(tmp_path):
+    """Old configs: ship_lost is 0, so a sink is still a zero-sum kill only."""
+    cfg = RewardShaping.from_dict({"enabled": True, "weights": {"kill": 0.02}})
+    assert cfg.ship_lost == 0.0
+    eng = _engine(tmp_path)
+    me, foe = eng.current_player, 1 - eng.current_player
+    t_me, t_foe = ShapingTracker(cfg), ShapingTracker(cfg)
+    (a, b), = _water_pair(eng)
+    atk, vic = _sink(eng, ShipType.CARRIER, ShipType.MERCHANT, a, b)
+    t_me.mark_fleet(eng, me)
+    t_foe.mark_fleet(eng, foe)
+    action = AttackAction(atk.id, vic.id)
+    pre = t_me.snapshot(eng, me, action)
+    eng.step(action)
+    assert t_me.score(eng, me, action, pre) == {"kill": pytest.approx(0.02 * 100 / 250)}
+    assert t_foe.settle(eng, foe) == {"kill": pytest.approx(-0.02 * 100 / 250)}
+    assert t_foe.totals["ship_lost"] == 0.0
+    assert t_me.totals["kill"] + t_foe.totals["kill"] == pytest.approx(0.0)
+
+
+def test_ship_lost_is_extra_cost_scaled_penalty(tmp_path):
+    """Losing a merchant costs -ship_lost * 100/250, on top of the kill loss.
+    The attacker does not receive ship_lost, so a 1-for-1 trade is net negative.
+    """
+    cfg = RewardShaping(enabled=True, kill=0.02, ship_lost=0.02)
+    eng = _engine(tmp_path)
+    me, foe = eng.current_player, 1 - eng.current_player
+    t_me, t_foe = ShapingTracker(cfg), ShapingTracker(cfg)
+    (a, b), = _water_pair(eng)
+    atk, vic = _sink(eng, ShipType.CARRIER, ShipType.MERCHANT, a, b)
+    t_me.mark_fleet(eng, me)
+    t_foe.mark_fleet(eng, foe)
+    action = AttackAction(atk.id, vic.id)
+    pre = t_me.snapshot(eng, me, action)
+    eng.step(action)
+    gain = t_me.score(eng, me, action, pre)
+    lost = t_foe.settle(eng, foe)
+    unit = 100 / 250
+    assert gain == {"kill": pytest.approx(0.02 * unit)}
+    assert lost == {
+        "kill": pytest.approx(-0.02 * unit),
+        "ship_lost": pytest.approx(-0.02 * unit),
+    }
+    # Attacker's net for this sink: +kill. Victim: -kill -ship_lost.
+    assert t_me.totals["kill"] + t_foe.totals["kill"] == pytest.approx(0.0)
+    assert t_me.totals["ship_lost"] == 0.0
+    assert t_foe.totals["ship_lost"] == pytest.approx(-0.02 * unit)
+
+
+def test_ship_lost_works_without_kill(tmp_path):
+    cfg = RewardShaping(enabled=True, kill=0.0, ship_lost=0.03)
+    eng = _engine(tmp_path)
+    me, foe = eng.current_player, 1 - eng.current_player
+    tr = ShapingTracker(cfg)
+    (a, b), = _water_pair(eng)
+    atk, vic = _sink(eng, ShipType.CARRIER, ShipType.DESTROYER, a, b)
+    tr.mark_fleet(eng, foe)
+    eng.step(AttackAction(atk.id, vic.id))
+    assert vic.id not in eng.ships
+    got = tr.settle(eng, foe)
+    assert got == {"ship_lost": pytest.approx(-0.03 * 100 / 250)}
+    assert tr.totals["kill"] == 0.0
+
+
+def test_ship_lost_scales_with_hull_cost(tmp_path):
+    cfg = RewardShaping(enabled=True, ship_lost=0.02)
+    eng = _engine(tmp_path)
+    me, foe = eng.current_player, 1 - eng.current_player
+    tr = ShapingTracker(cfg)
+    penalties = []
+    for victim, pair in ((ShipType.MERCHANT, 0), (ShipType.LANDING, 1)):
+        pairs = _water_pair(eng, n=2)
+        atk, vic = _sink(eng, ShipType.CARRIER, victim, *pairs[pair])
+        # Victim owner is whoever is not the attacker at spawn time.
+        owner = vic.owner
+        tr.mark_fleet(eng, owner)
+        eng.step(AttackAction(atk.id, vic.id))
+        penalties.append(tr.settle(eng, owner)["ship_lost"])
+    assert penalties[0] == pytest.approx(-0.02 * 100 / 250)
+    assert penalties[1] == pytest.approx(-0.02 * 250 / 250)
+    assert abs(penalties[1]) == pytest.approx(abs(penalties[0]) * 2.5)
+
+
+def test_ship_lost_cap_and_not_in_total_cap(tmp_path):
+    cfg = RewardShaping(
+        enabled=True, ship_lost=0.1, build=0.05,
+        caps={"ship_lost": 0.15}, total_cap=0.05,
+    )
+    eng = _engine(tmp_path)
+    me, foe = eng.current_player, 1 - eng.current_player
+    tr = ShapingTracker(cfg)
+    # Three landing losses at 0.1 each would be 0.3; cap is 0.15.
+    penalties = []
+    for _ in range(3):
+        (a, b), = _water_pair(eng, n=1)
+        atk, vic = _sink(eng, ShipType.CARRIER, ShipType.LANDING, a, b)
+        tr.mark_fleet(eng, vic.owner)
+        eng.step(AttackAction(atk.id, vic.id))
+        penalties.append(tr.settle(eng, vic.owner).get("ship_lost", 0.0))
+    assert penalties == pytest.approx([-0.1, -0.05, 0.0])
+    assert tr.totals["ship_lost"] == pytest.approx(-0.15)
+    # total_cap ignores ship_lost: with build already at 0.05, a further 0.05
+    # build is clipped to 0. If ship_lost (-0.15) were included in the
+    # positive sum, there would be room left and _capped would pay 0.05.
+    tr.totals["build"] = 0.05
+    assert tr._capped("build", 0.05) == 0.0
+
+
+def test_builder_spent_on_a_port_is_not_ship_lost(tmp_path):
+    eng = _engine(tmp_path, land=0.2)
+    me = eng.current_player
+    tr = ShapingTracker(RewardShaping(enabled=True, ship_lost=0.02, port_build=0.05))
+    for tile in obs._coastline_tiles(eng):
+        water = [
+            (tile[0] + dx, tile[1] + dy) for dx, dy in ((1, 0), (-1, 0), (0, 1), (0, -1))
+            if eng.map.in_bounds((tile[0] + dx, tile[1] + dy)) and eng.map.is_water((tile[0] + dx, tile[1] + dy))
+            and not eng.map.is_occupied((tile[0] + dx, tile[1] + dy))
+        ]
+        if water:
+            break
+    builder = eng._spawn_ship(me, ShipType.BUILDER, water[0])
+    tr.mark_fleet(eng, me)
+    action = BuildPortAction(builder.id, tile)
+    pre = tr.snapshot(eng, me, action)
+    eng.step(action)
+    assert tr.score(eng, me, action, pre) == {"port_build": pytest.approx(0.05)}
+    tr.mark_fleet(eng, me)
+    assert tr.settle(eng, me) == {}
+    assert tr.totals["ship_lost"] == 0.0
