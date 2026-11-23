@@ -52,39 +52,24 @@ import tempfile
 from typing import Dict, List, Optional, Sequence, Tuple
 
 from battleboats.agents.scripted import scripted_action
-from battleboats.core.actions import (
-    Action,
-    AttackAction,
-    BuildShipAction,
-    CapturePortAction,
-    EndTurnAction,
-    MerchantLoadAction,
-    MerchantUnloadAction,
-    MoveAction,
-)
-from battleboats.core.gameEngine import (
-    CASH_PER_MATERIAL,
-    MERCHANT_CAPACITY,
-    PORT_PRODUCTION,
-)
+from battleboats.core.actions import (Action, AttackAction, BuildShipAction,
+                                      CapturePortAction, EndTurnAction,
+                                      MerchantLoadAction, MerchantUnloadAction,
+                                      MoveAction)
+from battleboats.core.gameEngine import (CASH_PER_MATERIAL, MERCHANT_CAPACITY,
+                                         PORT_PRODUCTION)
 from battleboats.core.map.Map import WATER
 from battleboats.core.shipyard.ship_data import BASE_STATS
 from battleboats.core.shipyard.ship_stats import ShipStats
 from battleboats.core.shipyard.ship_type import ShipType
 from battleboats.core.sighting import Sighting
 from battleboats.envs.base_aec import BattleboatsBaseAEC
-from battleboats.training.buydiv import (
-    CHEAP_SHIP_TYPES,
-    diversity_potential,
-    diversity_score,
-    gold_spent_share,
-)
+from battleboats.training.buydiv import (CHEAP_SHIP_TYPES, diversity_potential,
+                                         diversity_score, gold_spent_share)
 from battleboats.training.sandbox_skills import SKILL_INDEX
-from battleboats.training.selfplay_purchases import (
-    empty_purchase_counts,
-    hull_name,
-    record_purchase,
-)
+from battleboats.training.selfplay_purchases import (empty_purchase_counts,
+                                                     hull_name,
+                                                     record_purchase)
 
 _CARDINALS: Tuple[Tuple[int, int], ...] = ((1, 0), (-1, 0), (0, 1), (0, -1))
 Pos = Tuple[int, int]
@@ -1475,7 +1460,7 @@ def _adjacent(a: Pos, b: Pos) -> bool:
     return abs(a[0] - b[0]) + abs(a[1] - b[1]) == 1
 
 
-def buydiv_layout(width: int, height: int) -> dict:
+def buydiv_layout(width: int, height: int, learner_id: int = 0) -> dict:
     """Learner ports with room to spawn, a passive enemy home, and optional build land.
 
     A corner home has only two water neighbors, so two unmoved ships would
@@ -1483,60 +1468,81 @@ def buydiv_layout(width: int, height: int) -> dict:
     learner two or three isolated land ports (four spawn tiles each) so an
     8-type fleet can be built without relying on the policy to vacate tiles.
     Tiny 3×3 factory boards keep the corner two-home layout.
+
+    ``learner_id`` is 0 or 1. The multi-port economy is always on the
+    learner's side (left for seat 0, right for seat 1) so both seats see
+    the same economy, only mirrored. Full-game maps also put player 0 on
+    the left and player 1 on the right; training only seat 0 on a left
+    home lets a policy latch onto absolute Fourier coordinates and then
+    fail as seat 0 (or sail left into the enemy as seat 1).
     """
+    if learner_id not in (0, 1):
+        raise ValueError(f"learner_id must be 0 or 1, got {learner_id!r}")
     if width < 2 or height < 2:
         raise ValueError(f"buydiv map {width}x{height} is too small")
     if width < 4 or height < 4:
-        home = (0, 0)
-        opp = (width - 1, height - 1)
+        if learner_id == 0:
+            home, opp = (0, 0), (width - 1, height - 1)
+        else:
+            home, opp = (width - 1, height - 1), (0, 0)
         if home == opp:
             raise ValueError(f"buydiv map {width}x{height} collapses to one tile")
         return {
             "home": home,
             "opp": opp,
             "land": [home, opp],
-            "ports0": [home],
-            "ports1": [opp],
+            "ports0": [home] if learner_id == 0 else [opp],
+            "ports1": [opp] if learner_id == 0 else [home],
+            "learner_id": learner_id,
         }
-    home = _inset(1, 1, width, height)
-    opp = _inset(width - 2, height - 2, width, height)
+    # Learner-side x (left for seat 0, right for seat 1) and the far side.
+    lx = 1 if learner_id == 0 else width - 2
+    ox = width - 2 if learner_id == 0 else 1
+    inward = 1 if learner_id == 0 else -1
+    home = _inset(lx, 1, width, height)
+    opp = _inset(ox, height - 2, width, height)
     if home == opp:
         raise ValueError(f"buydiv map {width}x{height} collapses to one tile")
     land = [home, opp]
-    ports0 = [home]
+    learner_ports = [home]
     for cand in (
-        _inset(1, height - 2, width, height),
-        _inset(1, height // 2, width, height),
-        _inset(3, 1, width, height),
+        _inset(lx, height - 2, width, height),
+        _inset(lx, height // 2, width, height),
+        _inset(lx + 2 * inward, 1, width, height),
     ):
         if cand in land:
             continue
         if any(_adjacent(cand, p) for p in land):
             continue
         land.append(cand)
-        ports0.append(cand)
-        if len(ports0) >= 3:
+        learner_ports.append(cand)
+        if len(learner_ports) >= 3:
             break
-    extra = _inset(width - 2, 1, width, height)
+    extra = _inset(ox, 1, width, height)
     if extra not in land and not any(_adjacent(extra, p) for p in land):
         land.append(extra)
     return {
         "home": home,
         "opp": opp,
         "land": land,
-        "ports0": ports0,
-        "ports1": [opp],
+        "ports0": learner_ports if learner_id == 0 else [opp],
+        "ports1": [opp] if learner_id == 0 else learner_ports,
+        "learner_id": learner_id,
     }
 
 
 class BuyDiversitySandbox(_Sandbox):
     """Fixed-horizon own-economy sandbox with a fleet-diversity reward.
 
-    Passive opponent (EndTurn only). Full legal action set so move / capture
-    / build_port stay practiced. Cheap hulls (destroyer, submarine, merchant)
-    can be masked for an episode; landing ships are never masked. Reward is
-    the per-buy delta of ``diversity_potential`` (clamped diversity score
-    plus an optional coverage bonus). No combat or win payoff.
+    Passive opponent (EndTurn only). The learner seat is 0 or 1 (set via
+    reset options) and the multi-port economy is mirrored onto that seat's
+    side. Move, endturn, build_port, load, and unload stay legal. Capture is
+    filtered so a mid-episode home capture does not cut the horizon; a
+    non-buy anchor toward a frozen full-game policy keeps those skills from
+    drifting. Cheap hulls (destroyer, submarine, merchant) can be masked
+    for an episode; landing ships are never masked. Reward is the per-buy
+    delta of ``diversity_potential`` (clamped diversity score plus an
+    optional coverage bonus). No combat or win payoff.
     """
 
     skill_name = "buy_diversity"
@@ -1561,7 +1567,16 @@ class BuyDiversitySandbox(_Sandbox):
         if (options or {}).get("scenario"):
             super().reset(seed=seed, options=options)
             return
-        layout = buydiv_layout(self.width, self.height)
+        opts = options or {}
+        if "learner_id" in opts:
+            lid = int(opts["learner_id"])
+            if lid not in (0, 1):
+                raise ValueError(f"learner_id must be 0 or 1, got {lid!r}")
+            self.learner_id = lid
+        # possible_agents is snapshotted in BaseAEC.__init__; refresh so
+        # reset() exposes the current learner seat.
+        self.possible_agents = self._possible_agents()
+        layout = buydiv_layout(self.width, self.height, learner_id=self.learner_id)
         self._write_map(layout["land"], layout["ports0"], layout["ports1"])
         super().reset(seed=seed, options=options)
 
@@ -1572,18 +1587,30 @@ class BuyDiversitySandbox(_Sandbox):
             self.mask_cheap = bool(opts["mask_cheap"])
         if "coverage_coef" in opts:
             self.coverage_coef = float(opts["coverage_coef"])
+        if "learner_id" in opts:
+            lid = int(opts["learner_id"])
+            if lid not in (0, 1):
+                raise ValueError(f"learner_id must be 0 or 1, got {lid!r}")
+            self.learner_id = lid
         self.purchase_counts = empty_purchase_counts()
         self.episode_reward = 0.0
         self.training_potential = 0.0
         # Keep the real starting cash and home-port income. The opponent is
         # passive; zero their cash so they cannot accidentally afford a ship
-        # if a future hook stops forcing EndTurn.
-        self.engine.players[1].cash = 0
+        # if a future hook stops forcing EndTurn. Player 0 still opens the
+        # turn; if the learner is seat 1, pass that opening EndTurn now so
+        # the first legal list is the learner's.
+        opp = 1 - self.learner_id
+        self.engine.players[opp].cash = 0
         self.engine.current_player = 0
         self.engine.turn = 0
         self.engine.winner = None
         self.engine._refresh_sightings()
         self._apply_cheap_mask()
+        self._pass_opponent(
+            scripted=False,
+            stop=lambda: self.engine is not None and self.engine.winner is not None,
+        )
 
     def _apply_cheap_mask(self) -> None:
         """Drop cheap BuildShip actions when this episode is masked.
@@ -1648,7 +1675,7 @@ class BuyDiversitySandbox(_Sandbox):
         # Opponent home still ticks income; keep them broke so a slip in the
         # pass hook cannot let them buy.
         if self.engine is not None:
-            self.engine.players[1].cash = 0
+            self.engine.players[1 - self.learner_id].cash = 0
 
     @property
     def diversity(self) -> float:
