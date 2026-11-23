@@ -97,6 +97,17 @@ def test_buydiv_layout_and_horizon() -> None:
     # Inset ports so an isolated land tile has 4 water neighbors.
     for port in wide["ports0"] + wide["ports1"]:
         assert 0 < port[0] < 15 and 0 < port[1] < 7
+    assert all(p[0] < 8 for p in wide["ports0"])
+    assert all(p[0] > 8 for p in wide["ports1"])
+    right = buydiv_layout(16, 8, learner_id=1)
+    assert len(right["ports1"]) >= 2
+    assert right["home"] == right["ports1"][0]
+    assert all(p[0] > 8 for p in right["ports1"])
+    assert all(p[0] < 8 for p in right["ports0"])
+    small1 = buydiv_layout(3, 3, learner_id=1)
+    assert small1["home"] == (2, 2)
+    assert small1["ports1"] == [(2, 2)]
+    assert small1["ports0"] == [(0, 0)]
     turns, steps = horizon("buy_diversity", 10)
     assert turns == 50
     assert steps == 50 * 80
@@ -111,9 +122,16 @@ def test_make_sandbox_buy_diversity(tmp_path: Path) -> None:
     env.close()
 
 
+def _agent(env) -> str:
+    return f"player_{int(getattr(env, 'learner_id', 0))}"
+
+
+def _legal(env):
+    return env.infos[_agent(env)]["legal_actions"]
+
+
 def _buy(env, ship: ShipType) -> bool:
-    legal = env.infos["player_0"]["legal_actions"]
-    for action in legal:
+    for action in _legal(env):
         if isinstance(action, BuildShipAction) and action.ship_type is ship:
             env.step(action)
             return True
@@ -121,8 +139,7 @@ def _buy(env, ship: ShipType) -> bool:
 
 
 def _end_turn(env) -> None:
-    legal = env.infos["player_0"]["legal_actions"]
-    ends = [a for a in legal if isinstance(a, EndTurnAction)]
+    ends = [a for a in _legal(env) if isinstance(a, EndTurnAction)]
     assert ends, "endturn should stay legal"
     env.step(ends[0])
 
@@ -213,3 +230,37 @@ def test_summarize_validation_ci_and_minmax() -> None:
     ci = mean_ci([0.0, 1.0, 0.5, 0.5])
     assert ci["mean"] == pytest.approx(0.5)
     assert ci["lo"] < 0.5 < ci["hi"]
+
+
+def test_learner_seat_one_gets_mirrored_economy(tmp_path: Path) -> None:
+    """Seat 1 is a first-class learner: right-side ports, legal buys, P0 is broke."""
+    path = write_two_home_map(tmp_path / "m.json", 8, 8)
+    env = BuyDiversitySandbox(str(path), width=8, height=8, max_turns=8)
+    env.reset(seed=0, options={"learner_id": 1, "mask_cheap": True})
+    assert env.learner_id == 1
+    assert env.agents == ["player_1"]
+    assert env.engine.current_player == 1
+    assert env.engine.players[0].cash == 0
+    assert env.engine.players[1].cash > 0
+    home = env.engine.players[1].home_port
+    assert home[0] > 3
+    legal = env.infos["player_1"]["legal_actions"]
+    assert legal
+    names = {hull_name(a.ship_type) for a in legal if isinstance(a, BuildShipAction)}
+    assert names & set(CHEAP_HULLS) == set()
+    assert "landing" in names
+    # A buy credits the seat-1 reward, not player_0.
+    bought = False
+    for ship in ShipType:
+        if _buy(env, ship):
+            bought = True
+            break
+    assert bought
+    assert env.episode_reward != 0.0 or env.purchase_counts
+    assert sum(env.purchase_counts.values()) == 1
+    env.reset(seed=0, options={"learner_id": 1, "mask_cheap": False})
+    names = {
+        hull_name(a.ship_type) for a in _legal(env) if isinstance(a, BuildShipAction)
+    }
+    assert set(CHEAP_HULLS) <= names
+    env.close()

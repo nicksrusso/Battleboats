@@ -296,6 +296,7 @@ def _episode_record(env, info: Dict[str, Any], masked: bool) -> Dict[str, Any]:
         "turn": int(info.get("turn", 0)),
         "width": int(getattr(env, "width", 0)),
         "height": int(getattr(env, "height", 0)),
+        "learner_id": int(getattr(env, "learner_id", 0)),
     }
 
 
@@ -458,12 +459,16 @@ def run_unmasked_eval(
     for i in range(int(n_episodes)):
         width, height = sizes[i % len(sizes)]
         env = envs[(width, height)]
-        env.reset(seed=int(seed0) + i, options={"mask_cheap": False})
+        learner_id = i % 2
+        env.reset(
+            seed=int(seed0) + i,
+            options={"mask_cheap": False, "learner_id": learner_id},
+        )
         _traj, info = collect_trajectory(
             policy,
             None,
             env,
-            0,
+            learner_id,
             rng,
             max_steps=_steps_cap(cfg.horizon_turns),
             use_env_reward=True,
@@ -552,15 +557,18 @@ def run_buydiv(cfg: BuyDivConfig) -> Dict[str, Any]:
                 width, height = sizes[episode_counter % len(sizes)]
                 env = envs[(width, height)]
                 masked = rng.random() < p
+                # Alternate seats so the policy cannot overfit a left-home
+                # (seat 0) or right-home (seat 1) absolute-position habit.
+                learner_id = episode_counter % 2
                 env.reset(
                     seed=int(cfg.seed) + episode_counter,
-                    options={"mask_cheap": masked},
+                    options={"mask_cheap": masked, "learner_id": learner_id},
                 )
                 traj, info = collect_trajectory(
                     policy,
                     None,
                     env,
-                    0,
+                    learner_id,
                     rng,
                     max_steps=_steps_cap(cfg.horizon_turns),
                     use_env_reward=True,
