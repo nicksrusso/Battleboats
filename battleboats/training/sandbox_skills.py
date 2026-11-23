@@ -41,6 +41,7 @@ SKILL_NAMES = (
     *(f"build_{name}" for name in _BUILD_HULLS),
     # Appended so earlier slots keep their index.
     "landing_build",
+    "buy_diversity",
 )
 
 SKILL_INDEX = {name: i for i, name in enumerate(SKILL_NAMES)}

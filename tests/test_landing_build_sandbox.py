@@ -74,8 +74,12 @@ def _drive(env, hull=ShipType.LANDING, steps=400):
 
 
 def test_registered_after_build_slots():
-    assert SKILL_NAMES[-1] == "landing_build"
+    # landing_build was appended after the typed-build slots; later drills
+    # (buy_diversity) are appended after it so those slots stay put.
+    assert SKILL_NAMES[skill_index("build_builder") + 1] == "landing_build"
     assert skill_index("landing") == 2  # earlier slots unchanged
+    assert SKILL_NAMES[-1] == "buy_diversity"
+    assert skill_index("buy_diversity") == skill_index("landing_build") + 1
     cfg = load_sandbox_config(ROOT / "configs" / "sandboxes.yaml")
     assert cfg.skills.index("landing_build") == cfg.skills.index("landing") + 1
     with pytest.raises(ValueError):

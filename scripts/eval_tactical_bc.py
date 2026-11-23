@@ -26,22 +26,17 @@ if str(_ROOT) not in sys.path:
 import torch
 
 from battleboats.agents.tactical import tactical_scripted_action
-from battleboats.core.actions import AttackAction, BuildShipAction, CapturePortAction
+from battleboats.core.actions import (AttackAction, BuildShipAction,
+                                      CapturePortAction)
 from battleboats.core.shipyard.ship_type import ShipType
 from battleboats.envs.action_masks import ActionMasks
 from battleboats.envs.battleboats_aec import BattleboatsAEC
 from battleboats.training.checkpoints import load_checkpoint
 from battleboats.training.selfplay import load_selfplay_config
 from battleboats.training.selfplay_purchases import hull_name
-from scripts.eval_tactical import (
-    _finalize_survivors,
-    _list_maps,
-    _new_tracker,
-    _note_births,
-    _note_deaths,
-    _schedule,
-    summarize,
-)
+from scripts.eval_tactical import (_finalize_survivors, _list_maps,
+                                   _new_tracker, _note_births, _note_deaths,
+                                   _schedule, summarize)
 
 DEFAULT_MAPS = Path(
     "/home/nick/Desktop/repos/Battleboats/runs/selfplay_mixed_v0.2.2/maps"
@@ -219,6 +214,13 @@ def main() -> None:
     parser.add_argument("--skip-vs-tactical", action="store_true")
     parser.add_argument("--skip-vs-v030", action="store_true")
     parser.add_argument("--skip-self-play", action="store_true")
+    parser.add_argument(
+        "--vs-checkpoint",
+        type=Path,
+        default=None,
+        help="Optional extra frozen policy to play (e.g. v0.4.0).",
+    )
+    parser.add_argument("--vs-label", type=str, default="frozen")
     args = parser.parse_args()
 
     torch.set_num_threads(args.threads)
@@ -236,12 +238,18 @@ def main() -> None:
         v030, _ = load_checkpoint(args.v030_checkpoint, device)
         v030.eval()
         policies["v030"] = v030
+    if args.vs_checkpoint is not None:
+        extra, _ = load_checkpoint(args.vs_checkpoint, device)
+        extra.eval()
+        policies["frozen"] = extra
 
     out = args.output_dir
     out.mkdir(parents=True, exist_ok=True)
     payload: Dict[str, Any] = {
         "bc_checkpoint": str(args.checkpoint),
         "v030_checkpoint": str(args.v030_checkpoint),
+        "vs_checkpoint": str(args.vs_checkpoint) if args.vs_checkpoint else None,
+        "vs_label": args.vs_label,
         "maps_dir": str(args.maps_dir),
         "config": str(args.config),
         "seed": args.seed,
@@ -287,6 +295,24 @@ def main() -> None:
         print(
             "VS V0.3.0",
             json.dumps(payload["vs_v0.3.0"], indent=2, default=str)[:2000],
+            flush=True,
+        )
+
+    if args.vs_checkpoint is not None:
+
+        def vs_frozen_actors(job):
+            bc_seat = job["seat"]
+            return {bc_seat: "bc", 1 - bc_seat: "frozen"}
+
+        jobs = _schedule(maps, cfg, args.games, args.seed)
+        label = args.vs_label
+        games = _run(jobs, vs_frozen_actors, policies, device, greedy, f"vs {label}")
+        key = f"vs_{label}"
+        games_out[key] = games
+        payload[key] = summarize(games, focal="bc", label=f"BC vs {label}")
+        print(
+            f"VS {label.upper()}",
+            json.dumps(payload[key], indent=2, default=str)[:2000],
             flush=True,
         )
 

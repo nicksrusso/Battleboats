@@ -62,14 +62,29 @@ from battleboats.core.actions import (
     MerchantUnloadAction,
     MoveAction,
 )
-from battleboats.core.gameEngine import CASH_PER_MATERIAL, MERCHANT_CAPACITY, PORT_PRODUCTION
+from battleboats.core.gameEngine import (
+    CASH_PER_MATERIAL,
+    MERCHANT_CAPACITY,
+    PORT_PRODUCTION,
+)
 from battleboats.core.map.Map import WATER
 from battleboats.core.shipyard.ship_data import BASE_STATS
 from battleboats.core.shipyard.ship_stats import ShipStats
 from battleboats.core.shipyard.ship_type import ShipType
 from battleboats.core.sighting import Sighting
 from battleboats.envs.base_aec import BattleboatsBaseAEC
+from battleboats.training.buydiv import (
+    CHEAP_SHIP_TYPES,
+    diversity_potential,
+    diversity_score,
+    gold_spent_share,
+)
 from battleboats.training.sandbox_skills import SKILL_INDEX
+from battleboats.training.selfplay_purchases import (
+    empty_purchase_counts,
+    hull_name,
+    record_purchase,
+)
 
 _CARDINALS: Tuple[Tuple[int, int], ...] = ((1, 0), (-1, 0), (0, 1), (0, -1))
 Pos = Tuple[int, int]
@@ -190,7 +205,9 @@ def ship_combat_power(stats: ShipStats) -> float:
 
     power = strength * (1 + attack_range) * speed
     """
-    return float(stats.strength) * (1.0 + float(stats.attack_range)) * float(stats.speed)
+    return (
+        float(stats.strength) * (1.0 + float(stats.attack_range)) * float(stats.speed)
+    )
 
 
 def side_power(engine, player_id: int) -> float:
@@ -202,7 +219,9 @@ def side_power(engine, player_id: int) -> float:
     return total
 
 
-def combat_outcome(my_start: float, enemy_start: float, my_end: float, enemy_end: float) -> float:
+def combat_outcome(
+    my_start: float, enemy_start: float, my_end: float, enemy_end: float
+) -> float:
     """Change in (own power - enemy power), divided by the starting total.
 
     Unchanged fleets score 0. Killing the enemy and living is positive.
@@ -398,7 +417,9 @@ class _Sandbox(BattleboatsBaseAEC):
 
     skill_name = ""
 
-    def __init__(self, map_json_path: str, *, width: int, height: int, max_turns: int) -> None:
+    def __init__(
+        self, map_json_path: str, *, width: int, height: int, max_turns: int
+    ) -> None:
         self.width = int(width)
         self.height = int(height)
         self.learner_id = 0
@@ -426,7 +447,9 @@ class _Sandbox(BattleboatsBaseAEC):
             except OSError:
                 pass
 
-    def _write_map(self, land: Sequence[Pos], ports0: Sequence[Pos], ports1: Sequence[Pos]) -> None:
+    def _write_map(
+        self, land: Sequence[Pos], ports0: Sequence[Pos], ports1: Sequence[Pos]
+    ) -> None:
         layout = {
             "width": self.width,
             "height": self.height,
@@ -491,7 +514,9 @@ class _Sandbox(BattleboatsBaseAEC):
             and guard < limit
         ):
             if scripted:
-                action = scripted_action(self.engine, self.engine.current_player, self._rng)
+                action = scripted_action(
+                    self.engine, self.engine.current_player, self._rng
+                )
             else:
                 action = EndTurnAction()
             self.engine.step(action)
@@ -643,7 +668,9 @@ class MerchantSandbox(_Sandbox):
                     placed = True
                     break
             if not placed:
-                raise RuntimeError("MerchantSandbox: no route from home to the satellite")
+                raise RuntimeError(
+                    "MerchantSandbox: no route from home to the satellite"
+                )
         super().reset(seed=seed, options=options)
 
     def _configure_scenario(self, seed, options) -> None:
@@ -651,12 +678,18 @@ class MerchantSandbox(_Sandbox):
         self._rng = random.Random((seed or 0) + 1)
         self._reset_counters()
         learner = self.engine.players[0]
-        satellite = next(p for p in learner.owned_port_positions if p != learner.home_port)
+        satellite = next(
+            p for p in learner.owned_port_positions if p != learner.home_port
+        )
         leg = water_leg(self.engine, learner.home_port, satellite)
         if leg is None:
-            raise RuntimeError("MerchantSandbox: no water route from home to the satellite")
+            raise RuntimeError(
+                "MerchantSandbox: no water route from home to the satellite"
+            )
         self.leg = int(leg)
-        self.max_deliveries = merchant_max_deliveries(leg, self.max_turns, BASE_STATS[ShipType.MERCHANT].speed)
+        self.max_deliveries = merchant_max_deliveries(
+            leg, self.max_turns, BASE_STATS[ShipType.MERCHANT].speed
+        )
         self.max_gold = self.max_deliveries * MERCHANT_CAPACITY * CASH_PER_MATERIAL
         self._satellite = satellite
         self.engine.ports[satellite].stockpile = self.START_STOCKPILE
@@ -673,7 +706,9 @@ class MerchantSandbox(_Sandbox):
         self.engine.winner = None
         self.engine._refresh_sightings()
         # No BuildShipAction (or any build): move, load, unload, end turn only.
-        self._filter((MoveAction, MerchantLoadAction, MerchantUnloadAction, EndTurnAction))
+        self._filter(
+            (MoveAction, MerchantLoadAction, MerchantUnloadAction, EndTurnAction)
+        )
 
     def _cargo(self) -> int:
         assert self.engine is not None
@@ -710,7 +745,11 @@ class MerchantSandbox(_Sandbox):
 
     def _capture_reward_state(self) -> Dict:
         assert self.engine is not None
-        return {"cargo": self._cargo(), "turn": int(self.engine.turn), "phi": self._potential()}
+        return {
+            "cargo": self._cargo(),
+            "turn": int(self.engine.turn),
+            "phi": self._potential(),
+        }
 
     def _reward_after_step(self, agent, action, pre) -> Dict[str, float]:
         rewards = {a: 0.0 for a in self.agents}
@@ -749,7 +788,9 @@ class ShipBuildSandbox(_Sandbox):
 
     skill_name = "builder"
 
-    def __init__(self, map_json_path: str, *, width: int, height: int, max_turns: int = 20) -> None:
+    def __init__(
+        self, map_json_path: str, *, width: int, height: int, max_turns: int = 20
+    ) -> None:
         self._built = False
         self._haul_cash = 0
         self._spent = 0
@@ -771,7 +812,9 @@ class ShipBuildSandbox(_Sandbox):
                     placed = True
                     break
             if not placed:
-                raise RuntimeError("ShipBuildSandbox: no route from home to the satellite")
+                raise RuntimeError(
+                    "ShipBuildSandbox: no route from home to the satellite"
+                )
         super().reset(seed=seed, options=options)
 
     def _configure_scenario(self, seed, options) -> None:
@@ -781,7 +824,9 @@ class ShipBuildSandbox(_Sandbox):
         self._spent = 0
         learner = self.engine.players[0]
         learner.cash = 0
-        satellite = next(p for p in learner.owned_port_positions if p != learner.home_port)
+        satellite = next(
+            p for p in learner.owned_port_positions if p != learner.home_port
+        )
         self.engine.ports[satellite].stockpile = 500
         spawn = self._spawn_reaching(learner.home_port, satellite)
         if spawn is None:
@@ -792,7 +837,13 @@ class ShipBuildSandbox(_Sandbox):
         self.engine.winner = None
         self.engine._refresh_sightings()
         self._filter(
-            (MoveAction, MerchantLoadAction, MerchantUnloadAction, BuildShipAction, EndTurnAction)
+            (
+                MoveAction,
+                MerchantLoadAction,
+                MerchantUnloadAction,
+                BuildShipAction,
+                EndTurnAction,
+            )
         )
         self._apply_cash()
 
@@ -845,7 +896,9 @@ class LandingSandbox(_Sandbox):
 
     skill_name = "landing"
 
-    def __init__(self, map_json_path: str, *, width: int, height: int, max_turns: int = 30) -> None:
+    def __init__(
+        self, map_json_path: str, *, width: int, height: int, max_turns: int = 30
+    ) -> None:
         self._captured = False
         super().__init__(map_json_path, width=width, height=height, max_turns=max_turns)
 
@@ -913,9 +966,19 @@ class LandingBuildSandbox(_Sandbox):
     skill_name = "landing_build"
     HULLS = ("all", "landing")
 
-    def __init__(self, map_json_path: str, *, width: int, height: int, max_turns: int = 30, hulls: str = "all") -> None:
+    def __init__(
+        self,
+        map_json_path: str,
+        *,
+        width: int,
+        height: int,
+        max_turns: int = 30,
+        hulls: str = "all",
+    ) -> None:
         if hulls not in self.HULLS:
-            raise ValueError(f"LandingBuildSandbox: hulls must be one of {self.HULLS}, got {hulls!r}")
+            raise ValueError(
+                f"LandingBuildSandbox: hulls must be one of {self.HULLS}, got {hulls!r}"
+            )
         self.hulls = hulls
         self._captured = False
         self._built_landing = False
@@ -947,8 +1010,15 @@ class LandingBuildSandbox(_Sandbox):
         assert self.engine is not None
         self._captured = False
         self._built_landing = False
-        if self._spawn_reaching(self.engine.players[0].home_port, self.engine.players[1].home_port) is None:
-            raise RuntimeError("LandingBuildSandbox: no water next to home that reaches the enemy home")
+        if (
+            self._spawn_reaching(
+                self.engine.players[0].home_port, self.engine.players[1].home_port
+            )
+            is None
+        ):
+            raise RuntimeError(
+                "LandingBuildSandbox: no water next to home that reaches the enemy home"
+            )
         self.engine.players[0].cash = int(BASE_STATS[ShipType.LANDING].cost)
         self.engine.players[1].cash = 0
         self.engine.current_player = 0
@@ -961,15 +1031,20 @@ class LandingBuildSandbox(_Sandbox):
 
             def enumerate_legal(player_id: int, _raw=raw) -> List[Action]:
                 return [
-                    a for a in _raw(player_id)
-                    if not isinstance(a, BuildShipAction) or a.ship_type == ShipType.LANDING
+                    a
+                    for a in _raw(player_id)
+                    if not isinstance(a, BuildShipAction)
+                    or a.ship_type == ShipType.LANDING
                 ]
 
             self.engine.enumerate_legal = enumerate_legal
 
     def _capture_reward_state(self) -> Dict:
         assert self.engine is not None
-        return {"turn": int(self.engine.turn), "ships": set(self.engine.players[0].owned_ship_ids)}
+        return {
+            "turn": int(self.engine.turn),
+            "ships": set(self.engine.players[0].owned_ship_ids),
+        }
 
     def _reward_after_step(self, agent, action, pre) -> Dict[str, float]:
         rewards = {a: 0.0 for a in self.agents}
@@ -1135,7 +1210,9 @@ class ScoutingSandbox(_Sandbox):
 
     skill_name = "scouting"
 
-    def __init__(self, map_json_path: str, *, width: int, height: int, max_turns: int = 40) -> None:
+    def __init__(
+        self, map_json_path: str, *, width: int, height: int, max_turns: int = 40
+    ) -> None:
         self._found = False
         self._target_id: Optional[int] = None
         self.episode_reward = 0.0
@@ -1166,7 +1243,9 @@ class ScoutingSandbox(_Sandbox):
             self._enemy_type = target
             self._layout = layout
             try:
-                self._write_map([layout["home"], layout["opp"]], [layout["home"]], [layout["opp"]])
+                self._write_map(
+                    [layout["home"], layout["opp"]], [layout["home"]], [layout["opp"]]
+                )
                 super().reset(seed=seed, options=options)
                 return
             except RuntimeError as exc:
@@ -1254,7 +1333,9 @@ class TypedBuildSandbox(_Sandbox):
         max_turns: int = 12,
     ) -> None:
         if ship not in BUILD_SHIPS:
-            raise ValueError(f"unknown build ship {ship!r}; expected one of {tuple(BUILD_SHIPS)}")
+            raise ValueError(
+                f"unknown build ship {ship!r}; expected one of {tuple(BUILD_SHIPS)}"
+            )
         self.ship = ship
         self.skill_name = f"build_{ship}"
         self.ship_type = BUILD_SHIPS[ship]
@@ -1283,12 +1364,16 @@ class TypedBuildSandbox(_Sandbox):
                 continue
             self._layout = layout
             try:
-                self._write_map([layout["home"], layout["opp"]], [layout["home"]], [layout["opp"]])
+                self._write_map(
+                    [layout["home"], layout["opp"]], [layout["home"]], [layout["opp"]]
+                )
                 super().reset(seed=seed, options=options)
                 return
             except RuntimeError as exc:
                 last_error = exc
-        raise RuntimeError(f"TypedBuildSandbox: no build layout on {self.width}x{self.height}: {last_error}")
+        raise RuntimeError(
+            f"TypedBuildSandbox: no build layout on {self.width}x{self.height}: {last_error}"
+        )
 
     def _configure_scenario(self, seed, options) -> None:
         assert self.engine is not None
@@ -1370,9 +1455,208 @@ class TypedBuildSandbox(_Sandbox):
         return self._built_target or self._built_wrong
 
     def _after_engine_step(self, agent, action) -> None:
-        self._pass_opponent(scripted=False, stop=lambda: self._built_target or self._built_wrong)
+        self._pass_opponent(
+            scripted=False, stop=lambda: self._built_target or self._built_wrong
+        )
         self._cap_cash()
         self._show_cue()
+
+
+def _inset(x: int, y: int, width: int, height: int) -> Pos:
+    """Clamp a tile one step off the border so an isolated land port has 4 water neighbors."""
+    if width >= 3:
+        x = min(max(1, x), width - 2)
+    if height >= 3:
+        y = min(max(1, y), height - 2)
+    return (x, y)
+
+
+def _adjacent(a: Pos, b: Pos) -> bool:
+    return abs(a[0] - b[0]) + abs(a[1] - b[1]) == 1
+
+
+def buydiv_layout(width: int, height: int) -> dict:
+    """Learner ports with room to spawn, a passive enemy home, and optional build land.
+
+    A corner home has only two water neighbors, so two unmoved ships would
+    block every further buy. Boards 4×4 and up inset the ports and give the
+    learner two or three isolated land ports (four spawn tiles each) so an
+    8-type fleet can be built without relying on the policy to vacate tiles.
+    Tiny 3×3 factory boards keep the corner two-home layout.
+    """
+    if width < 2 or height < 2:
+        raise ValueError(f"buydiv map {width}x{height} is too small")
+    if width < 4 or height < 4:
+        home = (0, 0)
+        opp = (width - 1, height - 1)
+        if home == opp:
+            raise ValueError(f"buydiv map {width}x{height} collapses to one tile")
+        return {
+            "home": home,
+            "opp": opp,
+            "land": [home, opp],
+            "ports0": [home],
+            "ports1": [opp],
+        }
+    home = _inset(1, 1, width, height)
+    opp = _inset(width - 2, height - 2, width, height)
+    if home == opp:
+        raise ValueError(f"buydiv map {width}x{height} collapses to one tile")
+    land = [home, opp]
+    ports0 = [home]
+    for cand in (
+        _inset(1, height - 2, width, height),
+        _inset(1, height // 2, width, height),
+        _inset(3, 1, width, height),
+    ):
+        if cand in land:
+            continue
+        if any(_adjacent(cand, p) for p in land):
+            continue
+        land.append(cand)
+        ports0.append(cand)
+        if len(ports0) >= 3:
+            break
+    extra = _inset(width - 2, 1, width, height)
+    if extra not in land and not any(_adjacent(extra, p) for p in land):
+        land.append(extra)
+    return {
+        "home": home,
+        "opp": opp,
+        "land": land,
+        "ports0": ports0,
+        "ports1": [opp],
+    }
+
+
+class BuyDiversitySandbox(_Sandbox):
+    """Fixed-horizon own-economy sandbox with a fleet-diversity reward.
+
+    Passive opponent (EndTurn only). Full legal action set so move / capture
+    / build_port stay practiced. Cheap hulls (destroyer, submarine, merchant)
+    can be masked for an episode; landing ships are never masked. Reward is
+    the per-buy delta of ``diversity_potential`` (clamped diversity score
+    plus an optional coverage bonus). No combat or win payoff.
+    """
+
+    skill_name = "buy_diversity"
+
+    def __init__(
+        self,
+        map_json_path: str,
+        *,
+        width: int,
+        height: int,
+        max_turns: int = 50,
+        coverage_coef: float = 0.25,
+    ) -> None:
+        self.coverage_coef = float(coverage_coef)
+        self.mask_cheap = False
+        self.purchase_counts = empty_purchase_counts()
+        self.episode_reward = 0.0
+        self.training_potential = 0.0
+        super().__init__(map_json_path, width=width, height=height, max_turns=max_turns)
+
+    def reset(self, seed: Optional[int] = None, options=None) -> None:
+        if (options or {}).get("scenario"):
+            super().reset(seed=seed, options=options)
+            return
+        layout = buydiv_layout(self.width, self.height)
+        self._write_map(layout["land"], layout["ports0"], layout["ports1"])
+        super().reset(seed=seed, options=options)
+
+    def _configure_scenario(self, seed, options) -> None:
+        assert self.engine is not None
+        opts = options or {}
+        if "mask_cheap" in opts:
+            self.mask_cheap = bool(opts["mask_cheap"])
+        if "coverage_coef" in opts:
+            self.coverage_coef = float(opts["coverage_coef"])
+        self.purchase_counts = empty_purchase_counts()
+        self.episode_reward = 0.0
+        self.training_potential = 0.0
+        # Keep the real starting cash and home-port income. The opponent is
+        # passive; zero their cash so they cannot accidentally afford a ship
+        # if a future hook stops forcing EndTurn.
+        self.engine.players[1].cash = 0
+        self.engine.current_player = 0
+        self.engine.turn = 0
+        self.engine.winner = None
+        self.engine._refresh_sightings()
+        self._apply_cheap_mask()
+
+    def _apply_cheap_mask(self) -> None:
+        """Drop cheap BuildShip actions when this episode is masked.
+
+        Landing (and every other non-cheap type) stays legal. No verb filter:
+        move, endturn, build_port, load, unload, and capture remain available.
+        """
+        assert self.engine is not None
+        raw = self.engine.enumerate_legal
+        cheap = set(CHEAP_SHIP_TYPES)
+
+        def enumerate_legal(player_id: int, _raw=raw) -> List[Action]:
+            acts = []
+            for a in _raw(player_id):
+                # Capturing the passive enemy home would set engine.winner and
+                # end the episode early, which both shortens the diversity
+                # horizon and would punish a successful landing. Leave capture
+                # to the full-game eval; move and build stay legal here.
+                if isinstance(a, CapturePortAction):
+                    continue
+                if (
+                    self.mask_cheap
+                    and player_id == self.learner_id
+                    and isinstance(a, BuildShipAction)
+                    and a.ship_type in cheap
+                ):
+                    continue
+                acts.append(a)
+            return acts
+
+        self.engine.enumerate_legal = enumerate_legal
+
+    def _capture_reward_state(self) -> Dict:
+        return {"counts": dict(self.purchase_counts)}
+
+    def _reward_after_step(self, agent, action, pre) -> Dict[str, float]:
+        rewards = {a: 0.0 for a in self.agents}
+        if not isinstance(action, BuildShipAction):
+            return rewards
+        if self._player_id(agent) != self.learner_id:
+            return rewards
+        record_purchase(self.purchase_counts, action.ship_type)
+        new = diversity_potential(self.purchase_counts, self.coverage_coef)
+        delta = new - self.training_potential
+        self.training_potential = new
+        self.episode_reward += delta
+        rewards[self._agent_name(self.learner_id)] = delta
+        return rewards
+
+    def _is_terminated(self) -> bool:
+        # A landing can still capture the passive enemy home. The engine then
+        # has a winner and enumerate_legal is empty; treat that as a terminal
+        # state so the collector does not act on an empty mask. No win reward
+        # is paid (use_env_reward only sums diversity deltas).
+        return self.engine is not None and self.engine.winner is not None
+
+    def _after_engine_step(self, agent, action) -> None:
+        self._pass_opponent(
+            scripted=False,
+            stop=lambda: self.engine is not None and self.engine.winner is not None,
+        )
+        # Opponent home still ticks income; keep them broke so a slip in the
+        # pass hook cannot let them buy.
+        if self.engine is not None:
+            self.engine.players[1].cash = 0
+
+    @property
+    def diversity(self) -> float:
+        return diversity_score(self.purchase_counts)
+
+    @property
+    def gold_share(self) -> Dict[str, float]:
+        return gold_spent_share(self.purchase_counts)
 
 
 def make_sandbox(
@@ -1403,15 +1687,25 @@ def make_sandbox(
             progress=merchant_progress,
         )
     elif skill == "builder":
-        env = ShipBuildSandbox(map_json_path, width=width, height=height, max_turns=max_turns)
+        env = ShipBuildSandbox(
+            map_json_path, width=width, height=height, max_turns=max_turns
+        )
     elif skill == "landing":
-        env = LandingSandbox(map_json_path, width=width, height=height, max_turns=max_turns)
+        env = LandingSandbox(
+            map_json_path, width=width, height=height, max_turns=max_turns
+        )
     elif skill == "landing_build":
         env = LandingBuildSandbox(
-            map_json_path, width=width, height=height, max_turns=max_turns, hulls=landing_build_hulls
+            map_json_path,
+            width=width,
+            height=height,
+            max_turns=max_turns,
+            hulls=landing_build_hulls,
         )
     elif skill == "scouting":
-        env = ScoutingSandbox(map_json_path, width=width, height=height, max_turns=max_turns)
+        env = ScoutingSandbox(
+            map_json_path, width=width, height=height, max_turns=max_turns
+        )
     elif skill.startswith("combat_"):
         env = CombatSandbox(
             map_json_path,
@@ -1427,6 +1721,10 @@ def make_sandbox(
             width=width,
             height=height,
             max_turns=max_turns,
+        )
+    elif skill == "buy_diversity":
+        env = BuyDiversitySandbox(
+            map_json_path, width=width, height=height, max_turns=max_turns
         )
     else:
         raise ValueError(f"unknown sandbox {skill!r}")
@@ -1470,4 +1768,10 @@ def horizon(skill: str, size: int) -> Tuple[int, int]:
         # the haul-then-buy drill and is not this branch.
         turns = max(6, int(size) * 2)
         return turns, max(12, turns * 2)
+    if skill == "buy_diversity":
+        # Fixed 50-turn economy by default (overridden by the trainer's
+        # max_turns). One buy per port per turn, so 50 turns is enough
+        # for several of each of the eight hulls.
+        turns = 50
+        return turns, turns * 80
     return max(8, size * 3), max(16, size * 8)
