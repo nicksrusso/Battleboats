@@ -347,14 +347,6 @@ class SandboxRunConfig:
     # merchant drill: an episode counts as a success when it hauls at least
     # this fraction of its max achievable gold (MerchantSandbox).
     merchant_success_frac: float = 0.5
-    # How the merchant drill gates. "plateau" (default): after
-    # combat_min_episodes on-size episodes, the mean gold_frac of the last
-    # `window` on-size episodes is >= merchant_min_gold AND the smoothed
-    # per-update gold_frac has plateaued (plateau_updates / plateau_threshold,
-    # as for combat). Passing latches for that size. "success": the usual
-    # success window, success = gold_frac >= merchant_success_frac.
-    merchant_gate: str = "plateau"
-    merchant_min_gold: float = 0.4
     # Epsilon-uniform hull on training build decisions (hull_explore.py).
     # Never applied to eval episodes. eps 0 = off.
     hull_explore: HullExplore = field(default_factory=HullExplore)
@@ -385,10 +377,6 @@ class SandboxRunConfig:
             raise ValueError("max_updates_per_size must be >= 1")
         if not 0.0 < self.merchant_success_frac <= 1.0:
             raise ValueError("merchant_success_frac must be in (0, 1]")
-        if self.merchant_gate not in ("plateau", "success"):
-            raise ValueError("merchant_gate must be 'plateau' or 'success'")
-        if not 0.0 <= self.merchant_min_gold <= 1.0:
-            raise ValueError("merchant_min_gold must be in [0, 1]")
         if self.landing_build_hulls not in ("all", "landing"):
             raise ValueError("landing_build_hulls must be 'all' or 'landing'")
         _check_decay(self.reward_decay, "reward_decay")
@@ -439,8 +427,6 @@ def load_sandbox_config(path: Path) -> SandboxRunConfig:
         allow_unmet=bool(raw.get("allow_unmet", False)),
         landing_build_hulls=str(raw.get("landing_build_hulls", "all")),
         merchant_success_frac=float(raw.get("merchant_success_frac", 0.5)),
-        merchant_gate=str(raw.get("merchant_gate", "plateau")),
-        merchant_min_gold=float(raw.get("merchant_min_gold", 0.4)),
         hull_explore=HullExplore.from_dict(raw.get("hull_explore")),
         save_every=int(raw.get("save_every", 10)),
         wandb=bool(raw.get("wandb", False)),
@@ -612,7 +598,7 @@ def _run_size(cfg, state, policy, envs, rng, device, logger):
             + f" ent={metrics.get('entropy', 0):.3f}"
             + (
                 f" merchant_haul=deliv:{metrics['merchant/deliveries']:.1f}/max:{metrics['merchant/max_deliveries']:.1f}"
-                f",gold:{metrics['merchant/gold_frac']:.2f},gold_win:{metrics['merchant/gold_window']:.2f}"
+                f",gold:{metrics['merchant/gold_frac']:.2f}"
                 if "merchant/deliveries" in metrics
                 else ""
             )
@@ -761,13 +747,6 @@ def _one_mixed_update(cfg, state, focus_size, policy, envs, rng, device, windows
         if focus_hits:
             metrics[f"{skill}/batch_success"] = sum(focus_hits) / len(focus_hits)
         if hauls:
-            gw = state.setdefault("gold_windows", {}).setdefault(skill, [])
-            gw.extend(h[1] for h in hauls)
-            del gw[: max(0, len(gw) - cfg.window)]
-            state.setdefault("gold_trace", {}).setdefault(skill, []).append(
-                sum(h[1] for h in hauls) / len(hauls)
-            )
-            metrics[f"{skill}/gold_window"] = sum(gw) / len(gw)
             metrics[f"{skill}/deliveries"] = sum(h[0] for h in hauls) / len(hauls)
             metrics[f"{skill}/gold_frac"] = sum(h[1] for h in hauls) / len(hauls)
             metrics[f"{skill}/max_deliveries"] = sum(h[2] for h in hauls) / len(hauls)
@@ -912,8 +891,6 @@ def _fresh_state() -> Dict:
         "reward_trace": {},
         "value_trace": {},
         "combat_passed": {},
-        "gold_windows": {},
-        "gold_trace": {},
         "episodes": {},
         "return_stats": {},
         "episode_counter": 0,
@@ -932,8 +909,6 @@ def _ensure_runtime_state(state: Dict, cfg) -> None:
     state.setdefault("reward_trace", {})
     state.setdefault("value_trace", {})
     state.setdefault("combat_passed", {})
-    state.setdefault("gold_windows", {})
-    state.setdefault("gold_trace", {})
     state.setdefault("episodes", {})
     state.setdefault("return_stats", {})
     state.setdefault("episode_counter", 0)
@@ -955,8 +930,6 @@ def _reset_size_progress(state: Dict, cfg) -> None:
     state["reward_trace"] = {skill: [] for skill in cfg.skills}
     state["value_trace"] = {skill: [] for skill in cfg.skills}
     state["combat_passed"] = {skill: False for skill in cfg.skills}
-    state["gold_windows"] = {}
-    state["gold_trace"] = {}
     state["episodes"] = {skill: 0 for skill in cfg.skills}
     state["size_capped"] = False
     state["cap_kind"] = ""
@@ -970,48 +943,8 @@ def _smooth_gain(series: Sequence[float], cfg, *, higher_is_better: bool) -> Tup
     return latest, gain
 
 
-def merchant_plateau_done(
-    *,
-    episodes: int,
-    gold_window: Sequence[float],
-    gold_trace: Sequence[float],
-    min_gold: float,
-    min_episodes: int,
-    plateau_updates: int,
-    plateau_threshold: float,
-    plateau_smooth: str = "mean",
-    plateau_smooth_span: int = 8,
-) -> bool:
-    """Merchant plateau gate: enough on-size episodes, a recent mean haul of
-    at least ``min_gold`` of the max, and a flat smoothed haul curve."""
-    if episodes < min_episodes or not gold_window:
-        return False
-    if sum(gold_window) / len(gold_window) < min_gold:
-        return False
-    smooth = full_smooth(list(gold_trace), method=plateau_smooth, span=plateau_smooth_span)
-    return plateaued(smooth, plateau_updates, plateau_threshold, higher_is_better=True)
-
-
 def _drill_done(cfg, state, skill: str, window) -> bool:
     passed = bool(state.get("combat_passed", {}).get(skill, False))
-    if skill == "merchant" and cfg.merchant_gate == "plateau":
-        if passed:
-            return True
-        done = int(state.get("updates_this_size", 0)) >= cfg.min_updates and merchant_plateau_done(
-            episodes=len(state.get("gold_windows", {}).get(skill, [])),  # on-size, capped at window
-            gold_window=state.get("gold_windows", {}).get(skill, []),
-            gold_trace=state.get("gold_trace", {}).get(skill, []),
-            min_gold=cfg.merchant_min_gold,
-            min_episodes=cfg.combat_min_episodes,
-            plateau_updates=cfg.plateau_updates,
-            plateau_threshold=cfg.plateau_threshold,
-            plateau_smooth=cfg.plateau_smooth,
-            plateau_smooth_span=cfg.plateau_smooth_span,
-        )
-        if done:
-            # Same per-size latch as combat (state key predates this gate).
-            state.setdefault("combat_passed", {})[skill] = True
-        return done
     done = drill_done(
         skill,
         updates=int(state.get("updates_this_size", 0)),
