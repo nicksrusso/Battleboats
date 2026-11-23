@@ -576,14 +576,14 @@ def _run_size(cfg, state, policy, envs, rng, device, logger):
             log_row[f"{skill}/value_plateau_gain"] = metrics.get(f"{skill}/value_plateau_gain", 1.0)
             log_row[f"{skill}/gate"] = metrics[f"{skill}/gate"]
             log_row[f"{skill}/return_scale"] = metrics.get(f"{skill}/return_scale", 1.0)
-        metrics.pop("_explore_line", None)
+        explore_line = metrics.pop("_explore_line", "")
         record = {"size": size, "update": updates, **metrics}
         _append_history(cfg, record)
         print(
             f"[size {size}x{size} u{updates}] "
             + " | ".join(parts)
             + f" ent={metrics.get('entropy', 0):.3f}"
-            + (f" {metrics['_explore_line']}" if metrics.get("_explore_line") else "")
+            + (f" {explore_line}" if explore_line else "")
         )
         logger.log(log_row, step=int(state.get("updates_total", 0)) + updates)
         save_checkpoint(policy, cfg.run_dir / "latest.pt", extra={"size": size, "skill_count": 0})

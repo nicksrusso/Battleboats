@@ -224,3 +224,22 @@ def test_selfplay_and_sandbox_configs_load(tmp_path):
     sb.write_text(yaml.safe_dump(raw))
     scfg = load_sandbox_config(sb)
     assert scfg.hull_explore.eps_at(100) == pytest.approx(0.175)
+
+
+def test_sandbox_update_prints_explore_line(tmp_path, capsys):
+    from battleboats.training.sandbox_curriculum import load_sandbox_config, run_sandboxes
+
+    root = Path(__file__).resolve().parents[1]
+    raw = yaml.safe_load((root / "configs" / "sandboxes_smoke.yaml").read_text())
+    raw.update(run_dir=str(tmp_path / "sb"), init_checkpoint=None, skills=["landing_build"], sizes=[3],
+               max_updates_per_size=1, min_updates=1, allow_unmet=True, decisions_per_update=64,
+               eval_episodes=1, wandb=False, hull_explore={"eps": 1.0})
+    (tmp_path / "sb.yaml").write_text(yaml.safe_dump(raw))
+    run_sandboxes(load_sandbox_config(tmp_path / "sb.yaml"))
+    out = capsys.readouterr().out
+    assert "hull exploration ON eps=1.0" in out
+    assert "explore=eps:1.000," in out
+    rows = [json.loads(l) for l in (tmp_path / "sb" / "history.jsonl").read_text().splitlines()]
+    assert rows and rows[0]["hull_explore/eps"] == 1.0
+    assert rows[0]["hull_explore/explored"] == rows[0]["hull_explore/builds"]
+    assert "_explore_line" not in rows[0]
