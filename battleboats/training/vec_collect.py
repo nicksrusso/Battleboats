@@ -51,7 +51,7 @@ import torch
 from torch.nn.utils.rnn import pad_sequence
 
 from battleboats.agents.random_agent import random_action
-from battleboats.core.actions import AttackAction, BuildShipAction, CapturePortAction, EndTurnAction
+from battleboats.core.actions import AttackAction, BuildPortAction, BuildShipAction, CapturePortAction, EndTurnAction
 from battleboats.envs.action_masks import ActionMasks
 from battleboats.envs.battleboats_aec import BattleboatsAEC
 from battleboats.training.policy import PolicyNetwork
@@ -63,6 +63,18 @@ from battleboats.training.rollout import Transition, compute_gae
 from battleboats.training.selfplay_purchases import empty_purchase_counts, record_purchase
 
 LEARNER = "__learner__"
+
+
+def record_learner_construction(action, slot: "_Slot", result: "CollectResult", *, explored: bool = False) -> None:
+    """Count a learner BuildShip or BuildPort on the slot and the collect result."""
+    if isinstance(action, BuildShipAction):
+        record_purchase(slot.purchases, action.ship_type)
+        record_purchase(result.purchases, action.ship_type)
+        record_build(result.hull_explore, hull_name(action.ship_type), bool(explored))
+    elif isinstance(action, BuildPortAction):
+        slot.ports_built += 1
+        result.ports_built += 1
+
 _TENSOR_FIELDS = ("tokens", "asset_mask", "verb_mask", "target_mask", "globals")
 
 
@@ -118,6 +130,7 @@ class CollectResult:
     segments: List[List[Transition]] = field(default_factory=list)
     finished: List[Dict[str, Any]] = field(default_factory=list)
     purchases: Dict[str, int] = field(default_factory=empty_purchase_counts)
+    ports_built: int = 0
     # Learner shaped reward by component, summed over this collect.
     shaping: Dict[str, float] = field(default_factory=empty_totals)
     combat: Dict[str, Any] = field(default_factory=empty_combat)
@@ -142,6 +155,7 @@ class _Slot:
     decisions: int = 0
     segment: List[Transition] = field(default_factory=list)
     purchases: Dict[str, int] = field(default_factory=empty_purchase_counts)
+    ports_built: int = 0
     tracker: Any = None
     fleet_start: bool = False
     fleet_forward: bool = False
@@ -252,6 +266,7 @@ class GameCollector:
         slot.decisions = 0
         slot.segment = []
         slot.purchases = empty_purchase_counts()
+        slot.ports_built = 0
         slot.tracker = ShapingTracker(self.shaping)
         fleet = apply_fleet_start(slot.env.engine, self.fleet_starts, random.Random(self.seed * 4_000_037 + ep + 7))
         slot.fleet_start = fleet is not None
@@ -301,6 +316,7 @@ class GameCollector:
                 "n_decisions": slot.decisions,
                 "truncated": winner is None,
                 "purchases": slot.purchases,
+                "ports_built": slot.ports_built,
                 "agent_pid": slot.agent_pid,
                 "map_size": f"{engine.map.width}x{engine.map.height}",
                 "episode": slot.ep,
@@ -381,10 +397,8 @@ class GameCollector:
                 slot.decisions += 1
                 recorded += 1
             action = masks.to_action(asset_idx=assets[i], verb_idx=verbs[i], target_idx=targets[i])
-            if key == LEARNER and isinstance(action, BuildShipAction):
-                record_purchase(slot.purchases, action.ship_type)
-                record_purchase(result.purchases, action.ship_type)
-                record_build(result.hull_explore, hull_name(action.ship_type), bool(explored[i]))
+            if key == LEARNER:
+                record_learner_construction(action, slot, result, explored=bool(explored[i]))
             pre = slot.tracker.snapshot(slot.env.engine, pid_of[i], action) if key == LEARNER else None
             self._step(slot, pid_of[i], action, result)
             if pre is not None:
@@ -561,6 +575,7 @@ def merge_results(results: Sequence[CollectResult]) -> CollectResult:
         out.finished.extend(r.finished)
         for k, v in r.purchases.items():
             out.purchases[k] = out.purchases.get(k, 0) + v
+        out.ports_built += r.ports_built
         for k, v in r.shaping.items():
             out.shaping[k] = out.shaping.get(k, 0.0) + v
         merge_combat(out.combat, r.combat)

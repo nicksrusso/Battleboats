@@ -24,6 +24,7 @@ win rate. "Score" counts a draw as half a win.
 | v0.2.0 | 955f221 | First 16x8 self-play under the #38 rules, from v0.1.0 | vs v0.1.0 108/70/22; lost to v0.1.1 68/124/8 (both under #38 rules) |
 | v0.3.0 | 26348ee | Mixed 16x8+20x10 self-play from v0.2.0, tagged at update 800 | vs v0.2.0 129/67/4 (current best tagged trained policy) |
 | v0.4.0 | 8ad2530 | Behavior clone of the #46 tactical scripted agent | Sampled vs tactical 24/28/48 (score 0.480); vs v0.3.0 11/50/39 (score 0.305). Use sampled play, not greedy. |
+| v0.4.1 | docs commit (tag); weights 79754fb | v0.4.0 BC + buy-diversity sandbox fine-tune from both seats, anchor 0.05 | Sampled vs v0.4.0 14/11/25 (score 0.530); vs tactical 10/25/15 (score 0.350); self-play 36 decisive / 14 draws (72%). Use sampled play. |
 
 An earlier sandbox-warmup tag, [v0.0.1](model_versions.md), exists at f4f7bef
 (`runs/checkpoints/v0.0.1_f4f7bef.pt`). It is not part of this self-play series.
@@ -109,6 +110,26 @@ An earlier sandbox-warmup tag, [v0.0.1](model_versions.md), exists at f4f7bef
   - Sampled buy mix vs tactical (2,872 buys): destroyer 764, merchant 698, submarine 665, cruiser 312, battleship 135, carrier 101, builder 99, landing 98. All eight types appear, but destroyer / merchant / submarine are overweight relative to the uniform teacher. Landings: 98 bought, 27 killed, 71 survived, 45 port captures (24 home). vs v0.3.0: 95 landings bought, 20 port captures (11 home).
   - Sources: `runs/checkpoints/v0.4.0_8ad2530.json`, `runs/eval/bc_v0.4.0/summary.json`, `runs/eval/bc_v0.4.0_sampled/summary.json`, `runs/bc_tactical_v040/train/metrics.json`.
 - **Recommended use:** PPO warm start and a sampled opponent-pool member, not a stronger policy than v0.3.0 or the #46 teacher. Always use sampled `policy.act` (or PPO rollouts), not greedy `argmax`.
+
+---
+
+
+## v0.4.1
+
+- **Tag / commit:** annotated tag `v0.4.1` is applied to this documentation commit after merge. The weight filename uses `79754fb` (`79754fb4c50979702ae3c18d7f18b2664fe48e43`, PR #51), the code the sandbox was trained with.
+- **Weights:** `runs/checkpoints/v0.4.1_79754fb.pt`, sha256 prefix `1694863d`. Config and metadata sit beside it (`.config.yaml`, `.json`). Same bytes as `runs/sandbox_buydiv_v0.4.1/update_300.pt`.
+- **How it was produced:** Fine-tune of v0.4.0 (`runs/checkpoints/v0.4.0_8ad2530.pt`) in the buy-diversity sandbox (PR #50, both-seats fix PR #51 / BAT-23). The learner seat alternates each episode and the 2–3 port economy is mirrored onto that seat's side, so the policy is not fit only to the left (player-0) half of the board. Non-buy decisions are anchored with MSE (`anchor_coef` 0.05, chosen over 0.15 in a 40-update probe) toward frozen v0.4.0. Reward is the potential-based Δ of `max(0, 1 - std/mean)` over all eight hull types, plus a training-only coverage bonus (`0.25 * unique/8`). Cheap types (destroyer, submarine, merchant) are intermittently masked with annealed probability 0.7→0.0; landing is never masked. 300 updates, 1024 decisions, 50-turn horizon, 16x8+20x10, CPU, lr 1e-4, dropout 0.0, trained 2026-11-23 12:31–12:47 CST (15.7 min). Same **#38 rules** as v0.3.0 / v0.4.0.
+- **Value head / PPO warm start:** official `save_checkpoint` format, value head included. After this fine-tune the head is fit to diversity potential, not terminal win/loss (v0.4.0 had trained it on discounted +1/−1/0). A later win/loss PPO run should watch value-head loss at the start. Dropout in the saved `model_config` is 0.0.
+- **Headline eval** (v0.2.2 pool, sampled `policy.act`, seed 0; sources under `runs/sandbox_buydiv_v0.4.1/`):
+  - **Unmasked sandbox**, 128 episodes, p=0: diversity mean **0.481**, Wald 95% CI [0.458, 0.504], `roughly_even=True`. Type totals: carrier 332, battleship 543, cruiser 510, destroyer 487, submarine 534, merchant 558, landing 321, builder 318; max/min 1.75. Landing gold share 0.137. Ahead of frozen v0.4.0 in the same protocol (0.185 [0.159, 0.211], max/min 6.12) and of the earlier single-seat sandbox update_300 (0.362 [0.333, 0.391]).
+  - **Self-play**, 50 games: 36 decisive / 14 turn-cap draws, decisive rate **72.0%** (Wilson 95% [58.3, 82.5]). All 36 wins were home captures. Seat 0: **13/23/14** (13 home caps, 64 landings bought). Seat 1: **23/13/14** (23 home caps, 84 landings). Landing share 5.16% of 2,868 buys. Decisive turns mean 53.1, median 49.5, range 7–138. The single-seat BAT-21 update_300 self-play was 16 decisive / 34 draws and **0 home-capture attempts as seat 0**.
+  - **50-game sampled matchups** (seat split 26/24):
+    - vs tactical **10/25/15**, win rate 20.0% (Wilson 95% [11.2, 33.0]), score 0.350. Seat 0: 5/13/8; seat 1: 5/12/7. Landing share 5.5%.
+    - vs v0.3.0 **10/19/21**, win rate 20.0% (Wilson 95% [11.2, 33.0]), score 0.410. Seat 0: 3/9/14; seat 1: 7/10/7. Landing share 5.6%.
+    - vs frozen v0.4.0 **14/11/25**, win rate 28.0% (Wilson 95% [17.5, 41.7]), score 0.530. Seat 0: 7/6/13; seat 1: 7/5/12. Landing share 6.1%.
+  - vs the BAT-21 single-seat update_300 (3/34/13 vs tactical, 2/38/10 vs v0.3.0, 3/12/35 vs v0.4.0, and 0/26 as seat 0 in each) this is a large recovery, especially as seat 0. vs v0.4.0's own sampled record (24/28/48 vs tactical over 100, score 0.480; 11/50/39 vs v0.3.0, score 0.305) the win-rate CI vs tactical overlaps, but the score is lower because this policy loses more often rather than drawing; it is ahead of v0.4.0 vs v0.3.0 and slightly ahead of frozen v0.4.0 head-to-head. Full-game landing share is 5–6%, above v0.4.0's ~2–3%.
+  - Sources: `runs/checkpoints/v0.4.1_79754fb.json`, `runs/sandbox_buydiv_v0.4.1/eval_unmasked/summary.json`, `runs/sandbox_buydiv_v0.4.1/eval_selfplay/summary.json`, `runs/sandbox_buydiv_v0.4.1/eval_final/summary.json`.
+- **Recommended use:** PPO warm start and a sampled opponent-pool member when you want a more even eight-type buy mix than v0.4.0 and can tolerate a quality drop vs the #46 tactical teacher. Always use sampled `policy.act` (or PPO rollouts), not greedy `argmax`. Not a stronger tagged trained policy than v0.3.0.
 
 ---
 
