@@ -26,7 +26,13 @@ import torch
 import yaml
 
 from battleboats.envs.battleboats_aec import BattleboatsAEC
-from battleboats.envs.map_pool import PoolSize, build_map_pool, episode_limits
+from battleboats.envs.map_pool import (
+    PoolSize,
+    build_map_pool,
+    earliest_capture_turn,
+    episode_limits,
+    spawn_enemy_home_water,
+)
 from battleboats.envs.skill_maps import write_full_map
 from battleboats.training.checkpoints import (
     frozen_copy,
@@ -81,6 +87,11 @@ class SelfPlayConfig:
     map_pool: List[PoolSize] = field(default_factory=list)
     land_fraction: float = 0.02
     ref_home_distance: int = 14
+    # map_gen.min_port_enemy_home_water: pool maps need every port's spawn tile
+    # (home and satellites) at least this many water moves from the enemy
+    # home. 7 stops a turn-0 landing buy from capturing before turn 2. 0 keeps
+    # the old pools (so resuming an older run regenerates the same maps).
+    min_port_enemy_home_water: int = 0
     # Collection: 0 workers plays in this process. Each worker keeps
     # games_per_worker games open and batches their forward passes.
     num_workers: int = 0
@@ -133,6 +144,7 @@ def load_selfplay_config(path: Path) -> SelfPlayConfig:
         map_pool=[PoolSize(**entry) for entry in raw.get("map_pool") or []],
         land_fraction=float(raw.get("land_fraction", 0.02)),
         ref_home_distance=int(raw.get("ref_home_distance", 14)),
+        min_port_enemy_home_water=int((raw.get("map_gen") or {}).get("min_port_enemy_home_water", 0)),
         num_workers=int(raw.get("num_workers", 0)),
         games_per_worker=int(raw.get("games_per_worker", 4)),
         collect_threads=int(raw.get("collect_threads", 1)),
@@ -213,7 +225,13 @@ def run_selfplay(cfg: SelfPlayConfig, *, resume: bool = True) -> Dict[str, Any]:
 
     map_dir = cfg.run_dir / "maps"
     if cfg.map_pool:
-        maps = build_map_pool(map_dir, cfg.map_pool, seed=cfg.seed, land_fraction=cfg.land_fraction)
+        maps = build_map_pool(
+            map_dir,
+            cfg.map_pool,
+            seed=cfg.seed,
+            land_fraction=cfg.land_fraction,
+            min_port_enemy_home_water=cfg.min_port_enemy_home_water,
+        )
     else:
         maps = [
             write_full_map(map_dir / f"map_{i}.json", cfg.width, cfg.height, seed=cfg.seed + i)
@@ -272,6 +290,14 @@ def run_selfplay(cfg: SelfPlayConfig, *, resume: bool = True) -> Dict[str, Any]:
             else f"map={cfg.width}x{cfg.height}"
         )
     )
+    if cfg.map_pool:
+        dists = [spawn_enemy_home_water(json.loads(Path(p).read_text())) for p in maps]
+        known = [d for d in dists if d is not None]
+        print(
+            f"[selfplay] map_gen min_port_enemy_home_water={cfg.min_port_enemy_home_water} "
+            f"pool spawn->enemy-home water min={min(known) if known else None} "
+            f"earliest_capture_turn>={earliest_capture_turn(min(known)) if known else None}"
+        )
     if cfg.reward_shaping.enabled:
         rs = cfg.reward_shaping
         print(

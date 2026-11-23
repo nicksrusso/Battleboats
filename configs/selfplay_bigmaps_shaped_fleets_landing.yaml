@@ -26,6 +26,10 @@ map_pool:
   - {width: 32, height: 16, count: 30, ports: 3}
   - {width: 48, height: 24, count: 30, ports: 4}
 land_fraction: 0.02
+# Every port's spawn tile (home and satellites) is at least this many water
+# moves from a tile next to the enemy home: no landing capture before turn 2.
+map_gen:
+  min_port_enemy_home_water: 7
 ref_home_distance: 14
 updates: 700
 # Exact learner decisions per update. Long games are cut here, bootstrapped
