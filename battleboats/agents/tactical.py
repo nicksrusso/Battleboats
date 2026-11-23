@@ -5,8 +5,14 @@ Plugs in wherever ``scripted_action(engine, pid, rng)`` does (evaluate,
 is a new opponent; the greedy sandbox baseline in ``scripted.py`` is
 unchanged.
 
-The agent reads ``engine`` directly (both fleets, both homes). It is a
-yardstick, not a fog-of-war agent.
+The agent is limited to the same fog of war as the trained policy.
+Enemy ships and ports come only from ``engine.known_enemy_ships`` and
+``engine.known_enemy_ports`` (the same fresh + stale sighting records
+that ``build_observation`` tokenizes). Before each decision it calls
+``engine._refresh_sightings`` so those records match current vision.
+It never reads ``engine.ships``, ``engine.ports``, or the opponent's
+``home_port`` for hidden enemies. Map terrain and friendly state are
+fully known, as they are in the policy observation.
 
 Design
 ------
@@ -32,22 +38,30 @@ Builders
     targets are preferred; Manhattan-to-home is the primary key.
 
 Landings
-    Target capturable ports (enemy home first, otherwise the nearest
-    enemy or neutral port). Always flee from hostile combat ships;
+    Target last-known / currently known capturable ports, with a
+    sighted enemy home first. If no enemy port has been seen, explore
+    toward the far side of the map from our home (the enemy home is
+    not known at kickoff unless a scout or friendly port has already
+    sighted it — the policy observation starts empty too). Always
+    flee from hostile combat ships that we can see (or recently saw);
     survival outranks capturing. A landing ship never issues
     ``AttackAction``.
 
 Combat ships (and other non-landing hulls' fight-or-run)
     Goal-directed moves with softmax noise. Local power is the
-    distance-weighted combat strength of friendlies vs enemies within
-    radius R. The engine has no HP, so power is ``stats.strength`` (the
-    attack stat); strength-0 hulls contribute 0. The weight is the old
-    heuristic linear kernel ``max(0, 1 - d/R)``, cut off at R (or the
-    acting ship's attack range, whichever is larger). Engage — attack
-    and close — if ``ours > theirs * margin``; otherwise retreat away
-    from the enemy center of mass and toward friendlies or home. Attack
+    distance-weighted combat strength of friendlies vs *known* enemies
+    within radius R. Only sighted enemies count: fresh sightings at
+    full weight, stale last-known positions decaying linearly to 0
+    over ``memory_turns`` (default 4). The engine has no HP, so power
+    is ``stats.strength`` from the public type table; strength-0 hulls
+    contribute 0. The spatial weight is the old heuristic linear
+    kernel ``max(0, 1 - d/R)``, cut off at R (or the acting ship's
+    attack range, whichever is larger). Engage — attack and close —
+    if ``ours > theirs * margin``; otherwise retreat away from the
+    known enemy center of mass and toward friendlies or home. Attack
     targeting reuses ``pk`` and material value from
-    ``battleboats.agents.heuristics``.
+    ``battleboats.agents.heuristics`` on the sighted type, not the
+    live hidden ship.
 """
 
 from __future__ import annotations
@@ -78,6 +92,7 @@ class TacticalConfig:
     radius: int = 6
     margin: float = 1.2
     temperature: float = 0.5
+    memory_turns: int = 4
 
 
 DEFAULT_CONFIG = TacticalConfig()
@@ -90,6 +105,9 @@ def tactical_scripted_action(
     cfg: TacticalConfig = DEFAULT_CONFIG,
 ) -> Action:
     """Return one legal action. Always legal when ``enumerate_legal`` is non-empty."""
+    # Same refresh the engine runs after every step / reset, so
+    # known_enemy_* matches what the policy observation would tokenize.
+    engine._refresh_sightings()
     legal = engine.enumerate_legal(player_id)
     if not legal:
         raise RuntimeError(
@@ -133,6 +151,110 @@ def should_engage(
 ) -> bool:
     """Attack / close when local friendly power exceeds enemy power by ``margin``."""
     return ours > theirs * margin
+
+
+@dataclass(frozen=True, slots=True)
+class _KnownEnemy:
+    """A sighted enemy ship, with public type stats and a memory weight."""
+
+    ship_id: int
+    type: ShipType
+    position: Pos
+    stats: object
+    weight: float
+
+
+def _sighting_weight(engine, sighting, cfg: TacticalConfig) -> float:
+    """1.0 if fresh, else linear decay of last-seen position over memory_turns."""
+    if sighting.fresh:
+        return 1.0
+    if cfg.memory_turns <= 0:
+        return 0.0
+    age = engine.turn - sighting.turn_seen
+    return max(0.0, 1.0 - age / cfg.memory_turns)
+
+
+def _known_enemies(engine, player_id: int, cfg: TacticalConfig) -> List[_KnownEnemy]:
+    """Enemy ships the policy can see: known_enemy_ships with memory weights."""
+    out: List[_KnownEnemy] = []
+    for sighting in engine.known_enemy_ships(player_id):
+        weight = _sighting_weight(engine, sighting, cfg)
+        if weight <= 0:
+            continue
+        out.append(
+            _KnownEnemy(
+                ship_id=sighting.ship_id,
+                type=sighting.type,
+                position=sighting.position,
+                stats=BASE_STATS[sighting.type],
+                weight=weight,
+            )
+        )
+    return out
+
+
+def _known_enemy_home(engine, player_id: int) -> Optional[Pos]:
+    """Last-known enemy home, or None if no is_home port has been sighted."""
+    homes = [s for s in engine.known_enemy_ports(player_id) if s.is_home]
+    if not homes:
+        return None
+    homes.sort(key=lambda s: (s.fresh, s.turn_seen, s.position), reverse=True)
+    return homes[0].position
+
+
+def _explore_goal(engine, player_id: int) -> List[Pos]:
+    """Far-side water from our home, used when the enemy home is unknown."""
+    home = engine.players[player_id].home_port
+    far = (engine.map.width - 1 - home[0], engine.map.height - 1 - home[1])
+    if engine.map.in_bounds(far) and engine.map.is_water(far):
+        return [far]
+    tiles = _water_neighbors(engine, far)
+    return tiles if tiles else [far]
+
+
+def _local_combat_power_known(
+    engine,
+    player_id: int,
+    origin: Pos,
+    radius: int,
+    cfg: TacticalConfig,
+) -> Tuple[float, float]:
+    """Like ``local_combat_power``, but enemies come only from sightings."""
+    if radius <= 0:
+        return 0.0, 0.0
+    ours = 0.0
+    theirs = 0.0
+    man = engine.map.manhattan
+    for ship in engine.ships.values():
+        if ship.owner != player_id:
+            continue
+        d = man(ship.position, origin)
+        if d > radius:
+            continue
+        ours += float(ship.stats.strength) * (1.0 - d / radius)
+    for enemy in _known_enemies(engine, player_id, cfg):
+        d = man(enemy.position, origin)
+        if d > radius:
+            continue
+        theirs += float(enemy.stats.strength) * (1.0 - d / radius) * enemy.weight
+    return ours, theirs
+
+
+class _TypeShip:
+    """Public type-stats stand-in so pk / _ship_value never touch a live enemy."""
+
+    __slots__ = ("type", "stats")
+
+    def __init__(self, ship_type: ShipType) -> None:
+        self.type = ship_type
+        self.stats = BASE_STATS[ship_type]
+
+
+def _defender_type(engine, player_id: int, target_id: int) -> Optional[ShipType]:
+    for sighting in engine.known_enemy_ships(player_id):
+        if sighting.ship_id == target_id:
+            return sighting.type
+    return None
 
 
 # Types the rules allow to be bought. A map may drop some; the queue
@@ -332,7 +454,7 @@ def _choose(
             a for a in attacks if _attack_is_engaging(engine, player_id, a, cfg)
         ]
         if engaging:
-            return _best_attack(engine, engaging)
+            return _best_attack(engine, player_id, engaging)
 
     moves = by_cls.get(MoveAction, [])
     move = _choose_move(engine, player_id, moves, cfg, rng)
@@ -353,7 +475,7 @@ def _choose_capture(
     engine, player_id: int, captures: Sequence[Action], cfg: TacticalConfig
 ) -> Optional[Action]:
     """Take a capture unless the landing is threatened — survival comes first."""
-    opp_home = engine.players[1 - player_id].home_port
+    known_home = _known_enemy_home(engine, player_id)
     safe: List[Action] = []
     for action in captures:
         if not isinstance(action, CapturePortAction):
@@ -366,10 +488,15 @@ def _choose_capture(
         safe.append(action)
     if not safe:
         return None
-    home_caps = [
-        a for a in safe if isinstance(a, CapturePortAction) and a.target == opp_home
-    ]
-    return home_caps[0] if home_caps else safe[0]
+    if known_home is not None:
+        home_caps = [
+            a
+            for a in safe
+            if isinstance(a, CapturePortAction) and a.target == known_home
+        ]
+        if home_caps:
+            return home_caps[0]
+    return safe[0]
 
 
 def _merchant_action_threatened(
@@ -407,12 +534,14 @@ def _guaranteed_kills(
         if not isinstance(action, AttackAction):
             continue
         attacker = engine.ships.get(action.attacker_id)
-        defender = engine.ships.get(action.target_id)
-        if attacker is None or defender is None:
+        if attacker is None:
             continue
         if attacker.owner != player_id or attacker.type is ShipType.LANDING:
             continue
-        if defender.stats.strength <= 0:
+        def_type = _defender_type(engine, player_id, action.target_id)
+        if def_type is None:
+            continue
+        if BASE_STATS[def_type].strength <= 0:
             out.append(action)
     return out
 
@@ -426,18 +555,21 @@ def _attack_is_engaging(
     if attacker is None or attacker.type is ShipType.LANDING:
         return False
     radius = max(cfg.radius, int(attacker.stats.attack_range))
-    ours, theirs = local_combat_power(engine, player_id, attacker.position, radius)
+    ours, theirs = _local_combat_power_known(
+        engine, player_id, attacker.position, radius, cfg
+    )
     return should_engage(ours, theirs, cfg.margin)
 
 
-def _best_attack(engine, attacks: Sequence[Action]) -> Action:
+def _best_attack(engine, player_id: int, attacks: Sequence[Action]) -> Action:
     def score(action: Action) -> float:
         if not isinstance(action, AttackAction):
             return 0.0
         attacker = engine.ships.get(action.attacker_id)
-        defender = engine.ships.get(action.target_id)
-        if attacker is None or defender is None:
+        def_type = _defender_type(engine, player_id, action.target_id)
+        if attacker is None or def_type is None:
             return 0.0
+        defender = _TypeShip(def_type)
         return pk(attacker, defender, engine.kill_curve_k) * _ship_value(defender)
 
     return max(attacks, key=score)
@@ -485,11 +617,12 @@ def _move_urgency(engine, player_id: int, ship, cfg: TacticalConfig) -> int:
     if ship.type is ShipType.BUILDER:
         return 75 if threatened else 40
     if threatened:
-        ours, theirs = local_combat_power(
+        ours, theirs = _local_combat_power_known(
             engine,
             player_id,
             ship.position,
             max(cfg.radius, int(ship.stats.attack_range)),
+            cfg,
         )
         return 70 if not should_engage(ours, theirs, cfg.margin) else 35
     return 30
@@ -525,20 +658,25 @@ def _should_flee(engine, player_id: int, ship, cfg: TacticalConfig) -> bool:
     if ship.type in (ShipType.MERCHANT, ShipType.BUILDER):
         return True
     radius = max(cfg.radius, int(ship.stats.attack_range))
-    ours, theirs = local_combat_power(engine, player_id, ship.position, radius)
+    ours, theirs = _local_combat_power_known(
+        engine, player_id, ship.position, radius, cfg
+    )
     return not should_engage(ours, theirs, cfg.margin)
 
 
 def _move_score(engine, player_id: int, ship, dest: Pos, cfg: TacticalConfig) -> float:
     if _should_flee(engine, player_id, ship, cfg):
         return _flee_score(engine, player_id, ship.position, dest, cfg)
-    goal = _goal_tiles(engine, player_id, ship)
+    goal = _goal_tiles(engine, player_id, ship, cfg)
     if not goal:
-        # No objective: a small bias toward the enemy home keeps combat
-        # ships walking somewhere useful instead of milling.
-        opp_home = engine.players[1 - player_id].home_port
+        # No objective: bias toward a known enemy home, else explore
+        # the far side of the map from our home.
+        target = _known_enemy_home(engine, player_id)
+        if target is None:
+            explore = _explore_goal(engine, player_id)
+            target = explore[0]
         man = engine.map.manhattan
-        return float(man(ship.position, opp_home) - man(dest, opp_home))
+        return float(man(ship.position, target) - man(dest, target))
     dist = _water_dist_map(engine, goal)
     before = dist.get(ship.position, _INF)
     after = dist.get(dest, _INF)
@@ -551,12 +689,33 @@ def _flee_score(
     threats = _threats(engine, player_id, src, cfg)
     man = engine.map.manhattan
     if threats:
-        sw = sum(float(s.stats.strength) or 1.0 for s in threats)
-        cx = sum((s.stats.strength or 1.0) * s.position[0] for s in threats) / sw
-        cy = sum((s.stats.strength or 1.0) * s.position[1] for s in threats) / sw
+        sw = sum(
+            (float(s.stats.strength) or 1.0) * getattr(s, "weight", 1.0)
+            for s in threats
+        )
+        cx = (
+            sum(
+                (float(s.stats.strength) or 1.0)
+                * getattr(s, "weight", 1.0)
+                * s.position[0]
+                for s in threats
+            )
+            / sw
+        )
+        cy = (
+            sum(
+                (float(s.stats.strength) or 1.0)
+                * getattr(s, "weight", 1.0)
+                * s.position[1]
+                for s in threats
+            )
+            / sw
+        )
         ecom = (cx, cy)
     else:
-        ecom = engine.players[1 - player_id].home_port
+        ecom = (
+            _known_enemy_home(engine, player_id) or engine.players[player_id].home_port
+        )
     score = _float_man(dest, ecom) - _float_man(src, ecom)
     friends = [
         s
@@ -572,8 +731,7 @@ def _flee_score(
     return score
 
 
-def _goal_tiles(engine, player_id: int, ship) -> List[Pos]:
-    opp = engine.players[1 - player_id]
+def _goal_tiles(engine, player_id: int, ship, cfg: TacticalConfig) -> List[Pos]:
     if ship.type is ShipType.LANDING:
         return _landing_goal_tiles(engine, player_id)
     if ship.type is ShipType.MERCHANT:
@@ -582,45 +740,39 @@ def _goal_tiles(engine, player_id: int, ship) -> List[Pos]:
     if ship.type is ShipType.BUILDER:
         target = choose_builder_target(engine, player_id, ship.position)
         return _water_neighbors(engine, target) if target is not None else []
-    # Combat: close on the nearest enemy, else the enemy home.
-    foes = [engine.ships[s].position for s in opp.owned_ship_ids if s in engine.ships]
+    # Combat: close on the nearest *known* enemy, else a known home, else explore.
+    foes = [e.position for e in _known_enemies(engine, player_id, cfg)]
     if foes:
         nearest = min(foes, key=lambda p: engine.map.manhattan(ship.position, p))
         return [nearest]
-    return _water_neighbors(engine, opp.home_port)
+    known_home = _known_enemy_home(engine, player_id)
+    if known_home is not None:
+        return _water_neighbors(engine, known_home)
+    return _explore_goal(engine, player_id)
 
 
 def _landing_goal_tiles(engine, player_id: int) -> List[Pos]:
-    """Approach tiles of capturable ports, enemy home first."""
-    opp_home = engine.players[1 - player_id].home_port
-    home_owner = (
-        int(engine.map.port_owner[opp_home])
-        if engine.map.is_port(opp_home)
-        else player_id
-    )
-    if home_owner != player_id:
-        tiles = _water_neighbors(engine, opp_home)
+    """Approach tiles of *known* capturable ports, sighted enemy home first."""
+    known_home = _known_enemy_home(engine, player_id)
+    if known_home is not None:
+        tiles = _water_neighbors(engine, known_home)
         if tiles:
             return tiles
-    ports = _capturable_ports(engine, player_id)
+    ports = _known_capturable_ports(engine, player_id)
     if not ports:
-        return _water_neighbors(engine, opp_home)
-    # Nearest capturable port's approach tiles (Manhattan to the port).
-    # A later move scorer uses water distance, which breaks land ties.
+        return _explore_goal(engine, player_id)
     ports.sort(
         key=lambda p: (engine.map.manhattan(engine.players[player_id].home_port, p), p)
     )
-    # Prefer the closest port to *this* decision's typical start (home-side);
-    # actual pathing still uses the acting ship's water distance to these tiles.
-    # Use all capturable approach tiles so a landing near a satellite takes it.
     tiles: List[Pos] = []
     for port in ports:
         tiles.extend(_water_neighbors(engine, port))
     return tiles
 
 
-def _capturable_ports(engine, player_id: int) -> List[Pos]:
-    return [pos for pos in engine.ports if int(engine.map.port_owner[pos]) != player_id]
+def _known_capturable_ports(engine, player_id: int) -> List[Pos]:
+    """Positions of enemy/neutral ports this player has sighted (fresh or stale)."""
+    return [s.position for s in engine.known_enemy_ports(player_id)]
 
 
 def _merchant_goal_port(engine, player_id: int, ship) -> Optional[Pos]:
@@ -640,18 +792,21 @@ def _merchant_goal_port(engine, player_id: int, ship) -> Optional[Pos]:
     return None
 
 
-def _threats(engine, player_id: int, origin: Pos, cfg: TacticalConfig) -> List:
-    """Hostile combat ships within max(radius, their attack range) of origin."""
+def _threats(
+    engine, player_id: int, origin: Pos, cfg: TacticalConfig
+) -> List[_KnownEnemy]:
+    """Known hostile combat ships within max(radius, their attack range) of origin.
+
+    Uses last-known positions and memory weights from official sightings.
+    """
     man = engine.map.manhattan
-    out = []
-    for ship in engine.ships.values():
-        if ship.owner == player_id:
+    out: List[_KnownEnemy] = []
+    for enemy in _known_enemies(engine, player_id, cfg):
+        if enemy.type not in COMBAT_TYPES or enemy.stats.attack_range <= 0:
             continue
-        if ship.type not in COMBAT_TYPES or ship.stats.attack_range <= 0:
-            continue
-        reach = max(cfg.radius, int(ship.stats.attack_range))
-        if man(ship.position, origin) <= reach:
-            out.append(ship)
+        reach = max(cfg.radius, int(enemy.stats.attack_range))
+        if man(enemy.position, origin) <= reach:
+            out.append(enemy)
     return out
 
 
