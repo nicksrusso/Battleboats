@@ -1,0 +1,77 @@
+# BAT-24 trial: PPO self-play from tagged v0.4.1 with terminal win/loss/draw
+# rewards only. Same map pool, opponent ring, fleet starts, and PPO
+# hyperparameters as runs/selfplay_v0.4.0_smoke (BAT-20) for comparability.
+# Shaping is off. The v0.2.2 draw penalty is kept (reward.draw -0.15).
+# Terminal outcomes: +1 win, -1 loss, -0.15 timeout draw.
+#
+#   PYTHONPATH=<repo> python scripts/train_selfplay.py \
+#       --config configs/selfplay_v0.4.1_winloss.yaml
+
+run_dir: runs/selfplay_v0.4.1_winloss
+device: cpu
+seed: 0
+init_checkpoint: runs/checkpoints/v0.4.1_79754fb.pt
+map_pool:
+  - {width: 16, height: 8, count: 20, ports: 2}
+  - {width: 20, height: 10, count: 20, ports: 2}
+land_fraction: 0.02
+map_gen:
+  min_port_enemy_home_water: 7
+ref_home_distance: 14
+updates: 400
+rollout_decisions: 2048
+max_turns: 80
+max_steps: 8000
+snapshot_every: 5
+snapshot_pool: 4
+random_opponent_frac: 0.15
+save_every: 10
+wandb: false
+
+num_workers: 7
+games_per_worker: 8
+collect_threads: 1
+ppo_threads: 8
+dropout: 0.0
+
+# All per-event shaping off (kill, ship_lost, landing_progress, landing_buy,
+# build/load/unload, port capture/build). Terminal reward is win/loss/draw only.
+reward_shaping:
+  enabled: false
+
+# Timeout draws (no winner at the turn or step cap). Logged outcome stays 0.
+reward:
+  draw: -0.15
+
+fleet_starts:
+  prob: 0.333
+  min_width: 16
+  min_height: 8
+  budget: 1200
+  landing_prob: 1.0
+  radius: 6
+  landing_forward_prob: 0.5
+  landing_forward_dist: [5, 7]
+
+arch:
+  d_model: 64
+  nhead: 4
+  num_layers: 2
+  dim_feedforward: 128
+  dropout: 0.1
+
+ppo:
+  lr: 0.0003
+  gamma: 0.99
+  lam: 0.95
+  clip_eps: 0.2
+  vf_coef: 0.5
+  ent_coef: 0.01
+  hull_ent_coef: 0.05
+  epochs: 4
+  minibatch_size: 256
+  max_grad_norm: 0.5
+
+hull_explore:
+  eps: 0.15
+  logprob: policy

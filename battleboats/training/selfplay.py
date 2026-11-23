@@ -122,6 +122,22 @@ class SelfPlayConfig:
             self.init_checkpoint = Path(self.init_checkpoint)
 
 
+
+def tally_by(infos: List[Dict[str, Any]], key_fn) -> Dict[str, Dict[str, int]]:
+    """Count finished games by a key: games / wins / draws (losses = games - wins - draws)."""
+    out: Dict[str, Dict[str, int]] = {}
+    for info in infos:
+        key = key_fn(info)
+        b = out.setdefault(key, {"games": 0, "wins": 0, "draws": 0})
+        b["games"] += 1
+        outcome = info.get("outcome", 0)
+        if outcome > 0:
+            b["wins"] += 1
+        elif outcome == 0:
+            b["draws"] += 1
+    return out
+
+
 def _draw_reward(raw: Dict[str, Any]) -> float:
     """``reward.draw`` in a self-play YAML; default 0, unknown keys error."""
     block = dict(raw.get("reward") or {})
@@ -395,19 +411,12 @@ def _train_loop(cfg, policy, optimizer, snapshots, collector, state, state_path,
         n = max(1, len(infos))
         turns = [int(info.get("turn", 0)) for info in infos]
         step_counts = [int(info.get("steps", 0)) for info in infos]
-        by_size: Dict[str, Dict[str, int]] = {}
-        for info in infos:
-            b = by_size.setdefault(info.get("map_size", "?"), {"games": 0, "wins": 0, "draws": 0})
-            b["games"] += 1
-            b["wins"] += int(info.get("outcome", 0) > 0)
-            b["draws"] += int(info.get("outcome", 0) == 0)
-        by_start: Dict[str, Dict[str, int]] = {}
-        for info in infos:
-            kind = "forward" if info.get("fleet_forward") else ("fleet" if info.get("fleet_start") else "normal")
-            b = by_start.setdefault(kind, {"games": 0, "wins": 0, "draws": 0})
-            b["games"] += 1
-            b["wins"] += int(info.get("outcome", 0) > 0)
-            b["draws"] += int(info.get("outcome", 0) == 0)
+        by_size = tally_by(infos, lambda info: info.get("map_size", "?"))
+        by_start = tally_by(
+            infos,
+            lambda info: "forward" if info.get("fleet_forward") else ("fleet" if info.get("fleet_start") else "normal"),
+        )
+        by_seat = tally_by(infos, lambda info: f"seat_{int(info.get('agent_pid', 0))}")
         dists = [info["min_fleet_dist"] for info in infos if info.get("min_fleet_dist") is not None]
         combat = collected.combat
         row = {
@@ -420,6 +429,8 @@ def _train_loop(cfg, policy, optimizer, snapshots, collector, state, state_path,
             "pool": snapshots.names(),
             "by_size": by_size,
             "by_start": by_start,
+            "by_seat": by_seat,
+            "ports_built": int(collected.ports_built),
             "mean_turn": (sum(turns) / len(turns)) if turns else 0.0,
             "combat": combat,
             "landing": collected.landing,
@@ -491,7 +502,7 @@ def _train_loop(cfg, policy, optimizer, snapshots, collector, state, state_path,
         if use_wandb:
             import wandb
 
-            wandb.log({k: v for k, v in row.items() if k not in ("pool", "by_size", "by_start", "combat", "landing", "purchases", "hull_explore_explored_hulls", "hull_explore_policy_hulls")})
+            wandb.log({k: v for k, v in row.items() if k not in ("pool", "by_size", "by_start", "by_seat", "combat", "landing", "purchases", "hull_explore_explored_hulls", "hull_explore_policy_hulls")})
         save_checkpoint(policy, latest, extra={"update": update + 1})
         if cfg.save_every and (update + 1) % cfg.save_every == 0:
             save_checkpoint(policy, cfg.run_dir / f"update_{update + 1}.pt")

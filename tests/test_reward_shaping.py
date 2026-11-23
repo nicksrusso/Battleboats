@@ -393,3 +393,47 @@ def test_draw_reward_default_zero_matches_old_terminal(tmp_path):
     fin, seg = res.finished[0], res.segments[0]
     assert sum(t.reward for t in seg) == pytest.approx(fin["outcome"] + sum(fin["shaping"].values()))
 
+
+
+def test_winloss_config_keeps_draw_penalty_and_disables_shaping():
+    """BAT-24 trial yaml: shaping off, terminal +1/-1, draw -0.15 (v0.2.2)."""
+    cfg = load_selfplay_config(ROOT / "configs" / "selfplay_v0.4.1_winloss.yaml")
+    assert cfg.reward_shaping.enabled is False
+    assert all(cfg.reward_shaping.weight(k) == 0.0 for k in COMPONENTS)
+    assert cfg.draw_reward == pytest.approx(-0.15)
+    assert cfg.snapshot_pool == 4
+    assert cfg.random_opponent_frac == pytest.approx(0.15)
+
+
+def test_tally_by_seat_splits_finished_games():
+    from battleboats.training.selfplay import tally_by
+
+    infos = [
+        {"agent_pid": 0, "outcome": 1},
+        {"agent_pid": 0, "outcome": -1},
+        {"agent_pid": 0, "outcome": 0},
+        {"agent_pid": 1, "outcome": 1},
+        {"agent_pid": 1, "outcome": 1},
+    ]
+    by_seat = tally_by(infos, lambda info: f"seat_{int(info.get('agent_pid', 0))}")
+    assert by_seat["seat_0"] == {"games": 3, "wins": 1, "draws": 1}
+    assert by_seat["seat_1"] == {"games": 2, "wins": 2, "draws": 0}
+
+
+def test_record_learner_construction_counts_ships_and_ports():
+    from types import SimpleNamespace
+
+    from battleboats.training.hull_explore import empty_explore_stats
+    from battleboats.training.selfplay_purchases import empty_purchase_counts
+    from battleboats.training.vec_collect import CollectResult, record_learner_construction
+
+    result = CollectResult()
+    slot = SimpleNamespace(purchases=empty_purchase_counts(), ports_built=0)
+    result.hull_explore = empty_explore_stats()
+    record_learner_construction(BuildShipAction((0, 0), (0, 1), ShipType.LANDING), slot, result)
+    record_learner_construction(BuildPortAction(1, (1, 1)), slot, result)
+    record_learner_construction(BuildPortAction(2, (2, 2)), slot, result)
+    assert slot.purchases["landing"] == 1
+    assert result.purchases["landing"] == 1
+    assert slot.ports_built == 2
+    assert result.ports_built == 2

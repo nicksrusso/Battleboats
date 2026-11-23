@@ -25,6 +25,7 @@ experiment, not model versions; there is no tagged v0.2.1 model.
 | v0.2.0 | `runs/checkpoints/v0.2.0_955f221.pt` | 955f221 | 16x8 self-play from v0.1.0, 700 updates, under the #38 rules (bought ships wait a turn; captured/built ports wait a turn). |
 | v0.3.0 | `runs/checkpoints/v0.3.0_26348ee.pt` | 26348ee | Mixed 16x8+20x10 self-play from v0.2.0, tagged at update 800 (the run's final u1000 collapsed and is not this version). Same #38 rules; ship_lost / draw penalty / distance-scaled landing_progress. |
 | v0.4.0 | `runs/checkpoints/v0.4.0_8ad2530.pt` | 8ad2530 | Behavior clone of the #46 tactical scripted agent (fog, uniform queue, nearest known capturable port). From-scratch v0.3.0 architecture; value head trained for a PPO warm start. Same #38 rules. |
+| v0.4.1 | `runs/checkpoints/v0.4.1_79754fb.pt` | 79754fb | v0.4.0 BC fine-tuned in the buy-diversity sandbox from both seats, non-buy anchor 0.05 toward frozen v0.4.0. Same #38 rules. Weights named for the training-code commit; the annotated tag is on the docs commit. |
 
 ## v0.1.0 (baseline)
 
@@ -81,3 +82,14 @@ experiment, not model versions; there is no tagged v0.2.1 model.
 - Eval, 100 games vs each opponent (25 per BC seat × size) plus 40 BC self-play, v0.2.2 pool, seed 0:
   - Greedy (argmax): vs tactical 1/52/47, score 0.245; vs v0.3.0 4/24/72, score 0.400; self-play 0/0/40. Buys collapse to destroyers (e.g. 3043 destroyers vs 27 landings against v0.3.0).
   - Sampled (`policy.act`, as PPO and the opponent pool use it): vs tactical 24/28/48, win rate 24.0% (Wilson 95% [16.7, 33.2]), score 0.480; vs v0.3.0 11/50/39, win rate 11.0% (Wilson 95% [6.3, 18.6]), score 0.305 (the teacher was 29/46/25, score 0.415); self-play 9/6/25 (seat 0), score 0.538, 25 timeouts. All eight hulls appear in the buy mix; vs tactical the clone bought 98 landings (45 port captures, 24 home) and still overweighted destroyer / merchant / submarine.
+
+## v0.4.1
+
+- Source: `runs/sandbox_buydiv_v0.4.1/update_300.pt`, 300 updates, trained 2026-11-23 12:31-12:47 CST (15.7 min). Official copy at `runs/checkpoints/v0.4.1_79754fb.pt`.
+- sha256 `1694863daa5a16d3d8f2a6aae56127d061da9e472d6e18539bfe41e3c6de3af1`.
+- Lineage: warm start from v0.4.0. Same #38 rules as v0.2.0 / v0.3.0 / v0.4.0.
+- Code: 79754fb (#51). Trainer: `scripts/train_buydiv.py` with `configs/sandbox_buydiv_v0.4.1.yaml`. The learner seat alternates each episode; the multi-port economy is mirrored onto that seat's side. `anchor_coef` 0.05 (MSE on non-`build_ship` log-probs toward frozen v0.4.0; 0.05 beat 0.15 on a 40-update probe).
+- Reward: potential-based Δ of `max(0, 1 - std/mean)` over all eight hull types plus a training-only coverage bonus (`0.25 * unique/8`). Cheap types (destroyer / submarine / merchant) masked with annealed p 0.7→0.0; landing never masked. CPU, lr 1e-4, dropout 0.0, 1024 decisions, 50-turn horizon, 16x8+20x10.
+- Unmasked sandbox, 128 episodes, p=0: diversity 0.481 (Wald 95% [0.458, 0.504]), roughly even, type totals 318–558 (max/min 1.75). Frozen v0.4.0 in the same protocol was 0.185 [0.159, 0.211], max/min 6.12.
+- Self-play, 50 games, sampled: 36 decisive / 14 turn-cap draws, decisive rate 72.0% (Wilson 95% [58.3, 82.5]); all wins were home captures. Seat 0: 13/23/14 (13 home caps). Seat 1: 23/13/14 (23 home caps). Landing share 5.16%.
+- Head-to-head, 50 games sampled (seat split 26/24): vs tactical 10/25/15, win rate 20.0% (Wilson 95% [11.2, 33.0]), score 0.350; vs v0.3.0 10/19/21, win rate 20.0% (Wilson 95% [11.2, 33.0]), score 0.410; vs frozen v0.4.0 14/11/25, win rate 28.0% (Wilson 95% [17.5, 41.7]), score 0.530. Seat 0 wins in every matchup.
