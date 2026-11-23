@@ -256,6 +256,8 @@ def test_landing_config_and_logging(tmp_path, capsys):
     assert cfg.fleet_starts.landing_forward_dist == (5, 7)
     old = load_selfplay_config(ROOT / "configs" / "selfplay_bigmaps_shaped_fleets.yaml")
     assert old.reward_shaping.landing_progress == 0.0 and old.fleet_starts.landing_forward_prob == 0.0
+    assert cfg.reward_shaping.landing_progress_distance_scale is False
+    assert old.reward_shaping.landing_progress_distance_scale is False
 
     run = SelfPlayConfig(
         run_dir=tmp_path / "run", device="cpu",
@@ -287,3 +289,87 @@ def test_forward_start_is_tagged(tmp_path):
     env.reset(seed=0)
     assert apply_fleet_start(env.engine, FleetStarts(prob=0.0), random.Random(0)) is None
     assert env.engine.fleet_start_forward is False
+
+
+def test_distance_scale_defaults_off_and_parses():
+    assert RewardShaping().landing_progress_distance_scale is False
+    off = RewardShaping.from_dict({"enabled": True, "weights": {"landing_progress": 0.2}})
+    assert off.landing_progress_distance_scale is False
+    on = RewardShaping.from_dict({
+        "enabled": True,
+        "weights": {"landing_progress": 0.2},
+        "landing_progress_distance_scale": True,
+    })
+    assert on.landing_progress_distance_scale is True
+    with pytest.raises(ValueError, match="unknown"):
+        RewardShaping.from_dict({"enabled": True, "landing_progress_scale": True})
+
+
+def test_distance_scale_full_trip_pays_coef_on_different_map_sizes(tmp_path):
+    """With the flag on, walking a landing ship from home-distance to adjacent
+    pays exactly landing_progress, on both a short and a longer map. With the
+    flag off, the older formula pays coef * (start - 1) / norm, which shrinks
+    on shorter paths.
+    """
+    sizes = (
+        PoolSize(16, 8, 4, ports=2),
+        PoolSize(20, 10, 4, ports=2),
+    )
+    paid_on, paid_off, norms = [], [], []
+    for i, size in enumerate(sizes):
+        maps, _ = _pool(tmp_path / f"s{i}", sizes=(size,))
+        # pick a map whose home-to-home water path is long enough to walk
+        eng = None
+        by_d = norm = me = None
+        for path in maps:
+            env = BattleboatsAEC(path, max_turns=50)
+            env.reset(seed=0)
+            cand = env.engine
+            tr = ShapingTracker(_cfg(landing_progress_distance_scale=True))
+            bd, n = _path_to_enemy(cand, tr, cand.current_player)
+            if n >= 4 and 1 in bd and n in bd:
+                eng, by_d, norm, me = cand, bd, n, cand.current_player
+                break
+        assert eng is not None, f"no usable {size.width}x{size.height} map"
+        norms.append(norm)
+
+        def _walk(scale: bool) -> float:
+            tr = ShapingTracker(_cfg(landing_progress_distance_scale=scale))
+            ship = eng._spawn_ship(me, ShipType.LANDING, by_d[norm])
+            tr.start(eng, me)
+            if scale:
+                assert tr.potential(eng, me) == pytest.approx(-COEF)
+            _teleport(eng, ship, by_d[1])
+            total = tr.settle(eng, me).get("landing_progress", 0.0)
+            eng._destroy_ship(ship.id)
+            return total
+
+        on = _walk(True)
+        off = _walk(False)
+        paid_on.append(on)
+        paid_off.append(off)
+        assert on == pytest.approx(COEF)
+        assert off == pytest.approx(COEF * (norm - 1) / norm)
+
+    assert norms[0] != norms[1], f"need different path lengths, got {norms}"
+    assert paid_on[0] == pytest.approx(paid_on[1])
+    # The unscaled totals differ once the path lengths do.
+    assert paid_off[0] != pytest.approx(paid_off[1])
+
+
+def test_distance_scale_oscillation_still_nets_zero(tmp_path):
+    eng = _engine(tmp_path)
+    me = eng.current_player
+    tr = ShapingTracker(_cfg(landing_progress_distance_scale=True))
+    by_d, norm = _path_to_enemy(eng, tr, me)
+    far = max(d for d in by_d if d <= norm)
+    assert far >= 2 and (far - 1) in by_d
+    ship = eng._spawn_ship(me, ShipType.LANDING, by_d[far])
+    tr.start(eng, me)
+    start = tr.totals["landing_progress"]
+    _teleport(eng, ship, by_d[far - 1])
+    tr.settle(eng, me)
+    _teleport(eng, ship, by_d[far])
+    tr.settle(eng, me)
+    assert tr.totals["landing_progress"] == pytest.approx(start)
+

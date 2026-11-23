@@ -319,6 +319,7 @@ def run_selfplay(cfg: SelfPlayConfig, *, resume: bool = True) -> Dict[str, Any]:
             "[selfplay] reward shaping ON "
             + " ".join(f"{k}={rs.weight(k)}" for k in COMPONENTS)
             + f" landing_buy_decay={rs.landing_buy_decay}"
+            + f" landing_progress_distance_scale={rs.landing_progress_distance_scale}"
             + f" caps={rs.caps} total_cap={rs.total_cap}"
         )
     if cfg.fleet_starts.prob > 0:

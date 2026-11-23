@@ -41,7 +41,14 @@ pays for what the engine actually did:
   player's own home to the enemy home, the potential is
   ``phi = -landing_progress * min(D, norm) / norm``. No landing ship (none
   built yet, or all sunk) counts as D = norm, the distance from its own home,
-  so phi lies in [-coef, 0]. Each learner transition gets ``phi' - phi``
+  so phi lies in [-coef, 0]. A full home-to-adjacent trip therefore pays
+  ``coef * (norm - 1) / norm``, which is slightly less than ``coef`` on short
+  maps. With ``landing_progress_distance_scale`` (default off, so old configs
+  are unchanged), the potential is instead
+  ``phi = -coef * (min(D, norm) - 1) / max(1, norm - 1)``, and no ship is
+  still ``-coef``. Then a full spawn/home-to-adjacent trip pays exactly
+  ``coef`` on every map, regardless of that map's home-to-home water length.
+  Each learner transition gets ``phi' - phi``
   between its decision and the player's next one (settled like kill losses).
   Moving in and back out pays zero net, so oscillating can't be farmed. A sunk
   landing ship drops phi back to -coef, which takes back the progress it had
@@ -106,6 +113,10 @@ class RewardShaping:
     landing_buy: float = 0.0
     # landing_buy pays landing_buy * landing_buy_decay ** (landing ships alive).
     landing_buy_decay: float = 0.5
+    # When true, a full home-to-adjacent landing trip pays exactly
+    # ``landing_progress`` on every map (see module docstring). Default false
+    # keeps the older ``-coef * D / norm`` potential.
+    landing_progress_distance_scale: bool = False
     # Per-game cap on each component's summed reward (None = no cap).
     caps: Dict[str, Optional[float]] = field(default_factory=dict)
     # Cap on one player's summed positive non-kill shaping in one game
@@ -123,6 +134,7 @@ class RewardShaping:
         decay = float(raw.pop("landing_buy_decay", 0.5))
         if not 0.0 <= decay <= 1.0:
             raise ValueError("reward_shaping.landing_buy_decay must be in [0, 1]")
+        scale = bool(raw.pop("landing_progress_distance_scale", False))
         unknown = set(raw) | (set(weights) - set(COMPONENTS)) | (set(caps) - set(COMPONENTS))
         if unknown:
             raise ValueError(f"reward_shaping: unknown keys {sorted(unknown)}")
@@ -131,6 +143,7 @@ class RewardShaping:
             caps={k: (None if v is None else float(v)) for k, v in caps.items()},
             total_cap=None if total_cap is None else float(total_cap),
             landing_buy_decay=decay,
+            landing_progress_distance_scale=scale,
             **{k: float(v) for k, v in weights.items()},
         )
 
@@ -208,7 +221,13 @@ class ShapingTracker:
             return 0.0
         d, norm, _ = self.landing_distance(engine, pid)
         d = norm if d is None else min(d, norm)
-        return -self.cfg.landing_progress * d / norm
+        coef = self.cfg.landing_progress
+        if self.cfg.landing_progress_distance_scale:
+            # Full trip from home (d = norm) to adjacent (d = 1) pays ``coef``
+            # on every map. No landing ship is treated as d = norm.
+            denom = max(1, int(norm) - 1)
+            return -coef * (d - 1) / denom
+        return -coef * d / norm
 
     def start(self, engine, pid: int) -> None:
         """Baseline fleet and potential with no reward (game start, or a
