@@ -9,7 +9,12 @@ kept when:
 - a water path joins the two home ports,
 - the home ports are at least half the board width apart (Manhattan), and
 - the two homes sit about as far from the midline as each other, and their
-  satellite ports are about as far from home as the other side's.
+  satellite ports are about as far from home as the other side's, and
+- (when ``min_port_enemy_home_water`` > 0) every port's spawn tile, home and
+  satellites, is at least that many water moves from a tile next to the
+  enemy home. At 7 with landing speed 3, a landing ship bought on turn 0
+  cannot capture before turn 2. The generator redraws ports to meet it; a
+  size where it cannot be met fails with RuntimeError instead of looping.
 
 Seats alternate every episode, so any leftover asymmetry is played from both
 sides.
@@ -23,7 +28,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Dict, List, Optional, Sequence, Tuple
 
-from battleboats.core.config.generate_map import generate_map_json
+from battleboats.core.config.generate_map import generate_map_json, port_enemy_home_water
 
 Pos = Tuple[int, int]
 _CARDINALS: Tuple[Pos, ...] = ((1, 0), (-1, 0), (0, 1), (0, -1))
@@ -83,7 +88,19 @@ def water_path_length(data: dict) -> Optional[int]:
     return None
 
 
-def check_map(data: dict) -> Tuple[bool, str]:
+def spawn_enemy_home_water(data: dict) -> Optional[int]:
+    """Min water moves from any port's spawn tile to a tile next to the enemy home."""
+    return port_enemy_home_water(int(data["width"]), int(data["height"]), data["land"], data["ports"])
+
+
+def earliest_capture_turn(moves: int, speed: int = 3) -> int:
+    """Earliest game turn a landing ship bought on turn 0 can capture, given the
+    water moves from its spawn tile to a tile next to the enemy home. It moves
+    ``speed`` tiles on its build turn and every turn after; capturing is free."""
+    return 0 if moves <= speed else (moves - 1) // speed
+
+
+def check_map(data: dict, min_port_enemy_home_water: int = 0) -> Tuple[bool, str]:
     """(ok, reason). See the module docstring for the rules."""
     w, h = int(data["width"]), int(data["height"])
     land = {(int(x), int(y)) for x, y in data["land"]}
@@ -110,10 +127,14 @@ def check_map(data: dict) -> Tuple[bool, str]:
         return sum(_dist(home, s) for s in sats) / max(1, len(sats))
     if abs(sat_spread("0", h0) - sat_spread("1", h1)) > (w + h) / 4:
         return False, "satellite ports much farther from one home"
+    if min_port_enemy_home_water > 0:
+        d = spawn_enemy_home_water(data)
+        if d is None or d < min_port_enemy_home_water:
+            return False, f"a port spawn is {d} water moves from the enemy home (< {min_port_enemy_home_water})"
     return True, "ok"
 
 
-def write_size_yaml(path: Path, size: PoolSize, land_fraction: float) -> Path:
+def write_size_yaml(path: Path, size: PoolSize, land_fraction: float, min_port_enemy_home_water: int = 0) -> Path:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(
         "Map:\n"
@@ -121,6 +142,7 @@ def write_size_yaml(path: Path, size: PoolSize, land_fraction: float) -> Path:
         f"  sizeY: {size.height}\n"
         f"  landFraction: {land_fraction}\n"
         f"  numPorts: {size.ports}\n"
+        + (f"  minPortEnemyHomeWater: {int(min_port_enemy_home_water)}\n" if min_port_enemy_home_water > 0 else "")
     )
     return path
 
@@ -131,6 +153,7 @@ def build_map_pool(
     *,
     seed: int = 0,
     land_fraction: float = 0.02,
+    min_port_enemy_home_water: int = 0,
 ) -> List[str]:
     """Write ``count`` accepted maps per size into ``out_dir``; return their paths.
 
@@ -141,16 +164,27 @@ def build_map_pool(
     paths: List[str] = []
     for i, size in enumerate(sizes):
         label = f"{size.width}x{size.height}"
-        yaml_path = write_size_yaml(out_dir / f"mapConfig_{label}.yaml", size, land_fraction)
+        yaml_path = write_size_yaml(out_dir / f"mapConfig_{label}.yaml", size, land_fraction, min_port_enemy_home_water)
         s = seed + 100_000 * i
         tries = 0
         kept = 0
         while kept < size.count:
             if tries >= _MAX_TRIES_PER_MAP * size.count:
-                raise RuntimeError(f"only {kept}/{size.count} usable {label} maps after {tries} seeds")
+                extra = (
+                    f" with min_port_enemy_home_water={min_port_enemy_home_water}"
+                    if min_port_enemy_home_water > 0
+                    else ""
+                )
+                raise RuntimeError(f"only {kept}/{size.count} usable {label} maps after {tries} seeds{extra}")
             out = out_dir / f"map_{label}_{kept:02d}.json"
-            generate_map_json(str(yaml_path), str(out), seed=s)
-            ok, _ = check_map(json.loads(out.read_text()))
+            try:
+                generate_map_json(str(yaml_path), str(out), seed=s)
+            except ValueError:
+                # Port constraint infeasible for this seed's land; try the next seed.
+                s += 1
+                tries += 1
+                continue
+            ok, _ = check_map(json.loads(out.read_text()), min_port_enemy_home_water)
             s += 1
             tries += 1
             if ok:
