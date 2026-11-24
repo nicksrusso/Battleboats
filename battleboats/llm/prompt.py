@@ -16,25 +16,25 @@ from battleboats.core.actions import (Action, AttackAction, BuildPortAction,
                                       MerchantUnloadAction, MoveAction)
 from battleboats.core.gameEngine import gameEngine
 from battleboats.core.shipyard.ship import Ship
-from battleboats.core.shipyard.ship_data import BASE_STATS
+from battleboats.core.shipyard.ship_data import BASE_STATS, PORT, spot_distance
 from battleboats.core.shipyard.ship_stats import ShipStats
 from battleboats.core.shipyard.ship_type import ShipType
 from battleboats.envs.observation import build_entity_refs
 
-FORMAT_VERSION = 3
+FORMAT_VERSION = 4
 
 # Byte-stable prefix of every prompt. llama-server cache_prompt reuses it.
 # Nothing in here may depend on the seat, the board, or the turn.
-STATIC_PREFIX = (
-    "FORMAT 3\n"
+_STATIC_HEAD = (
+    "FORMAT 4\n"
     "Reply with one MOVES number then one short sentence.\n"
     "One line per ship and per port. Land is tokens, one row y: x or x-x. "
     "board WxH is stated once. Positions are cells.\n"
-    "Ship: id owner type (x,y) speed strength range vis scout cost "
+    "Ship: id owner type (x,y) speed strength range cost "
     "cargo moved attacked fresh stale.\n"
     "Port: id owner (x,y) home stock cash fresh stale. "
-    "range=attack_range vis=visibility scout=scouting.\n"
-    "Always on a ship: speed strength range vis scout cost. "
+    "range=attack_range.\n"
+    "Always on a ship: speed strength range cost. "
     "Omitted when zero: cargo, moved, attacked, home, stock, cash. "
     "A fresh sighting omits fresh and stale.\n"
     "Builds: B@(x,y): n Type cost | n Type cost.\n"
@@ -63,6 +63,31 @@ def _whole(value: float) -> int | float:
     if isinstance(value, float) and value.is_integer():
         return int(value)
     return value
+
+
+def _spot_table() -> str:
+    """Spotting matrix from config/visibilityMatrix.csv, one row per spotter.
+
+    Static (no seat, board, or turn), so it stays in the cached prefix.
+    """
+    keys = list(ShipType) + [PORT]
+    letter = lambda k: "P" if k == PORT else _LETTER[k]
+    lines = [
+        "Spotting: the row unit sees the column unit within N tiles (Manhattan). "
+        "Not symmetric. Letters: " + " ".join(
+            f"{letter(k)}={'Port' if k == PORT else k.value}" for k in keys
+        ) + ".",
+        "   " + " ".join(f"{letter(k):>2}" for k in keys),
+    ]
+    for a in keys:
+        lines.append(
+            f"{letter(a)}: " + " ".join(f"{_whole(spot_distance(a, b))!s:>2}" for b in keys)
+        )
+    return "\n".join(lines) + "\n"
+
+
+# Byte-stable prefix of every prompt (see _STATIC_HEAD).
+STATIC_PREFIX = _STATIC_HEAD + _spot_table()
 
 
 def ship_id(sid: int) -> str:
@@ -269,8 +294,6 @@ def _stat_fields(stats: ShipStats) -> dict:
         "speed": _whole(stats.speed),
         "strength": _whole(stats.strength),
         "range": _whole(stats.attack_range),
-        "vis": _whole(stats.visibility),
-        "scout": _whole(stats.scouting),
         "cost": _whole(stats.cost),
     }
 
@@ -344,8 +367,6 @@ def _ship_line(ent: dict) -> str:
         f"speed={ent['speed']}",
         f"strength={ent['strength']}",
         f"range={ent['range']}",
-        f"vis={ent['vis']}",
-        f"scout={ent['scout']}",
         f"cost={ent['cost']}",
     ]
     for key in _SHIP_OPTIONAL:

@@ -61,8 +61,6 @@ def _make_ship(
             cost=1,
             strength=strength,
             attack_range=attack_range,
-            visibility=1.0,
-            scouting=1.0,
         ),
         owner=owner,
         position=position,

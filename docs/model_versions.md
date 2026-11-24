@@ -93,3 +93,9 @@ experiment, not model versions; there is no tagged v0.2.1 model.
 - Unmasked sandbox, 128 episodes, p=0: diversity 0.481 (Wald 95% [0.458, 0.504]), roughly even, type totals 318–558 (max/min 1.75). Frozen v0.4.0 in the same protocol was 0.185 [0.159, 0.211], max/min 6.12.
 - Self-play, 50 games, sampled: 36 decisive / 14 turn-cap draws, decisive rate 72.0% (Wilson 95% [58.3, 82.5]); all wins were home captures. Seat 0: 13/23/14 (13 home caps). Seat 1: 23/13/14 (23 home caps). Landing share 5.16%.
 - Head-to-head, 50 games sampled (seat split 26/24): vs tactical 10/25/15, win rate 20.0% (Wilson 95% [11.2, 33.0]), score 0.350; vs v0.3.0 10/19/21, win rate 20.0% (Wilson 95% [11.2, 33.0]), score 0.410; vs frozen v0.4.0 14/11/25, win rate 28.0% (Wilson 95% [17.5, 41.7]), score 0.530. Seat 0 wins in every matchup.
+
+## v0.5.0 (rules change; no weights yet)
+
+- Game rebalance (Nick, 2026-11-24). Detection is now an exact spotting-distance matrix, `battleboats/core/config/visibilityMatrix.csv` (row spots column, in tiles), replacing the visibility × scouting coefficients, which are gone from `shipTypes.csv`. Submarine strength 100 → 50; Destroyer vs Submarine modifier 1.5 → 4; Submarine vs Carrier/Battleship/Cruiser 2/2/1 → 3/4/2.
+- Under the bump rule this is a minor bump, so the next tagged model is v0.5.0. v0.0.1–v0.4.1 were all trained under the old rules.
+- The observation shape is unchanged, so older checkpoints still load and run, but stats slots 3 and 4 now hold per-hull spotting summaries (mean distance the hull is spotted at / spots at) instead of the visibility and scouting coefficients. What those checkpoints learned for those slots, and their sense of what they can see, is stale. Treat v0.4.x evals under the new rules as off-distribution.

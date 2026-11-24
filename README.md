@@ -6,11 +6,11 @@ Grid based, turn based, zero sum, 2 player strategy game. Players compete to bui
 
 ## Combat 
 
-A port is captured by positioning a LANDING ship on a water tile adjacent to an enemy port and issuing a `CapturePortAction`. Ship vs ship combat is resolved as a binary outcome (ship is alive or dead, no damage model). Each ship type has a cost, strength, attack range, speed, visibility coefficient, and scouting coefficient
+A port is captured by positioning a LANDING ship on a water tile adjacent to an enemy port and issuing a `CapturePortAction`. Ship vs ship combat is resolved as a binary outcome (ship is alive or dead, no damage model). Each ship type has a cost, strength, attack range, and speed (`shipTypes.csv`); detection comes from a separate spotting matrix (`visibilityMatrix.csv`)
 
 A ship can attack any spotted enemy ship within its attack range on a given turn. Ships can move before attacking. When a player attacks, a probability of kill is calculated based on the relative strength of the attacker and defender, as well as a modifier based on each ship's type. The probability distribution is sampled, and the defending ship is deleted if destroyed. 
 
-Detection range for two ships is calculated as the product of each's visibility coefficient and scouting coefficient. High visibility coefficients mean the ship is larger and will be more easily spotted by the enemy, while a higher scouting coefficient increases the detection range 
+Detection range is read from `battleboats/core/config/visibilityMatrix.csv`, same layout as `attackModifiers.csv`: the row ship (or port) spots the column ship (or port) within that many tiles (Manhattan). It is not symmetric, so a Destroyer can see a Submarine before the Submarine sees it. Every pair must be present or the loader raises. See [docs/combat_and_scouting.md](docs/combat_and_scouting.md).
 
 ## Economy
 

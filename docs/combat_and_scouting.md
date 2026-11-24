@@ -1,9 +1,10 @@
 # Battleboats — Combat Resolution & Scouting
 
 The two stochastic/geometric rules the engine uses to (a) resolve an attack and
-(b) decide what each player can see under fog of war. Both are driven by
-per-ship-type coefficients in [`shipTypes.csv`](../battleboats/core/config/shipTypes.csv)
-and the matchup matrix in [`attackModifiers.csv`](../battleboats/core/config/attackModifiers.csv).
+(b) decide what each player can see under fog of war. They are driven by
+per-ship-type stats in [`shipTypes.csv`](../battleboats/core/config/shipTypes.csv),
+the matchup matrix in [`attackModifiers.csv`](../battleboats/core/config/attackModifiers.csv),
+and the spotting-distance matrix in [`visibilityMatrix.csv`](../battleboats/core/config/visibilityMatrix.csv).
 
 ---
 
@@ -17,8 +18,7 @@ and the matchup matrix in [`attackModifiers.csv`](../battleboats/core/config/att
 | $k$ | $\texttt{kill\_curve\_k}$ — decisiveness exponent (default $2$) |
 | $U$ | a draw from $\mathrm{Uniform}[0,1)$ (engine RNG; seeded → reproducible) |
 | $d(a,b)$ | Manhattan distance $\lvert a_x-b_x\rvert + \lvert a_y-b_y\rvert$ |
-| $\sigma(u)$ | **scouting** coefficient of unit $u$ (how far it sees) |
-| $\nu(u)$ | **visibility** coefficient of unit $u$ (how easily it is seen) |
+| $R(s, T)$ | **spotting distance**: tiles within which unit $s$ sees unit $T$ (matrix) |
 | $\mathcal{U}(o)$ | observer $o$'s units — its ships $\cup$ its ports |
 
 ---
@@ -65,12 +65,13 @@ column); $1$ is neutral, $>1$ favors the attacker, $<1$ penalizes it. Excerpt fr
 | **Carrier** | 1.0 | 1.5 | 1.0 | 0.75 | 1.0 |
 | **Battleship** | 1.0 | 1.0 | 1.5 | 1.0 | 0.75 |
 | **Cruiser** | 1.25 | 1.0 | 1.0 | 1.5 | 1.0 |
-| **Destroyer** | 1.25 | 1.0 | 1.0 | 1.0 | 1.5 |
-| **Submarine** | 2.0 | 2.0 | 1.0 | 0.5 | 1.0 |
+| **Destroyer** | 1.25 | 1.0 | 1.0 | 1.0 | 4.0 |
+| **Submarine** | 3.0 | 4.0 | 2.0 | 0.5 | 1.0 |
 
 Non-combat types ($S=0$) need no modifier — they always die when attacked. Note
-the Submarine line: $\times 2$ against capital ships (Carrier, Battleship) but
-$\times 0.5$ against a Destroyer — the Destroyer is the dedicated sub-hunter.
+the Submarine line: strong multipliers against capital ships (Carrier, Battleship)
+but $\times 0.5$ against a Destroyer, and the Destroyer's $\times 4$ against a
+Submarine — the Destroyer is the dedicated sub-hunter.
 
 ---
 
@@ -83,20 +84,16 @@ $$
 \text{see}(o \to T) \;\iff\; \exists\, s \in \mathcal{U}(o)\ :\ d(s, T) \,\le\, R(s, T).
 $$
 
-The detection radius factorizes into the **scout's** reach times the **target's**
-conspicuousness:
+The detection radius $R(s, T)$ is read directly from
+[`visibilityMatrix.csv`](../battleboats/core/config/visibilityMatrix.csv)
+(`ship_data.spot_distance(spotter, target)`): the **row** unit spots the
+**column** unit within that many tiles. Ports have their own `Port` row and
+column. Every pair over all ship types plus `Port` must be present; the loader
+raises if one is missing.
 
-$$
-R(s, T) \;=\; \sigma(s)\,\cdot\,\nu(T).
-$$
-
-Ports carry no per-instance stats; they use module constants
-$\sigma_{\text{port}} = \nu_{\text{port}} = 4$.
-
-**Asymmetry.** Because $R$ mixes the scout's $\sigma$ with the target's $\nu$,
-visibility is not mutual: in general $R(s,T) \neq R(T,s)$. A high-$\sigma$ Carrier
-spots far; a low-$\nu$ Submarine ($\nu = 1$) stays hidden until something is nearly
-on top of it.
+**Asymmetry.** $R(s,T) \neq R(T,s)$ in general: a Destroyer spots a Submarine at
+3 while the Submarine spots the Destroyer at 2; a Submarine spots a Carrier at 4
+while the Carrier spots it at 2.
 
 **Fog of war (freshness).** Each refresh tick, a sighting is **fresh** if $T$ is
 currently within range of some unit in $\mathcal{U}(o)$; otherwise the last-known
@@ -107,21 +104,40 @@ updates a port's last-known owner.
 
 ---
 
-## Ship coefficients
+## Ship stats
 
 The stats these rules read, from [`shipTypes.csv`](../battleboats/core/config/shipTypes.csv):
 
-| Type | Strength $S$ | Attack range | Speed | Visibility $\nu$ | Scouting $\sigma$ |
-|---|---|---|---|---|---|
-| Carrier | 100 | 12 | 6 | 4 | 4 |
-| Battleship | 125 | 4 | 3 | 4 | 2 |
-| Cruiser | 75 | 3 | 5 | 3 | 3 |
-| Destroyer | 25 | 3 | 5 | 3 | 3 |
-| Submarine | 100 | 3 | 3 | 1 | 1 |
-| Landing | 0 | 0 | 3 | 2 | 1 |
-| Merchant | 0 | 0 | 3 | 2 | 1 |
-| Builder | 0 | 0 | 3 | 2 | 1 |
-| *(Port)* | — | — | — | 4 | 4 |
+| Type | Strength $S$ | Attack range | Speed |
+|---|---|---|---|
+| Carrier | 100 | 12 | 6 |
+| Battleship | 125 | 4 | 3 |
+| Cruiser | 75 | 3 | 5 |
+| Destroyer | 25 | 3 | 5 |
+| Submarine | 50 | 3 | 3 |
+| Landing | 0 | 0 | 3 |
+| Merchant | 0 | 0 | 3 |
+| Builder | 0 | 0 | 3 |
+
+Spotting distances $R(s, T)$, from [`visibilityMatrix.csv`](../battleboats/core/config/visibilityMatrix.csv)
+(row spots column):
+
+| spotter ↓ \ target → | Carrier | Battleship | Cruiser | Destroyer | Submarine | Landing | Merchant | Builder | Port |
+|---|---|---|---|---|---|---|---|---|---|
+| **Carrier** | 6 | 6 | 4 | 3 | 2 | 8 | 8 | 8 | 16 |
+| **Battleship** | 4 | 4 | 3 | 3 | 1 | 4 | 4 | 4 | 8 |
+| **Cruiser** | 4 | 4 | 3 | 3 | 1 | 6 | 6 | 6 | 12 |
+| **Destroyer** | 4 | 4 | 3 | 3 | 3 | 8 | 8 | 8 | 16 |
+| **Submarine** | 4 | 4 | 3 | 2 | 1 | 2 | 2 | 2 | 4 |
+| **Landing** | 4 | 4 | 3 | 3 | 1 | 2 | 2 | 2 | 4 |
+| **Merchant** | 4 | 4 | 3 | 3 | 1 | 2 | 2 | 2 | 4 |
+| **Builder** | 4 | 4 | 3 | 3 | 1 | 2 | 2 | 2 | 4 |
+| **Port** | 16 | 16 | 12 | 12 | 1 | 8 | 8 | 8 | 16 |
+
+The 5×5 warship block is hand-tuned. The Landing/Merchant/Builder and Port rows
+and columns were carried over from the old `scouting × visibility` formula
+(non-combat ships scouting 1 / visibility 2, ports 4 / 4, floor 1) and are
+placeholders to tune.
 
 ---
 
@@ -133,6 +149,7 @@ The stats these rules read, from [`shipTypes.csv`](../battleboats/core/config/sh
   consume the real game's randomness.
 - **Strength vs. range vs. detection are independent axes.** A unit's ability to
   *win* a fight ($S$, $\mu$), to *reach* one (attack range, speed), and to *see*
-  ($\sigma$) or *hide* ($\nu$) are separate coefficients — e.g. the Submarine is a
-  strong, stealthy ($\nu=1$) brawler with poor reach, while the Carrier is a
-  far-seeing, long-reaching, but matchup-vulnerable capital ship.
+  or *hide* (the spotting matrix $R$) are separate — e.g. the Submarine is a
+  stealthy brawler with poor reach that only a Destroyer spots before it is
+  seen, while the Carrier is a far-seeing, long-reaching, but matchup-vulnerable
+  capital ship.

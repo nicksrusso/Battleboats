@@ -25,7 +25,7 @@ from typing import TYPE_CHECKING, Any, Dict, List, Sequence, Tuple
 import numpy as np
 
 from battleboats.core.gameEngine import MERCHANT_CAPACITY
-from battleboats.core.shipyard.ship_data import BASE_STATS
+from battleboats.core.shipyard.ship_data import BASE_STATS, spot_distance
 from battleboats.core.shipyard.ship_type import ShipType
 
 if TYPE_CHECKING:
@@ -46,7 +46,7 @@ HOME_REL_FREQS: int = 4
 TOKEN_POSITION_DIM: int = POSITION_FREQS * 2 * 2
 TOKEN_HOME_REL_DIM: int = HOME_REL_FREQS * 2 * 2
 TOKEN_OWNER_DIM: int = 2  # is_friendly, is_enemy (relative to observer)
-TOKEN_STATS_DIM: int = 6  # one for each ship stat
+TOKEN_STATS_DIM: int = 6  # speed, strength, range, spotted-at, spots-at, cost
 TOKEN_SHIP_STATE_DIM: int = 3  # cargo carried, has_attacked, tiles moved this turn
 TOKEN_PORT_STATE_DIM: int = 3  # mats in stockpile, is home, home-port cash
 TOKEN_SIGHTING_STATE_DIM: int = 2  # fresh, staleness
@@ -100,9 +100,23 @@ _ALL_STATS = list(BASE_STATS.values())
 SPEED_SCALE: float = max(s.speed for s in _ALL_STATS)
 STRENGTH_SCALE: float = max(s.strength for s in _ALL_STATS)
 ATTACK_RANGE_SCALE: float = max(s.attack_range for s in _ALL_STATS)
-VISIBILITY_SCALE: float = max(s.visibility for s in _ALL_STATS)
-SCOUTING_SCALE: float = max(s.scouting for s in _ALL_STATS)
 COST_SCALE: float = max(s.cost for s in _ALL_STATS)
+
+# Spotting features (stats slots 3 and 4). These slots used to hold the
+# visibility and scouting coefficients; detection is now an exact per-pair
+# matrix (ship_data.spot_distance), so each hull gets two per-type summaries,
+# averaged over all ship hulls and divided by the largest ship-vs-ship entry:
+#   slot 3: mean distance at which this hull IS SPOTTED (higher = easier to see)
+#   slot 4: mean distance at which this hull SPOTS others (higher = sees farther)
+# Same width as before, so old checkpoints load, but what they learned for
+# these two slots no longer means the same thing.
+SPOT_SCALE: float = max(spot_distance(a, b) for a in ShipType for b in ShipType)
+SPOTTED_AT_FEATURE: Dict[ShipType, float] = {
+    t: sum(spot_distance(o, t) for o in ShipType) / len(ShipType) / SPOT_SCALE for t in ShipType
+}
+SPOTS_AT_FEATURE: Dict[ShipType, float] = {
+    t: sum(spot_distance(t, o) for o in ShipType) / len(ShipType) / SPOT_SCALE for t in ShipType
+}
 
 # Precompute mapping for ship type to token
 SHIP_TYPE_INDEX: Dict[ShipType, int] = {t: i for i, t in enumerate(ShipType)}
@@ -371,8 +385,8 @@ def _write_friendly_ship_token(row: np.ndarray, ship, engine: "gameEngine", home
     row[STATS_OFFSET + 0] = s.speed / SPEED_SCALE
     row[STATS_OFFSET + 1] = s.strength / STRENGTH_SCALE
     row[STATS_OFFSET + 2] = s.attack_range / ATTACK_RANGE_SCALE
-    row[STATS_OFFSET + 3] = s.visibility / VISIBILITY_SCALE
-    row[STATS_OFFSET + 4] = s.scouting / SCOUTING_SCALE
+    row[STATS_OFFSET + 3] = SPOTTED_AT_FEATURE[ship.type]
+    row[STATS_OFFSET + 4] = SPOTS_AT_FEATURE[ship.type]
     row[STATS_OFFSET + 5] = s.cost / COST_SCALE
 
     # Ship state — only the dynamic per-turn bits
@@ -430,8 +444,8 @@ def _write_enemy_ship_sighting_token(row: np.ndarray, sighting, engine: "gameEng
     row[STATS_OFFSET + 0] = s.speed / SPEED_SCALE
     row[STATS_OFFSET + 1] = s.strength / STRENGTH_SCALE
     row[STATS_OFFSET + 2] = s.attack_range / ATTACK_RANGE_SCALE
-    row[STATS_OFFSET + 3] = s.visibility / VISIBILITY_SCALE
-    row[STATS_OFFSET + 4] = s.scouting / SCOUTING_SCALE
+    row[STATS_OFFSET + 3] = SPOTTED_AT_FEATURE[sighting.type]
+    row[STATS_OFFSET + 4] = SPOTS_AT_FEATURE[sighting.type]
     row[STATS_OFFSET + 5] = s.cost / COST_SCALE
 
     # Sighting state

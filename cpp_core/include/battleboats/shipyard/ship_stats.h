@@ -8,7 +8,5 @@ namespace battleboats {
         int cost;
         double strength;
         int attack_range;
-        double visibility;
-        double scouting;
     };
 }

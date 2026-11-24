@@ -24,7 +24,7 @@ int main() {
     assert(stats.count(ShipType::Landing) == 1);   // "Landing " in the CSV
 
     // --- attack modifiers: present pair, and the default-to-1.0 path ---
-    assert(attack_modifier(mods, ShipType::Submarine, ShipType::Carrier) == 2.0);
+    assert(attack_modifier(mods, ShipType::Submarine, ShipType::Carrier) == 3.0);
     assert(attack_modifier(mods, ShipType::Carrier, ShipType::Battleship) == 1.5);
     assert(attack_modifier(mods, ShipType::Merchant, ShipType::Carrier) == 1.0);  // absent -> default
 

@@ -85,8 +85,8 @@ def test_ship_adjacent_to_enemy_non_home_port_marks_is_home_false(engine):
 
 
 def test_ship_too_far_from_enemy_port_no_sighting(engine):
-    """A submarine (scouting=1) at P0's home gets no enemy port sightings —
-    range vs a port is 1*4=4, and all P1 ports are far from (0,0)."""
+    """A submarine at P0's home gets no enemy port sightings —
+    its spotting range vs a port is 4, and all P1 ports are far from (0,0)."""
     own_home = engine.players[0].home_port
     spawn = _adjacent_water(engine, own_home)
     assert spawn is not None
@@ -116,7 +116,7 @@ def test_port_sighting_becomes_stale_when_only_scout_destroyed(engine):
 
 def test_friendly_port_scouts_enemy_ship(engine):
     """A friendly port can spot enemy ships in range even with no friendly ships."""
-    # Place a P1 destroyer (visibility=3) adjacent to P0's home port.
+    # Place a P1 destroyer adjacent to P0's home port.
     own_home = engine.players[0].home_port
     spawn = _adjacent_water(engine, own_home)
     assert spawn is not None
@@ -124,13 +124,13 @@ def test_friendly_port_scouts_enemy_ship(engine):
     engine._refresh_sightings()
 
     # P0 has no ships of their own — only the home port. The port-scout
-    # (PORT_SCOUTING=4 * destroyer.visibility=3 = 12) covers the adjacent tile.
+    # (spot_distance(PORT, DESTROYER) = 12) covers the adjacent tile.
     visible = engine.visible_enemy_ships(0)
     assert any(s.id == enemy_destroyer.id for s in visible)
 
 
 def test_port_to_port_detection(engine):
-    """Friendly port spots enemy port within PORT_SCOUTING * PORT_VISIBILITY (16)."""
+    """Friendly port spots enemy port within spot_distance(PORT, PORT) (16)."""
     # Find any P1 port and a land tile within 16 manhattan distance of it
     # that isn't already a port. Plant a P0 port there directly (bypass build
     # mechanics) and verify P0 then has a sighting of the P1 port.

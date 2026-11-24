@@ -22,7 +22,7 @@ def _find_water_line(engine, length: int, port_buffer: int = 17) -> List[Tuple[i
     """Find a water line whose every tile is at least `port_buffer` manhattan
     distance from any port. The buffer keeps these ship-on-ship visibility
     tests free of port-as-scout interference (max port-scout range is
-    PORT_SCOUTING * max_ship_visibility = 4 * 4 = 16; buffer 17 is safe).
+    the matrix's Port row, max 16; buffer 17 is safe).
     """
     m = engine.map
     ports = list(m.port_positions)
@@ -63,8 +63,8 @@ def test_no_sightings_on_fresh_reset(engine):
 
 def test_adjacent_enemy_becomes_visible(engine):
     line = _find_water_line(engine, 2)
-    engine._spawn_ship(0, ShipType.DESTROYER, line[0])  # scouting 3
-    target = engine._spawn_ship(1, ShipType.BUILDER, line[1])  # visibility 3
+    engine._spawn_ship(0, ShipType.DESTROYER, line[0])  # spots a builder at 8
+    target = engine._spawn_ship(1, ShipType.BUILDER, line[1])  
     engine._refresh_sightings()
     visible = engine.visible_enemy_ships(0)
     assert [s.id for s in visible] == [target.id]
@@ -74,7 +74,7 @@ def test_adjacent_enemy_becomes_visible(engine):
 
 
 def test_out_of_range_enemy_not_seen(engine):
-    """Battleship scouting=2 vs Submarine visibility=1 → detection 2. Place 3 apart."""
+    """Battleship spots a Submarine at 1 (matrix). Place 3 apart."""
     line = _find_water_line(engine, 4)
     engine._spawn_ship(0, ShipType.BATTLESHIP, line[0])
     engine._spawn_ship(1, ShipType.SUBMARINE, line[3])
@@ -84,8 +84,8 @@ def test_out_of_range_enemy_not_seen(engine):
 
 
 def test_asymmetric_detection(engine):
-    """Sub (s=1, v=1) vs Battleship (s=2, v=4) at distance 3:
-    Sub-side sees Battleship (1*4=4 >= 3); Battleship does NOT see Sub (2*1=2 < 3).
+    """Sub vs Battleship at distance 3: the Sub spots a Battleship at 4
+    (sees it); the Battleship spots a Sub at 1 (does not).
     """
     line = _find_water_line(engine, 4)
     sub = engine._spawn_ship(0, ShipType.SUBMARINE, line[0])
@@ -101,8 +101,8 @@ def test_asymmetric_detection(engine):
 def test_sighting_goes_stale_when_scout_leaves(engine):
     """Sighting flips fresh=False but preserves last-known position and turn_seen."""
     line = _find_water_line(engine, 4)
-    scout = engine._spawn_ship(0, ShipType.SUBMARINE, line[0])  # scout=1
-    target = engine._spawn_ship(1, ShipType.SUBMARINE, line[1])  # vis=1, detection=1
+    scout = engine._spawn_ship(0, ShipType.SUBMARINE, line[0])  
+    target = engine._spawn_ship(1, ShipType.SUBMARINE, line[1])  # sub spots sub at 1
     engine._refresh_sightings()
     initial = next(s for s in engine.known_enemy_ships(0) if s.ship_id == target.id)
     assert initial.fresh and initial.position == line[1]
@@ -122,7 +122,7 @@ def test_sighting_goes_stale_when_scout_leaves(engine):
 def test_fresh_sighting_updates_position_on_enemy_move(engine):
     """While visible, sighting always reflects the enemy's current tile."""
     line = _find_water_line(engine, 4)
-    engine._spawn_ship(0, ShipType.DESTROYER, line[0])  # detection vs another destroyer = 3*4=12
+    engine._spawn_ship(0, ShipType.DESTROYER, line[0])  # destroyer spots destroyer at 3
     target = engine._spawn_ship(1, ShipType.DESTROYER, line[1])
     engine._refresh_sightings()
     assert next(iter(engine.known_enemy_ships(0))).position == line[1]
