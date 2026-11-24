@@ -79,11 +79,11 @@ def test_prompt_sections_and_interactions(tmp_path: Path) -> None:
     view = build_view(engine, 0, legal, horizon=4, max_edges=20)
     prompt = render_prompt(view)
 
-    for section in ("FORMAT 3", "SHIPS", "PORTS", "LAND", "MOVES"):
+    for section in ("FORMAT 4", "SHIPS", "PORTS", "LAND", "MOVES"):
         assert section in prompt
     for dropped in ("GRID", "FACTS", "EDGES", "ENTITIES"):
         assert dropped not in prompt
-    assert view["format_version"] == FORMAT_VERSION == 3
+    assert view["format_version"] == FORMAT_VERSION == 4
     assert prompt.startswith(STATIC_PREFIX)
     assert prompt.count("8x6") == 1
     assert render_prompt(view) == prompt
@@ -178,7 +178,7 @@ def test_stale_sighting_hides_true_position(tmp_path: Path) -> None:
         },
     )
     engine, ships = _engine(
-        path, [(0, ShipType.MERCHANT, (0, 1)), (1, ShipType.SUBMARINE, (3, 1))]
+        path, [(0, ShipType.MERCHANT, (0, 1)), (1, ShipType.DESTROYER, (3, 1))]
     )
     merchant, sub = ships
     engine._refresh_sightings()
@@ -382,7 +382,7 @@ def test_fake_llm_plays_a_short_game(tmp_path: Path) -> None:
         if row["type"] != "decision":
             continue
         prompt = row["prompt"]
-        for section in ("FORMAT 3", "SHIPS", "PORTS", "LAND", "MOVES"):
+        for section in ("FORMAT 4", "SHIPS", "PORTS", "LAND", "MOVES"):
             assert section in prompt
         assert prompt.startswith(STATIC_PREFIX)
         assert row["fallback"] is False

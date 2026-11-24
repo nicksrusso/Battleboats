@@ -59,7 +59,7 @@ from battleboats.core.actions import (Action, AttackAction, BuildShipAction,
 from battleboats.core.gameEngine import (CASH_PER_MATERIAL, MERCHANT_CAPACITY,
                                          PORT_PRODUCTION)
 from battleboats.core.map.Map import WATER
-from battleboats.core.shipyard.ship_data import BASE_STATS
+from battleboats.core.shipyard.ship_data import BASE_STATS, spot_distance
 from battleboats.core.shipyard.ship_stats import ShipStats
 from battleboats.core.shipyard.ship_type import ShipType
 from battleboats.core.sighting import Sighting
@@ -90,13 +90,12 @@ HOME_TURN_INCOME = PORT_PRODUCTION * CASH_PER_MATERIAL
 def ship_detection_range(scout: ShipType, target: ShipType) -> float:
     """Tiles at which ``scout``'s hull spots ``target``.
 
-    Same product the engine uses for two ships: scouting × visibility.
-    Ports are not part of this number. A port's own radius covers a 3×3,
-    which would make a search drill see the enemy at spawn.
+    Same spotting-matrix entry the engine uses for two ships
+    (``ship_data.spot_distance``). Ports are not part of this number. A
+    port's own radius covers a 3×3, which would make a search drill see the
+    enemy at spawn.
     """
-    me = BASE_STATS[scout]
-    them = BASE_STATS[target]
-    return float(me.scouting) * float(them.visibility)
+    return float(spot_distance(scout, target))
 
 
 def turn_decay(turn: int, horizon_turns: int, floor: float = 0.0) -> float:
@@ -171,7 +170,7 @@ def discounted_combat_reward(
 def combat_reach(ship_type: ShipType) -> int:
     """Tiles at which this ship can both see and hit another of the same type."""
     me = BASE_STATS[ship_type]
-    detect = me.scouting * me.visibility
+    detect = spot_distance(ship_type, ship_type)
     return max(1, int(min(me.attack_range, detect)))
 
 
@@ -227,8 +226,6 @@ def weaken_strength(stats: ShipStats, scale: float) -> ShipStats:
         cost=stats.cost,
         strength=max(1.0, float(stats.strength) * float(scale)),
         attack_range=stats.attack_range,
-        visibility=stats.visibility,
-        scouting=stats.scouting,
     )
 
 
@@ -1180,11 +1177,11 @@ class ScoutingSandbox(_Sandbox):
     success bar would be the wrong gate.
 
     Home ports stay on the map (the engine boots from them) but are taken
-    out of ``owned_port_positions`` before the sighting refresh. A port
-    scouts at radius 4 × visibility, which covers every tile of a 3×3, so
+    out of ``owned_port_positions`` before the sighting refresh. A port's
+    spotting radius (the matrix's Port row) covers every tile of a 3×3, so
     the enemy would be visible at spawn and the search would be free.
-    Detection is otherwise the real sighting: fresh, ship scouting times
-    target visibility.
+    Detection is otherwise the real sighting: fresh, at the spotting-matrix
+    distance for this hull pair.
 
     Reward is ``scouting_find_reward`` on the first fresh sighting and 0
     if the horizon arrives first. The episode ends on that sighting.
@@ -1255,7 +1252,7 @@ class ScoutingSandbox(_Sandbox):
         self._hunter_id = hunter.id
         self._target_id = target.id
         # Ports still exist as land. Dropping them from the owned set keeps
-        # their radius-4 scan from revealing the whole small board.
+        # their spotting radius from revealing the whole small board.
         self.engine.players[0].owned_port_positions.clear()
         self.engine.players[1].owned_port_positions.clear()
         self.engine.players[0].cash = 0

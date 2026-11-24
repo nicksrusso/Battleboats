@@ -49,7 +49,7 @@ The encoder receives a **set of entity tokens**. Every ship, port, and sighted e
 | `type one-hot` | ship type / port / enemy sighting |
 | `position` | normalized (x, y) on the map |
 | `owner indicator` | friendly / enemy / neutral |
-| `stats` | speed, vision, scouting, range, strength (0 for non-ships) |
+| `stats` | speed, strength, range, spotted-at (mean distance this hull is spotted at), spots-at (mean distance it spots at), cost (0 for non-ships). Before v0.5.0 the spotting slots held the visibility and scouting coefficients. |
 | `ship state` | cargo, has_attacked, tiles_moved (0 for non-ships) |
 | `port state` | stockpile, is_home (0 for non-ports) |
 | `sighting state` | freshness, staleness (0 for friendlies) |

@@ -51,8 +51,6 @@ namespace battleboats
             s.strength = std::stod(f[col.at("Strength")]);
             s.attack_range = std::stoi(f[col.at("attack range")]);
             s.speed = std::stoi(f[col.at("speed")]);
-            s.visibility = std::stod(f[col.at("visibility coef")]);
-            s.scouting = std::stod(f[col.at("scouting coef")]);
 
             table[type] = s;
         }

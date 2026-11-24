@@ -8,7 +8,7 @@ from battleboats.core.map.Map import Map
 from battleboats.core.sighting import Sighting, PortSighting
 from battleboats.core.shipyard.ship import Ship
 from battleboats.core.shipyard.ship_type import ShipType
-from battleboats.core.shipyard.ship_data import BASE_STATS, attack_modifier
+from battleboats.core.shipyard.ship_data import BASE_STATS, PORT, attack_modifier, spot_distance
 from battleboats.core.actions import (
     Action,
     MoveAction,
@@ -25,8 +25,6 @@ STARTING_CASH: int = 250
 PORT_PRODUCTION: int = 25  # materials per owned port per player turn
 CASH_PER_MATERIAL: int = 2  # conversion at home port (production + deliveries)
 MERCHANT_CAPACITY: int = 100
-PORT_VISIBILITY: float = 4.0  # how easy a port is to spot
-PORT_SCOUTING: float = 4.0  # a port's own detection coefficient
 
 _CARDINAL_OFFSETS: Tuple[Tuple[int, int], ...] = ((1, 0), (-1, 0), (0, 1), (0, -1))
 
@@ -361,12 +359,12 @@ class gameEngine:
     def _detection_distance(self, scout: Union[Ship, Port], target: Union[Ship, Port]) -> float:
         """Range at which `scout` can spot `target`. Asymmetric by design.
 
-        Ports use module-level `PORT_SCOUTING` and `PORT_VISIBILITY` constants
-        in place of per-instance stats — the formula is identical otherwise.
+        Read from the spotting matrix (config/visibilityMatrix.csv) by hull
+        type; ports use the matrix's ``Port`` row/column.
         """
-        scouting = scout.stats.scouting if isinstance(scout, Ship) else PORT_SCOUTING
-        visibility = target.stats.visibility if isinstance(target, Ship) else PORT_VISIBILITY
-        return scouting * visibility
+        spotter = scout.type if isinstance(scout, Ship) else PORT
+        seen = target.type if isinstance(target, Ship) else PORT
+        return spot_distance(spotter, seen)
 
     def _resolve_attack(self, attacker: Ship, defender: Ship) -> bool:
         """Return True if defender is destroyed. Probability is a function of

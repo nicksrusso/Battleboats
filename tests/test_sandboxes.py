@@ -1183,8 +1183,6 @@ def test_turn_decay_prefers_a_fast_finish(tmp_path: Path) -> None:
             cost=stats.cost,
             strength=0.0,
             attack_range=0,
-            visibility=stats.visibility,
-            scouting=stats.scouting,
         )
 
     def fight(delay: int) -> float:
