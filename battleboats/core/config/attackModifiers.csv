@@ -2,5 +2,5 @@
 Carrier,1,1.5,1,0.75,1
 Battleship,1,1,1.5,1,0.75
 Cruiser,1.25,1,1,1.5,1
-Destroyer,1.25,1,1,1,4
+Destroyer,1.25,1,1,1,2
 Submarine,3,4,2,0.5,1

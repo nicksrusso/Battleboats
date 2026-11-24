@@ -115,12 +115,12 @@ def test_resolve_attack_probability_at_parity(engine):
     sigmoid formula is wired right. Repeated trials should converge near 0.5.
     """
     # Pick two ship types with attack_modifier == 1.0 against each other.
-    # Submarine vs Submarine: both strength 100, modifier defaults to 1.0
+    # Submarine vs Submarine: equal strength, modifier defaults to 1.0
     # unless explicitly set in the CSV. We don't rely on that — instead test
     # _resolve_attack's math directly via a controlled defender strength.
     line = _find_water_line(engine, 2)
-    attacker = engine._spawn_ship(0, ShipType.SUBMARINE, line[0])  # strength 100
-    defender = engine._spawn_ship(1, ShipType.SUBMARINE, line[1])  # strength 100
+    attacker = engine._spawn_ship(0, ShipType.SUBMARINE, line[0])
+    defender = engine._spawn_ship(1, ShipType.SUBMARINE, line[1])
     # Sample many resolves; reset has_attacked between calls.
     kills = 0
     trials = 2000
@@ -144,3 +144,15 @@ def test_deterministic_under_seed():
         outcomes = [e._resolve_attack(a, d) for _ in range(50)]
         line_results.append(outcomes)
     assert line_results[0] == line_results[1]
+
+
+def test_destroyer_vs_submarine_kill_probability_is_point_eight():
+    """Nick's v0.5.0 follow-up: DD strength 50, DD->SS modifier 2, SS strength 50
+    gives x = 2 and P_kill = 4/5 at k = 2 (same as the 25 x 4 / 50 it replaced)."""
+    from battleboats.core.shipyard.ship_data import BASE_STATS, attack_modifier
+
+    dd, ss = BASE_STATS[ShipType.DESTROYER], BASE_STATS[ShipType.SUBMARINE]
+    x = dd.strength * attack_modifier(ShipType.DESTROYER, ShipType.SUBMARINE) / ss.strength
+    assert x == 2.0
+    assert x**2 / (1 + x**2) == 0.8
+    assert ss.cost == 125 and dd.cost == 100

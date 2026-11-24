@@ -65,13 +65,13 @@ column); $1$ is neutral, $>1$ favors the attacker, $<1$ penalizes it. Excerpt fr
 | **Carrier** | 1.0 | 1.5 | 1.0 | 0.75 | 1.0 |
 | **Battleship** | 1.0 | 1.0 | 1.5 | 1.0 | 0.75 |
 | **Cruiser** | 1.25 | 1.0 | 1.0 | 1.5 | 1.0 |
-| **Destroyer** | 1.25 | 1.0 | 1.0 | 1.0 | 4.0 |
+| **Destroyer** | 1.25 | 1.0 | 1.0 | 1.0 | 2.0 |
 | **Submarine** | 3.0 | 4.0 | 2.0 | 0.5 | 1.0 |
 
 Non-combat types ($S=0$) need no modifier — they always die when attacked. Note
 the Submarine line: strong multipliers against capital ships (Carrier, Battleship)
-but $\times 0.5$ against a Destroyer, and the Destroyer's $\times 4$ against a
-Submarine — the Destroyer is the dedicated sub-hunter.
+but $\times 0.5$ against a Destroyer, and the Destroyer's $\times 2$ against a
+Submarine ($x = 50\cdot2/50 = 2$, $P_{\text{kill}} = 0.8$ at $k=2$) — the Destroyer is the dedicated sub-hunter.
 
 ---
 
@@ -113,7 +113,7 @@ The stats these rules read, from [`shipTypes.csv`](../battleboats/core/config/sh
 | Carrier | 100 | 12 | 6 |
 | Battleship | 125 | 4 | 3 |
 | Cruiser | 75 | 3 | 5 |
-| Destroyer | 25 | 3 | 5 |
+| Destroyer | 50 | 3 | 5 |
 | Submarine | 50 | 3 | 3 |
 | Landing | 0 | 0 | 3 |
 | Merchant | 0 | 0 | 3 |

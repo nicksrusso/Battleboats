@@ -161,9 +161,9 @@ def test_prompt_sections_and_interactions(tmp_path: Path) -> None:
     poor = render_prompt(build_view(engine, 0, engine.enumerate_legal(0)))
     assert poor.startswith(STATIC_PREFIX)
     poor_moves = poor.split("\nMOVES\n", 1)[1]
-    for banned in ("Carrier", "Battleship", "Cruiser", "Landing", "Builder"):
+    for banned in ("Carrier", "Battleship", "Cruiser", "Landing", "Builder", "Submarine"):
         assert banned not in poor_moves
-    for kept in ("Destroyer 100", "Submarine 100", "Merchant 100"):
+    for kept in ("Destroyer 100", "Merchant 100"):
         assert kept in poor_moves
 
 
