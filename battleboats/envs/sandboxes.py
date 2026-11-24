@@ -1294,8 +1294,8 @@ class ScoutingSandbox(_Sandbox):
 class TypedBuildSandbox(_Sandbox):
     """Wait for income, then buy the hull the visible enemy ship names.
 
-    Merchant, destroyer, and submarine all cost 100. Carrier, landing, and
-    builder all cost 250. A cash ceiling cannot tell those apart, and the
+    Merchant and destroyer both cost 100. Carrier, landing, and builder all
+    cost 250. A cash ceiling cannot tell those apart, and the
     warm-up has no skill embedding. The cue is an enemy ship token of the
     target type, the same type one-hot the full game already shows, kept
     fresh so a large board's fog does not hide it. Home-port income is the

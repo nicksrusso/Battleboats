@@ -1,6 +1,7 @@
 """Per-hull purchase counts for full-game self-play.
 
-Cheap hulls are those whose yard cost is 100 (merchant, destroyer, submarine).
+Cheap hulls are those that cost less than a cruiser (150): merchant and
+destroyer at 100, submarine at 125.
 Everything else is expensive. The counters are how we tell whether the
 learner only buys cheap ships; a later change may randomly mask cheaper
 hulls on some turns if that shows up.
@@ -13,8 +14,9 @@ from typing import Any, Dict, Iterable, Mapping
 from battleboats.core.shipyard.ship_data import BASE_STATS
 from battleboats.core.shipyard.ship_type import ShipType
 
-# Cost cutoff matches the typed-build split: 100 is cheap, 150+ is expensive.
-CHEAP_COST = 100
+# Cost cutoff: 125 and under is cheap (merchant, destroyer, submarine), 150+ is
+# expensive. Matches buydiv.CHEAP_HULLS.
+CHEAP_COST = 125
 
 
 def hull_name(ship_type: ShipType) -> str:

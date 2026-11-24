@@ -1,7 +1,7 @@
 """Buy-diversity sandbox helpers: score, cheap-type masking, PPO fine-tune.
 
 The v0.4.0 behavior clone is close to uniform over *currently affordable*
-hulls, so cheap types (destroyer / submarine / merchant, cost 100) are
+hulls, so cheap types (destroyer / merchant 100, submarine 125) are
 legal far more often and dominate the mix. This module fine-tunes a warm
 start in a no-opponent sandbox whose only reward is a fleet-diversity
 score, with intermittent masking of those cheap types so the policy
@@ -57,8 +57,8 @@ from battleboats.training.manifest import ManifestSession
 # every type the shipyard can produce.
 BUYDIV_HULLS: Tuple[str, ...] = tuple(hull_name(t) for t in ShipType)
 
-# Cost-100 types. Affordable from opening cash and after almost every income
-# tick; never includes landing (cost 250).
+# Cheapest types (merchant and destroyer 100, submarine 125). Affordable from
+# opening cash and after almost every income tick; never includes landing (250).
 CHEAP_HULLS: Tuple[str, ...] = ("destroyer", "submarine", "merchant")
 CHEAP_SHIP_TYPES = frozenset(t for t in ShipType if hull_name(t) in CHEAP_HULLS)
 HULL_COST: Dict[str, int] = {hull_name(t): int(BASE_STATS[t].cost) for t in ShipType}

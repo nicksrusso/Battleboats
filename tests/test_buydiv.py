@@ -26,6 +26,7 @@ def test_all_eight_types_are_scored() -> None:
     assert "landing" not in CHEAP_HULLS
     assert set(CHEAP_HULLS) == {"destroyer", "submarine", "merchant"}
     assert HULL_COST["destroyer"] == 100
+    assert HULL_COST["submarine"] == 125
     assert HULL_COST["landing"] == 250
     assert "buy_diversity" in SKILL_NAMES
     assert skill_index("landing_build") == SKILL_NAMES.index("landing_build")

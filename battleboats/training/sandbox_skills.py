@@ -11,7 +11,7 @@ from __future__ import annotations
 from battleboats.core.shipyard.ship_type import ShipType
 
 # One typed-build drill per buildable hull. Order is the curriculum order.
-# Costs collide (100 and 250), so this list cannot be inferred from price.
+# Costs collide (merchant/destroyer 100; carrier/landing/builder 250), so this list cannot be inferred from price.
 _BUILD_HULLS = (
     "merchant",
     "landing",
