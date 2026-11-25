@@ -71,7 +71,7 @@ def _index(error: str = "") -> bytes:
 <form method="post" action="/start">
 <label>Opponent</label>
 <label><input type="radio" name="opponent" value="tactical" checked> Tactical scripted (fog of war)</label>
-<label><input type="radio" name="opponent" value="inkling"> Inkling (OpenRouter, max thinking)</label>
+<label><input type="radio" name="opponent" value="inkling"> Inkling (OpenRouter, high thinking)</label>
 <label><input type="radio" name="opponent" value="llm"> LLM (OpenRouter, choose a model)</label>
 <label><input type="radio" name="opponent" value="scripted"> Scripted (full information)</label>
 <label><input type="radio" name="opponent" value="random"> Random</label>
@@ -80,8 +80,8 @@ def _index(error: str = "") -> bytes:
 <input name="llm_model" value="{html.escape(INKLING_MODEL_ID)}" size="58">
 <label>Reasoning
   <select name="llm_reasoning">
-    <option value="max" selected>max</option>
-    <option value="high">high</option>
+    <option value="max">max</option>
+    <option value="high" selected>high</option>
     <option value="medium">medium</option>
     <option value="low">low</option>
     <option value="minimal">minimal</option>

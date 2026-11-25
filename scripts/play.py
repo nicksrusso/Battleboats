@@ -2,7 +2,8 @@
 
     poetry run python scripts/play.py --map 16x8 --opponent tactical --seed 0
     poetry run python scripts/play.py --map 16x8 --opponent inkling --seed 0
-    poetry run python scripts/play.py --map 16x8 --opponent llm --model thinkingmachines/inkling --reasoning max
+    poetry run python scripts/play.py --map 16x8 --opponent llm --model thinkingmachines/inkling --reasoning high
+    poetry run python scripts/play.py --map 16x8 --opponent inkling --reasoning max
 
 Opens a local HTTP server (127.0.0.1) with an interactive HTML5 Canvas grid,
 strict fog-of-war per config/visibilityMatrix.csv, ship/port actions, and
@@ -49,7 +50,7 @@ def build_parser() -> argparse.ArgumentParser:
         choices=("tactical", "scripted", "random", "checkpoint", "llm", "inkling"),
         default=None,
         help="Opponent agent (default: tactical; checkpoint if --checkpoint is set; "
-        "inkling is an alias for llm + the Inkling flagship at max reasoning).",
+        "inkling is an alias for llm + the Inkling flagship at high reasoning).",
     )
     parser.add_argument(
         "--checkpoint",
@@ -67,7 +68,7 @@ def build_parser() -> argparse.ArgumentParser:
         "--reasoning",
         default=DEFAULT_REASONING,
         choices=("max", "high", "medium", "low", "minimal", "none"),
-        help="OpenRouter reasoning.effort (default: max).",
+        help="OpenRouter reasoning.effort (default: high).",
     )
     parser.add_argument(
         "--timeout",
