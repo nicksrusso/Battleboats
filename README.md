@@ -80,6 +80,22 @@ poetry run pip install torch==2.10.0 \
 
 If `torch.cuda.is_available()` stays false on gfx1101, export `HSA_OVERRIDE_GFX_VERSION=11.0.0` before training. A CPU-only wheel is fine for tests and smoke runs; pass `--device cpu` or set `device: cpu` in the smoke configs.
 
+## Rust core (optional)
+
+The engine is being ported to Rust (`crates/battleboats-core`) and exposed as the `battleboats_core` extension via PyO3 and maturin. Python (`battleboats/core/gameEngine.py`) stays the reference. `poetry install` without the extra does not need a Rust toolchain, and `pytest` skips `tests/test_rust_parity.py` when the extension is absent. The extension is CPU-only game logic. It does not link PyTorch, so the ROCm or CPU torch wheel above is unchanged.
+
+Toolchain: stable Rust 1.85 or newer (`rustup`, see `rust-toolchain.toml`) and Python development headers (`python3-dev` on Debian/Ubuntu) so PyO3 can link. `cargo test -p battleboats-core` does not need those headers.
+
+```bash
+poetry install -E rust
+poetry run maturin develop --release -m crates/battleboats-py/Cargo.toml
+poetry run python -c "import battleboats_core"
+poetry run pytest tests/test_rust_parity.py tests/golden/ -q
+cargo test -p battleboats-core
+```
+
+This phase covers canonical state JSON / SHA-256 and map loading (including coastline). It does not step the game. Combat RNG is still NumPy PCG64 on the Python side; strict SeedSequence parity is tracked separately.
+
 `runs/` and `**.json` are gitignored. Maps used by training and by the engine tests are generated at runtime. `pytest` writes `battleboats/core/config/map.json` only when that file is missing, so a local map is left in place.
 
 ```bash

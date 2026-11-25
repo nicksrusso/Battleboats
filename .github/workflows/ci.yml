@@ -1,0 +1,46 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  python:
+    name: Python tests without the Rust extension
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install Poetry
+        run: pip install poetry
+      - name: Install dependencies
+        run: poetry install --no-interaction --no-ansi
+      - name: Pytest
+        run: poetry run pytest
+
+  rust:
+    name: Rust extension, cargo test, and golden parity
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install Poetry
+        run: pip install poetry
+      - name: Install dependencies
+        run: poetry install --no-interaction --no-ansi --extras rust
+      - name: Cargo test
+        run: cargo test -p battleboats-core
+      - name: Build the extension
+        run: poetry run maturin develop --release -m crates/battleboats-py/Cargo.toml
+      - name: Import smoke test
+        run: poetry run python -c "import battleboats_core; assert battleboats_core.schema_version() == 1"
+      - name: Golden suite and Rust parity
+        run: poetry run pytest tests/golden tests/test_rust_parity.py -q
+      - name: Full suite with the extension installed
+        run: poetry run pytest
