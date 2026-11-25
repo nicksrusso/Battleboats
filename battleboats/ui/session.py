@@ -90,7 +90,7 @@ OPPONENT_LABELS = {
     "random": "Random",
     "checkpoint": "Checkpoint",
     "llm": "LLM (OpenRouter)",
-    "inkling": "Inkling (max thinking)",
+    "inkling": "Inkling (high thinking)",
 }
 
 LLM_OPPONENTS = ("llm", "inkling")

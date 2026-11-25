@@ -26,7 +26,7 @@ from battleboats.llm.prompt import build_view, render_prompt
 
 INKLING_MODEL_ID = "thinkingmachines/inkling"
 OPENROUTER_BASE_URL = "https://openrouter.ai/api/v1"
-DEFAULT_REASONING = "max"
+DEFAULT_REASONING = "high"
 DEFAULT_MAX_TOKENS = 32768
 DEFAULT_TIMEOUT = 600.0
 DEFAULT_TEMPERATURE = 0.3

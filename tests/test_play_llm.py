@@ -66,24 +66,34 @@ def test_resolve_model_and_reasoning() -> None:
     assert resolve_model_id("inkling") == INKLING_MODEL_ID
     assert resolve_model_id("thinkingmachines/inkling-2-mini") == "thinkingmachines/inkling-2-mini"
     assert resolve_reasoning("max") == "max"
-    assert resolve_reasoning(None) == "max"
+    assert resolve_reasoning("high") == "high"
+    assert resolve_reasoning(None) == "high"
     with pytest.raises(ValueError):
         resolve_reasoning("ultra")
 
 
-def test_openrouter_payload_uses_reasoning_max() -> None:
+def test_openrouter_payload_defaults_to_reasoning_high() -> None:
     payload = openrouter_payload(
+        "hi",
+        model=INKLING_MODEL_ID,
+        temperature=0.3,
+        max_tokens=32768,
+        reasoning_effort="high",
+    )
+    assert payload["model"] == INKLING_MODEL_ID
+    assert payload["reasoning"] == {"effort": "high"}
+    assert payload["max_tokens"] == 32768
+    assert payload["stream"] is False
+    assert "cache_prompt" not in payload
+    # --reasoning max remains available.
+    max_payload = openrouter_payload(
         "hi",
         model=INKLING_MODEL_ID,
         temperature=0.3,
         max_tokens=32768,
         reasoning_effort="max",
     )
-    assert payload["model"] == INKLING_MODEL_ID
-    assert payload["reasoning"] == {"effort": "max"}
-    assert payload["max_tokens"] == 32768
-    assert payload["stream"] is False
-    assert "cache_prompt" not in payload
+    assert max_payload["reasoning"] == {"effort": "max"}
 
 
 def test_load_key_from_env_and_dotenv(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -223,7 +233,6 @@ def test_session_async_thinking_with_mocked_client(tmp_path: Path) -> None:
         map_dir=tmp_path / "maps",
         llm_client=client,
         llm_model="inkling",
-        llm_reasoning="max",
     )
     # Player 1 is human, so the LLM starts player 0's opening turn in a worker.
     assert session.thinking is True
@@ -231,7 +240,7 @@ def test_session_async_thinking_with_mocked_client(tmp_path: Path) -> None:
     assert state["status"]["thinking"] is True
     assert "Inkling thinking" in state["status"]["thinking_message"]
     assert state["status"]["llm_model"] == INKLING_MODEL_ID
-    assert state["status"]["llm_reasoning"] == "max"
+    assert state["status"]["llm_reasoning"] == "high"
     session.apply_spec({"type": "end_turn"})
     assert session.error.startswith("Wait")
     hold.set()
@@ -288,7 +297,6 @@ def test_http_poll_returns_while_llm_thinks(ui_server, tmp_path: Path) -> None:
         max_turns=8,
         map_dir=maps / "maps",
         llm_client=client,
-        llm_reasoning="max",
     )
     server._SESSION = session
     started = time.monotonic()
@@ -451,14 +459,13 @@ def test_llm_decision_fields_are_logged(tmp_path: Path) -> None:
         max_turns=8,
         map_dir=tmp_path / "maps",
         llm_client=client,
-        llm_reasoning="max",
     )
     if session._worker is not None:
         session._worker.join(timeout=5)
     assert session.thinking is False
     rows = _read_jsonl(session.log_path)
     assert rows[0]["llm"]["model"] == INKLING_MODEL_ID
-    assert rows[0]["llm"]["reasoning"] == "max"
+    assert rows[0]["llm"]["reasoning"] == "high"
     llm_decisions = [r for r in rows if r["type"] == "decision" and r.get("llm")]
     assert llm_decisions
     rec = llm_decisions[0]
