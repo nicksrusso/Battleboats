@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Train the v0.5.0 value net on a value-harvest cache (CPU).
+"""Train the v0.5.0 value net on a value-harvest cache (CPU or GPU).
 
     poetry run python scripts/train_value.py --config configs/value_net_v0.5.0.yaml
     poetry run python scripts/train_value.py --resume runs/value_net_v0.5.0/<timestamp>
@@ -30,7 +30,7 @@ import yaml  # noqa: E402
 from torch.utils.data import DataLoader  # noqa: E402
 
 from battleboats.training.value_data import ValueCache, ValueDataset, build_value_cache, collate_value, value_metrics  # noqa: E402
-from battleboats.training.value_eval import Baselines, evaluate_split, format_report, predict  # noqa: E402
+from battleboats.training.value_eval import Baselines, evaluate_split, format_report, move_batch, predict, resolve_device  # noqa: E402
 from battleboats.training.value_net import ValueNet, count_params, save_value_checkpoint  # noqa: E402
 
 try:  # tensorboard is optional (not in the poetry env today)
@@ -97,6 +97,10 @@ def main(argv=None) -> int:
     dc, mc, tc, ec = cfg["data"], cfg["model"], cfg["train"], cfg.get("eval", {})
     torch.set_num_threads(int(tc.get("torch_threads", 4)))
     torch.manual_seed(int(tc.get("seed", 0)))
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed_all(int(tc.get("seed", 0)))
+    device = resolve_device(tc.get("device", "cpu"))
+    use_cuda = device.type == "cuda"
 
     cache_dir = Path(dc["cache_dir"])
     if not (cache_dir / "cache_meta.json").exists():
@@ -112,19 +116,26 @@ def main(argv=None) -> int:
 
     model = ValueNet(**mc)
     n_params = count_params(model)
-    opt = torch.optim.AdamW(model.parameters(), lr=float(tc["lr"]), weight_decay=float(tc["weight_decay"]))
     steps_per_epoch = math.ceil(len(train_ds) / int(tc["batch_size"]))
     if int(tc.get("max_steps_per_epoch", 0)) > 0:
         steps_per_epoch = min(steps_per_epoch, int(tc["max_steps_per_epoch"]))
     total_steps = steps_per_epoch * int(tc["epochs"])
     start_epoch, step, best = 0, 0, {"val_brier": float("inf"), "epoch": -1}
+    ck = None
     if a.resume and (run_dir / "last.pt").exists():
         ck = torch.load(run_dir / "last.pt", map_location="cpu", weights_only=False)
         model.load_state_dict(ck["model_state"])
-        opt.load_state_dict(ck["optimizer"])
         start_epoch, step, best = ck["epoch"] + 1, ck["step"], ck["best"]
         print(f"[resume] from epoch {ck['epoch']} step {step}; best {best}", flush=True)
-    print(f"[model] ValueNet {n_params:,} params {mc}; {steps_per_epoch} steps/epoch x {tc['epochs']} epochs; threads {torch.get_num_threads()}", flush=True)
+    model.to(device)
+    opt = torch.optim.AdamW(model.parameters(), lr=float(tc["lr"]), weight_decay=float(tc["weight_decay"]))
+    if ck is not None and "optimizer" in ck:
+        opt.load_state_dict(ck["optimizer"])
+        for state in opt.state.values():
+            for k, v in state.items():
+                if torch.is_tensor(v):
+                    state[k] = v.to(device)
+    print(f"[model] ValueNet {n_params:,} params {mc}; {steps_per_epoch} steps/epoch x {tc['epochs']} epochs; device {device}; threads {torch.get_num_threads()}", flush=True)
 
     baselines = None
     bl_path = run_dir / "baselines_val.json"
@@ -141,11 +152,13 @@ def main(argv=None) -> int:
     aux_w = float(tc.get("aux_weight", 0.0))
     t_start = time.time()
     stopped_early = False
+    stale = int(best.get("stale", 0))
     for epoch in range(start_epoch, int(tc["epochs"])):
         train_ds.set_epoch(epoch)
         g = torch.Generator().manual_seed(int(tc.get("seed", 0)) * 1000 + epoch)
+        nw = int(tc.get("num_workers", 0))
         dl = DataLoader(train_ds, batch_size=int(tc["batch_size"]), shuffle=True, generator=g, collate_fn=collate_value,
-                        num_workers=int(tc.get("num_workers", 0)), persistent_workers=False)
+                        num_workers=nw, persistent_workers=False, pin_memory=use_cuda)
         model.train()
         t_ep = time.time()
         sums = {"loss": 0.0, "mse": 0.0, "aux": 0.0, "n": 0}
@@ -154,6 +167,7 @@ def main(argv=None) -> int:
                 break
             for pg in opt.param_groups:
                 pg["lr"] = lr_at(step, total_steps, float(tc["lr"]), int(tc.get("warmup_steps", 0)))
+            b = move_batch(b, device)
             v, aux = model.forward_all(b["tokens"], b["pad_mask"], b["globals"])
             mse = torch.mean((v - b["target"]) ** 2)
             loss = mse
@@ -200,23 +214,34 @@ def main(argv=None) -> int:
                     tb.add_scalar(k, row[k], epoch)
         print(f"[epoch {epoch}] train mse {row['train_mse']:.4f} | val mse {vm.get('mse', float('nan')):.4f} acc {vm.get('sign_acc', float('nan')):.3f} "
               f"brier {vm.get('brier', float('nan')):.4f} logloss {vm.get('logloss', float('nan')):.4f} | {ep_s:.0f}s train + {ev_s:.0f}s eval", flush=True)
-        if vm.get("brier", float("inf")) < best["val_brier"]:
-            best = {"val_brier": vm["brier"], "epoch": epoch, "val": vm}
-            save_value_checkpoint(run_dir / "best.pt", model, epoch=epoch, step=step, val=vm, n_params=n_params)
-        save_value_checkpoint(run_dir / "last.pt", model, optimizer=opt.state_dict(), epoch=epoch, step=step, best=best, n_params=n_params)
+        if vm.get("brier", float("inf")) < best["val_brier"] - float(tc.get("min_delta", 0.0)):
+            best = {"val_brier": vm["brier"], "epoch": epoch, "val": vm, "stale": 0}
+            save_value_checkpoint(run_dir / "best.pt", model, epoch=epoch, step=step, val=vm, n_params=n_params, device=str(device))
+            stale = 0
+        else:
+            stale = int(best.get("stale", 0)) + 1
+            best["stale"] = stale
+        save_value_checkpoint(run_dir / "last.pt", model, optimizer=opt.state_dict(), epoch=epoch, step=step, best=best, n_params=n_params, device=str(device))
         if stopped_early:
             print(f"[stop] --max-minutes {a.max_minutes} reached", flush=True)
             break
+        patience = int(tc.get("patience", 0))
+        if patience and stale >= patience:
+            print(f"[stop] early stopping: val Brier has not improved by {tc.get('min_delta', 0)} "
+                  f"for {patience} epochs (best {best['val_brier']:.4f} at epoch {best['epoch']})", flush=True)
+            stopped_early = True
+            break
 
-    summary = {"run_dir": str(run_dir), "n_params": n_params, "best": best, "steps": step, "train_minutes": round((time.time() - t_start) / 60, 2)}
+    summary = {"run_dir": str(run_dir), "n_params": n_params, "device": str(device), "best": best, "steps": step, "train_minutes": round((time.time() - t_start) / 60, 2), "stopped_early": stopped_early}
     if not a.skip_test:
         from battleboats.training.value_net import load_value_checkpoint
 
         ck_path = run_dir / ("best.pt" if (run_dir / "best.pt").exists() else "last.pt")
         best_model, _ = load_value_checkpoint(ck_path)
+        best_model.to(device)
         for split in ("val", "test"):
             res = evaluate_split(best_model, cache, split, baselines=baselines, include_draws=False,
-                                 batch_size=int(tc.get("eval_batch_size", 512)), gate_cfg=ec)
+                                 batch_size=int(tc.get("eval_batch_size", 512)), gate_cfg=ec, device=device)
             (run_dir / f"eval_{split}.json").write_text(json.dumps(res, indent=2))
             txt = format_report(res)
             (run_dir / f"eval_{split}.txt").write_text(txt + "\n")

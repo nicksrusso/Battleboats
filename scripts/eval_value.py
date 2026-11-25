@@ -17,7 +17,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 import torch  # noqa: E402
 
 from battleboats.training.value_data import ValueCache  # noqa: E402
-from battleboats.training.value_eval import Baselines, evaluate_split, format_report  # noqa: E402
+from battleboats.training.value_eval import Baselines, evaluate_split, format_report, resolve_device  # noqa: E402
 from battleboats.training.value_net import load_value_checkpoint  # noqa: E402
 
 
@@ -27,14 +27,17 @@ def main(argv=None) -> int:
     ap.add_argument("--cache", required=True)
     ap.add_argument("--split", default="test", choices=("train", "val", "test"))
     ap.add_argument("--threads", type=int, default=4)
+    ap.add_argument("--device", default="cpu", help="cpu, cuda, cuda:N, or auto")
     ap.add_argument("--baseline-fit-rows", type=int, default=60000)
     ap.add_argument("--out", help="write the full JSON result here")
     a = ap.parse_args(argv)
     torch.set_num_threads(a.threads)
+    device = resolve_device(a.device)
     model, payload = load_value_checkpoint(a.checkpoint)
+    model.to(device)
     cache = ValueCache(a.cache)
     bl = Baselines(cache, cache.split_rows("train"), max_fit_rows=a.baseline_fit_rows)
-    res = evaluate_split(model, cache, a.split, baselines=bl)
+    res = evaluate_split(model, cache, a.split, baselines=bl, device=device)
     print(format_report(res))
     if a.out:
         Path(a.out).write_text(json.dumps(res, indent=2))

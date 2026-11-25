@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Union
 
 import numpy as np
 import torch
@@ -19,17 +19,45 @@ from battleboats.training.value_data import (
 )
 
 
+def resolve_device(spec: str = "cpu") -> torch.device:
+    """Map a config string to a torch device.
+
+    ``cpu`` stays on CPU. ``cuda`` / ``cuda:N`` / ``auto`` use the GPU when
+    ``torch.cuda.is_available()`` (NVIDIA CUDA or AMD ROCm). If a GPU was
+    requested but is missing, fall back to CPU and print a note.
+    """
+    spec = str(spec or "cpu").strip().lower()
+    want = spec in ("auto", "cuda") or spec.startswith("cuda:")
+    if not want:
+        return torch.device("cpu")
+    if torch.cuda.is_available():
+        return torch.device("cuda" if spec in ("auto", "cuda") else spec)
+    if spec != "auto":
+        print(f"[device] {spec} requested but torch.cuda.is_available() is False; using cpu", flush=True)
+    return torch.device("cpu")
+
+
+def move_batch(batch: dict, device: Union[str, torch.device]) -> dict:
+    return {k: v.to(device, non_blocking=True) if torch.is_tensor(v) else v for k, v in batch.items()}
+
+
 @torch.no_grad()
-def predict(model, ds: ValueDataset, batch_size: int = 256) -> Dict[str, np.ndarray]:
+def predict(model, ds: ValueDataset, batch_size: int = 256, device=None) -> Dict[str, np.ndarray]:
     model.eval()
+    if device is None:
+        device = next(model.parameters()).device
+    else:
+        device = torch.device(device)
+        model.to(device)
     vs, ys, fr, seats, rows = [], [], [], [], []
     for b in DataLoader(ds, batch_size=batch_size, shuffle=False, collate_fn=collate_value):
-        v = model(b["tokens"], b["pad_mask"], b["globals"])
+        b = move_batch(b, device)
+        v = model(b["tokens"], b["pad_mask"], b["globals"]).detach().cpu()
         vs.append(v.numpy())
-        ys.append(b["target"].numpy())
-        fr.append(b["turn_frac"].numpy())
-        seats.append(b["seat"].numpy())
-        rows.append(b["row"].numpy())
+        ys.append(b["target"].cpu().numpy())
+        fr.append(b["turn_frac"].cpu().numpy())
+        seats.append(b["seat"].cpu().numpy())
+        rows.append(b["row"].cpu().numpy())
     cat = lambda xs: np.concatenate(xs) if xs else np.zeros(0)  # noqa: E731
     return {"v": cat(vs), "y": cat(ys), "turn_frac": cat(fr), "seat": cat(seats), "row": cat(rows)}
 
@@ -91,9 +119,10 @@ def evaluate_split(
     include_draws: bool = False,
     batch_size: int = 256,
     gate_cfg: Optional[Dict] = None,
+    device=None,
 ) -> Dict:
     ds = ValueDataset(cache, split, include_draws=include_draws, k_per_game=0)
-    pred = predict(model, ds, batch_size=batch_size)
+    pred = predict(model, ds, batch_size=batch_size, device=device)
     v, y = pred["v"], pred["y"]
     res: Dict = {
         "split": split,
