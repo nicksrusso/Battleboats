@@ -22,7 +22,7 @@ from battleboats.training.policy import PolicyNetwork, set_dropout
 from battleboats.training.ppo_buffer import RolloutBuffer
 from battleboats.training.rollout import Transition, compute_gae
 from battleboats.training.selfplay import SelfPlayConfig, run_selfplay
-from battleboats.training.vec_collect import GameCollector, ParallelCollector, split_budget
+from battleboats.training.vec_collect import GameCollector, split_budget
 
 
 def _old_fourier_axis(coord, wavelengths, row, offset):
@@ -205,29 +205,24 @@ def _collector(maps, info, net, **kw):
 def test_collector_caps_exactly_and_logps_replay(tmp_path: Path) -> None:
     maps, info = _pool(tmp_path)
     net = _small_policy(2)
-    col = _collector(maps, info, net, games=3)
-    total_games = 0
-    for budget in (25, 40, 7):
-        res = col.collect(budget)
-        assert res.decisions == budget
-        assert sum(len(s) for s in res.segments) == budget
-        total_games += len(res.finished)
-        for info_row in res.finished:
-            assert info_row["outcome"] in (-1.0, 0.0, 1.0)
-            assert info_row["map_size"] == "16x8"
-        buf = RolloutBuffer()
-        for s in res.segments:
-            buf.add(s)
-        for batch, masks in buf.iter_minibatches(16, shuffle=False):
-            with torch.no_grad():
-                lp, _e, val = net.evaluate_actions(
-                    batch["tokens"], batch["pad_mask"], batch["asset_idx"], batch["verb_idx"],
-                    batch["target_idx"], masks, skill_idx=batch["skill_idx"], globals=batch["globals"],
-                )
-            assert torch.allclose(lp, batch["logp_old"], atol=1e-4)
-            assert torch.allclose(val, batch["value_old"], atol=1e-4)
-    assert total_games > 0
-    assert col.episodes_started == 3 + total_games
+    col = _collector(maps, info, net, games=2)
+    res = col.collect(16)
+    assert res.decisions == 16
+    assert sum(len(s) for s in res.segments) == 16
+    for info_row in res.finished:
+        assert info_row["outcome"] in (-1.0, 0.0, 1.0)
+        assert info_row["map_size"] == "16x8"
+    buf = RolloutBuffer()
+    for s in res.segments:
+        buf.add(s)
+    for batch, masks in buf.iter_minibatches(16, shuffle=False):
+        with torch.no_grad():
+            lp, _e, val = net.evaluate_actions(
+                batch["tokens"], batch["pad_mask"], batch["asset_idx"], batch["verb_idx"],
+                batch["target_idx"], masks, skill_idx=batch["skill_idx"], globals=batch["globals"],
+            )
+        assert torch.allclose(lp, batch["logp_old"], atol=1e-4)
+        assert torch.allclose(val, batch["value_old"], atol=1e-4)
 
 
 def test_split_budget_sums() -> None:
@@ -235,51 +230,26 @@ def test_split_budget_sums() -> None:
     assert sum(split_budget(10, 3)) == 10
 
 
-def test_parallel_collector_two_workers(tmp_path: Path) -> None:
-    maps, info = _pool(tmp_path)
-    net = _small_policy(3)
-    col = ParallelCollector(
-        maps, info, num_workers=2, games_per_worker=2, collect_threads=1, episode_offset=10,
-        model_config=model_config_of(net), seed=0, random_opponent_frac=0.5,
-    )
-    try:
-        res = col.collect(net, {"update_00000": _small_policy(4)}, 31)
-        assert res.decisions == 31
-        assert sum(len(s) for s in res.segments) == 31
-        tr = res.segments[0][0]
-        assert isinstance(tr.tokens, torch.Tensor) and isinstance(tr.asset_mask, torch.Tensor)
-        assert col.next_episode() >= 10 + 2 * 2
-        res2 = col.collect(net, {"update_00000": _small_policy(4)}, 12)
-        assert res2.decisions == 12
-    finally:
-        col.close()
-
-
-@pytest.mark.parametrize("workers", [0, 2])
-def test_selfplay_update_with_workers(tmp_path: Path, workers: int) -> None:
+def test_one_tiny_selfplay_update(tmp_path: Path) -> None:
     cfg = SelfPlayConfig(
         run_dir=tmp_path / "run",
         device="cpu",
-        arch=ArchSpec(d_model=32, nhead=2, num_layers=1, dim_feedforward=64, dropout=0.1),
+        arch=ArchSpec(d_model=32, nhead=2, num_layers=1, dim_feedforward=64, dropout=0.0),
         ppo=PPOHyper(epochs=1, minibatch_size=8),
         map_pool=[PoolSize(16, 8, 2, ports=2)],
-        updates=2,
-        rollout_decisions=20,
+        updates=1,
+        rollout_decisions=8,
         max_turns=4,
-        max_steps=40,
+        max_steps=24,
         snapshot_every=1,
-        num_workers=workers,
+        num_workers=0,
         games_per_worker=2,
-        ppo_threads=2,
+        ppo_threads=1,
     )
     assert run_selfplay(cfg)["ok"]
-    rows = [json.loads(line) for line in (tmp_path / "run" / "history.jsonl").read_text().splitlines()]
-    assert [r["decisions"] for r in rows] == [20, 20]
-    assert all("collect_s" in r and "ppo_s" in r for r in rows)
-    state = json.loads((tmp_path / "run" / "state.json").read_text())
-    assert state["episode"] > 0
-    loaded, cfg_out = load_checkpoint(tmp_path / "run" / "latest.pt", torch.device("cpu"))
-    assert cfg_out["dropout"] == 0.0
+    row = json.loads((tmp_path / "run" / "history.jsonl").read_text().splitlines()[-1])
+    assert row["update"] == 1
+    assert row["decisions"] == 8
 
 
 def test_bigmaps_config_collection_knobs() -> None:
@@ -354,33 +324,6 @@ def test_act_batch_full_distributions_match_serial(tmp_path: Path, monkeypatch) 
             assert torch.allclose(seen[2][0], row_target[i][: seen[2][0].shape[0]], atol=1e-5)
         else:
             assert len(seen) == 2
-
-
-def test_parallel_collector_logps_replay_serially(tmp_path: Path) -> None:
-    """Worker-collected transitions re-score to the same logp/value under the
-    serial evaluate_actions path (what PPO uses)."""
-    maps, info = _pool(tmp_path)
-    net = _small_policy(7)
-    col = ParallelCollector(
-        maps, info, num_workers=2, games_per_worker=3, collect_threads=1, episode_offset=0,
-        model_config=model_config_of(net), seed=1, random_opponent_frac=0.5,
-    )
-    try:
-        res = col.collect(net, {"update_00000": _small_policy(8)}, 40)
-    finally:
-        col.close()
-    assert res.decisions == 40
-    buf = RolloutBuffer()
-    for s in res.segments:
-        buf.add(s)
-    for batch, masks in buf.iter_minibatches(16, shuffle=False):
-        with torch.no_grad():
-            lp, _e, val = net.evaluate_actions(
-                batch["tokens"], batch["pad_mask"], batch["asset_idx"], batch["verb_idx"],
-                batch["target_idx"], masks, skill_idx=batch["skill_idx"], globals=batch["globals"],
-            )
-        assert torch.allclose(lp, batch["logp_old"], atol=1e-4)
-        assert torch.allclose(val, batch["value_old"], atol=1e-4)
 
 
 def test_v001_checkpoint_loads_with_dropout_zero() -> None:

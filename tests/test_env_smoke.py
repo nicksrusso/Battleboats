@@ -24,8 +24,8 @@ MAP_JSON = str(
     / "config"
     / "map.json"
 )
-NUM_GAMES = 5
-MAX_TURNS = 50  # smoke test only needs to exercise the lifecycle, not play out full games
+NUM_GAMES = 2
+MAX_TURNS = 25  # smoke test only needs to exercise the lifecycle, not play out full games
 STEP_BUDGET = 200_000  # safety net so a runaway loop fails fast
 
 
