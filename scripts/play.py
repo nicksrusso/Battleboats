@@ -1,6 +1,7 @@
 """Launch the local Battleboats web UI for a game against an agent.
 
     poetry run python scripts/play.py --map 16x8 --opponent tactical --seed 0
+    poetry run python scripts/play.py --map 16x8 --opponent scripted --seed 0
     poetry run python scripts/play.py --map 16x8 --opponent inkling --seed 0
     poetry run python scripts/play.py --map 16x8 --opponent llm --model thinkingmachines/inkling --reasoning high
     poetry run python scripts/play.py --map 16x8 --opponent inkling --reasoning max
@@ -49,8 +50,9 @@ def build_parser() -> argparse.ArgumentParser:
         "--opponent",
         choices=("tactical", "scripted", "random", "checkpoint", "llm", "inkling"),
         default=None,
-        help="Opponent agent (default: tactical; checkpoint if --checkpoint is set; "
-        "inkling is an alias for llm + the Inkling flagship at high reasoning).",
+        help="Opponent agent (default: tactical; scripted is the full-information "
+        "baseline; checkpoint if --checkpoint is set; inkling is an alias for llm + "
+        "the Inkling flagship at high reasoning). You always have fog of war.",
     )
     parser.add_argument(
         "--checkpoint",

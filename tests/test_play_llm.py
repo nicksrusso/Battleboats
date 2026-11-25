@@ -477,3 +477,57 @@ def test_llm_decision_fields_are_logged(tmp_path: Path) -> None:
     assert rec["llm"]["usage_summary"]["cost_usd"] == 0.00042
     assert rec["llm"]["prompt"]
     assert "FORMAT 4" in rec["llm"]["prompt"] or "MOVES" in rec["llm"]["prompt"]
+
+
+LEAK_PHRASE = "HIDDEN_HOME_AT_(99,99)_and_sneak_SS#42"
+
+
+class ChattyLLM(ScriptedLLM):
+    """Returns a legal End-turn index plus a sentence that would leak hidden info."""
+
+    def __call__(self, prompt: str, temperature: float = 0.3) -> str:
+        if self.hold is not None:
+            self.hold.wait(timeout=5)
+        self.prompts.append(prompt)
+        self.temperatures.append(temperature)
+        idx = _end_turn_reply(prompt).split()[0]
+        return f"{idx} I will buy a Carrier next to my {LEAK_PHRASE}."
+
+
+def test_llm_reasoning_stays_out_of_ui_but_in_game_log(tmp_path: Path) -> None:
+    hold = threading.Event()
+    hold.set()
+    session = PlaySession(
+        opponent="inkling",
+        human_side=1,
+        width=4,
+        height=4,
+        seed=8,
+        max_turns=8,
+        map_dir=tmp_path / "maps",
+        llm_client=ChattyLLM(hold=hold),
+    )
+    if session._worker is not None:
+        session._worker.join(timeout=5)
+    assert session.thinking is False
+    state = session.to_state_dict()
+    blob = json.dumps(state)
+    assert LEAK_PHRASE not in blob
+    last = state["status"]["last_llm"]
+    for key in ("reasoning", "replies", "raw_reply", "prompt", "retry_prompt"):
+        assert key not in last
+    assert last.get("total_tokens") == 200
+    for entry in state["log"]:
+        assert LEAK_PHRASE not in entry["text"]
+        # Usage / fallback notes are fine; model sentences are not.
+        assert "buy a Carrier" not in entry["text"]
+    disk = session.log_path.read_text(encoding="utf-8")
+    assert LEAK_PHRASE in disk
+    found = False
+    for line in disk.splitlines():
+        rec = json.loads(line)
+        if rec.get("type") == "decision" and rec.get("llm"):
+            assert any(LEAK_PHRASE in str(r) for r in rec["llm"].get("replies") or [])
+            found = True
+            break
+    assert found

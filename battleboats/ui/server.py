@@ -70,10 +70,10 @@ def _index(error: str = "") -> bytes:
     body = f"""{err}{resume_link}
 <form method="post" action="/start">
 <label>Opponent</label>
-<label><input type="radio" name="opponent" value="tactical" checked> Tactical scripted (fog of war)</label>
+<label><input type="radio" name="opponent" value="tactical" checked> Tactical (fog of war) — scripted agent limited to what it can see</label>
+<label><input type="radio" name="opponent" value="scripted"> Scripted baseline (full-information opponent) — you still have fog of war</label>
 <label><input type="radio" name="opponent" value="inkling"> Inkling (OpenRouter, high thinking)</label>
 <label><input type="radio" name="opponent" value="llm"> LLM (OpenRouter, choose a model)</label>
-<label><input type="radio" name="opponent" value="scripted"> Scripted (full information)</label>
 <label><input type="radio" name="opponent" value="random"> Random</label>
 <label><input type="radio" name="opponent" value="checkpoint"> Trained checkpoint</label>
 <label>LLM model (OpenRouter id; default is the Inkling flagship)</label>
@@ -104,6 +104,7 @@ def _index(error: str = "") -> bytes:
 </form>
 <p>Checkpoints are listed from <code>{html.escape(str(_CHECKPOINT_DIR))}</code>.
 Maps come from <code>battleboats/envs/map_pool.py</code> presets or discovered pool JSON files.
+You always play under fog of war. The tactical agent is also fog-limited; the scripted baseline may use the full board.
 An Inkling / LLM game needs <code>OPENROUTER_API_KEY</code> in the environment or a repo-root <code>.env</code> file (never committed).</p>
 """
     return _page(body)

@@ -85,8 +85,8 @@ _SHIP_CODE = {
 }
 
 OPPONENT_LABELS = {
-    "tactical": "Tactical scripted (fog of war)",
-    "scripted": "Scripted (full information)",
+    "tactical": "Tactical (fog of war)",
+    "scripted": "Scripted baseline (full-information opponent)",
     "random": "Random",
     "checkpoint": "Checkpoint",
     "llm": "LLM (OpenRouter)",
@@ -622,7 +622,7 @@ class PlaySession:
             ),
             "llm_model": self.llm_model if self._uses_llm() else "",
             "llm_reasoning": self.llm_reasoning if self._uses_llm() else "",
-            "last_llm": dict(self.last_llm),
+            "last_llm": self._public_last_llm(),
             "llm_totals": dict(self.llm_totals),
             "log_path": str(self.log_path) if getattr(self, "log_path", None) else "",
         }
@@ -2034,18 +2034,39 @@ const INITIAL_STATE = {state_json};
         latency = meta.get("latency_s")
         if latency is not None:
             summary["latency_s"] = latency
-        self.last_llm = {
-            "latency_s": latency,
+        self.last_llm = self._public_last_llm_from(summary, meta)
+        self._accumulate_usage(summary)
+
+    def _public_last_llm_from(self, summary: dict, meta: dict) -> dict:
+        """Usage only — never include model reasoning, replies, or prompts."""
+        public = {
+            "latency_s": meta.get("latency_s"),
             "fallback": bool(meta.get("fallback")),
             "passed": bool(meta.get("passed")),
-            "error": meta.get("error") or "",
-            "reasoning": (meta.get("reasoning") or "")[:240],
-            **{k: summary[k] for k in (
-                "prompt_tokens", "completion_tokens", "reasoning_tokens",
-                "total_tokens", "cost_usd",
-            ) if k in summary},
         }
-        self._accumulate_usage(summary)
+        for key in (
+            "prompt_tokens",
+            "completion_tokens",
+            "reasoning_tokens",
+            "total_tokens",
+            "cost_usd",
+        ):
+            if key in summary:
+                public[key] = summary[key]
+        return public
+
+    def _public_last_llm(self) -> dict:
+        allowed = {
+            "latency_s",
+            "fallback",
+            "passed",
+            "prompt_tokens",
+            "completion_tokens",
+            "reasoning_tokens",
+            "total_tokens",
+            "cost_usd",
+        }
+        return {k: v for k, v in dict(self.last_llm).items() if k in allowed}
 
     def _log_llm_meta(self, meta: dict) -> None:
         summary = dict(meta.get("usage_summary") or {})
@@ -2054,13 +2075,8 @@ const INITIAL_STATE = {state_json};
         bits = [name]
         if meta.get("passed"):
             bits.append("API error, passed the turn")
-            if meta.get("error"):
-                bits.append(str(meta["error"]))
         elif meta.get("fallback"):
             bits.append("invalid reply, used a random legal move")
-        reason = (meta.get("reasoning") or "").strip()
-        if reason and not meta.get("fallback"):
-            bits.append(reason[:160])
         if line:
             bits.append(line)
         kind = "error" if meta.get("passed") or meta.get("error") else "llm"

@@ -2,6 +2,7 @@
 
 import json
 import random
+import re
 import threading
 from http.client import HTTPConnection
 from pathlib import Path
@@ -108,7 +109,7 @@ def test_health_and_scripted_game(ui_server: int) -> None:
     status, _, page = _request(ui_server, "GET", "/play")
     text = page.decode()
     assert status == 200
-    assert "Scripted (full information)" in text
+    assert "Scripted baseline (full-information opponent)" in text
     assert "Opponent:" in text
     status, headers, _ = _request(ui_server, "POST", "/act", {"index": "0"})
     assert status == 303
@@ -348,3 +349,141 @@ def test_map_pool_presets_resolve(tmp_path: Path) -> None:
     res = resolve_map("training", seed=1, map_dir=tmp_path / "maps")
     assert res.width == 24 and res.height == 12
     assert res.path.is_file()
+
+
+_BANNED_LLM_FIELDS = ("reasoning", "replies", "raw_reply", "prompt", "retry_prompt")
+
+
+def _assert_state_is_fog_safe(state: dict, engine, human_id: int, ever_seen: set[int]) -> None:
+    """The browser payload must not contain unseen enemy units/positions or LLM text."""
+    human = engine.players[human_id]
+    own_ids = set(human.owned_ship_ids)
+    last = (state.get("status") or {}).get("last_llm") or {}
+    for key in _BANNED_LLM_FIELDS:
+        assert not last.get(key), f"UI last_llm leaked {key}: {last.get(key)!r}"
+
+    for es in state.get("enemy_ships") or []:
+        sight = human.sightings.get(es["id"])
+        assert sight is not None, f"unsighted enemy ship {es} in payload"
+        assert list(es["pos"]) == [sight.position[0], sight.position[1]]
+        assert bool(es["fresh"]) is bool(sight.fresh)
+
+    for ep in state.get("enemy_ports") or []:
+        assert tuple(ep["pos"]) in human.port_sightings
+
+    st = state["status"]
+    assert st["cash"] == human.cash
+    assert st["ships"] == len(human.owned_ship_ids)
+    if not st["over"]:
+        assert st["winner"] is None
+        assert not st.get("result")
+
+    for entry in state.get("log") or []:
+        text = entry.get("text", "")
+        if not (text.startswith("Opponent") or entry.get("kind") in {"enemy_move", "spot", "combat_loss", "combat_miss"}):
+            continue
+        for raw_id in re.findall(r"#(\d+)", text):
+            sid = int(raw_id)
+            if sid in own_ids:
+                continue
+            # "attacked your DD #13" — already skipped if the id is currently owned;
+            # a sunk friendly ship may no longer be in owned_ship_ids.
+            if "your " in text and f"#{sid}" in text.split("your", 1)[-1][:40]:
+                continue
+            assert sid in ever_seen, f"log mentions never-seen enemy #{sid}: {text}"
+
+    for mv in state.get("recent_opponent_moves") or []:
+        sid = mv.get("ship_id")
+        if sid is not None:
+            assert sid in ever_seen, f"trail for never-seen ship: {mv}"
+
+
+def _start_ui_server(tmp_path: Path):
+    server._SESSION = None
+    server._CHECKPOINT_DIR = tmp_path
+    server._MAP_DIR = tmp_path / "maps"
+    server._DEVICE = "cpu"
+    server._AUTO_PLAY = False
+    httpd = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+    thread = threading.Thread(target=httpd.serve_forever, daemon=True)
+    thread.start()
+    return httpd, thread
+
+
+def _stop_ui_server(httpd, thread) -> None:
+    httpd.shutdown()
+    thread.join(timeout=5)
+    session = server._SESSION
+    if session is not None:
+        try:
+            session.close(complete=session.over)
+        except Exception:
+            pass
+    server._SESSION = None
+    server._AUTO_PLAY = False
+
+
+def test_new_game_form_lists_scripted_opponents(ui_server: int) -> None:
+    status, _, page = _request(ui_server, "GET", "/")
+    text = page.decode()
+    assert status == 200
+    assert 'value="tactical"' in text
+    assert 'value="scripted"' in text
+    assert "Tactical (fog of war)" in text
+    assert "Scripted baseline (full-information opponent)" in text
+    assert "you still have fog of war" in text.lower() or "You always play under fog of war" in text
+
+
+@pytest.mark.parametrize("opponent", ("tactical", "scripted"))
+@pytest.mark.parametrize("human_side", (0, 1))
+def test_full_game_via_api_vs_scripted_opponents_is_fog_safe(
+    tmp_path: Path, opponent: str, human_side: int
+) -> None:
+    httpd, thread = _start_ui_server(tmp_path)
+    try:
+        port = httpd.server_address[1]
+        status, state = _json_request(
+            port,
+            "POST",
+            "/api/start",
+            {
+                "opponent": opponent,
+                "map": "16x8",
+                "human_side": human_side,
+                "seed": 7 + human_side,
+                "max_turns": 24,
+            },
+        )
+        assert status == 200, state
+        assert state["status"]["opponent"] == opponent
+        session = server._SESSION
+        assert session is not None
+        human = session.engine.players[human_side]
+        ever_seen = set(human.sightings)
+        _assert_state_is_fog_safe(state, session.engine, human_side, ever_seen)
+
+        rng = random.Random(123)
+        steps = 0
+        while not state["status"]["over"] and steps < 1500:
+            legal = state["legal_actions"]
+            assert legal, f"{opponent} human had no legal actions before game over"
+            if steps % 6 == 5:
+                end = next((a for a in legal if a.get("type") == "end_turn"), None)
+                payload = {"index": end["index"]} if end is not None else {"index": rng.choice(legal)["index"]}
+            else:
+                payload = {"index": rng.choice(legal)["index"]}
+            status, state = _json_request(port, "POST", "/api/action", payload)
+            assert status == 200, state
+            human = session.engine.players[human_side]
+            ever_seen |= set(human.sightings)
+            _assert_state_is_fog_safe(state, session.engine, human_side, ever_seen)
+            steps += 1
+            if steps % 11 == 0:
+                status, polled = _json_request(port, "GET", "/api/state")
+                assert status == 200
+                _assert_state_is_fog_safe(polled, session.engine, human_side, ever_seen)
+        assert state["status"]["over"] is True
+        assert state["status"]["result"]
+        _assert_state_is_fog_safe(state, session.engine, human_side, ever_seen)
+    finally:
+        _stop_ui_server(httpd, thread)
