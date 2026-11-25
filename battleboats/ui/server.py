@@ -13,6 +13,7 @@ from pathlib import Path
 from typing import List, Optional
 from urllib.parse import parse_qs, urlparse
 
+from battleboats.llm.openrouter import INKLING_MODEL_ID
 from battleboats.ui.maps import list_map_options
 from battleboats.ui.session import PlaySession
 
@@ -70,9 +71,23 @@ def _index(error: str = "") -> bytes:
 <form method="post" action="/start">
 <label>Opponent</label>
 <label><input type="radio" name="opponent" value="tactical" checked> Tactical scripted (fog of war)</label>
+<label><input type="radio" name="opponent" value="inkling"> Inkling (OpenRouter, max thinking)</label>
+<label><input type="radio" name="opponent" value="llm"> LLM (OpenRouter, choose a model)</label>
 <label><input type="radio" name="opponent" value="scripted"> Scripted (full information)</label>
 <label><input type="radio" name="opponent" value="random"> Random</label>
 <label><input type="radio" name="opponent" value="checkpoint"> Trained checkpoint</label>
+<label>LLM model (OpenRouter id; default is the Inkling flagship)</label>
+<input name="llm_model" value="{html.escape(INKLING_MODEL_ID)}" size="58">
+<label>Reasoning
+  <select name="llm_reasoning">
+    <option value="max" selected>max</option>
+    <option value="high">high</option>
+    <option value="medium">medium</option>
+    <option value="low">low</option>
+    <option value="minimal">minimal</option>
+    <option value="none">none</option>
+  </select>
+</label>
 <label>Checkpoint path (optional unless Checkpoint selected)</label>
 <input name="checkpoint" list="ckpts" value="{html.escape(default_ckpt)}" size="58">
 <datalist id="ckpts">{ckpt_options}</datalist>
@@ -88,7 +103,8 @@ def _index(error: str = "") -> bytes:
 <button type="submit">Start game</button>
 </form>
 <p>Checkpoints are listed from <code>{html.escape(str(_CHECKPOINT_DIR))}</code>.
-Maps come from <code>battleboats/envs/map_pool.py</code> presets or discovered pool JSON files.</p>
+Maps come from <code>battleboats/envs/map_pool.py</code> presets or discovered pool JSON files.
+An Inkling / LLM game needs <code>OPENROUTER_API_KEY</code> in the environment or a repo-root <code>.env</code> file (never committed).</p>
 """
     return _page(body)
 
@@ -113,6 +129,13 @@ def _start_from_params(params: dict) -> PlaySession:
     height = int(height_raw) if height_raw not in (None, "") else None
     ckpt_raw = str(params.get("checkpoint", "") or "").strip()
     checkpoint = Path(ckpt_raw) if ckpt_raw else None
+    if _SESSION is not None:
+        try:
+            _SESSION.close(complete=_SESSION.over)
+        except Exception:
+            pass
+    llm_model = str(params.get("llm_model") or params.get("model") or "").strip() or None
+    llm_reasoning = str(params.get("llm_reasoning") or params.get("reasoning") or "").strip() or None
     _SESSION = PlaySession(
         opponent=opponent,
         human_side=human_side,
@@ -124,6 +147,8 @@ def _start_from_params(params: dict) -> PlaySession:
         map_dir=_MAP_DIR,
         checkpoint=checkpoint,
         device=_DEVICE,
+        llm_model=llm_model,
+        llm_reasoning=llm_reasoning,
     )
     return _SESSION
 
@@ -176,25 +201,31 @@ class Handler(BaseHTTPRequestHandler):
             return
         if path == "/api/state":
             with _LOCK:
-                if _SESSION is None:
-                    self._send_json(404, {"error": "No active game."})
-                    return
-                self._send_json(200, _SESSION.to_state_dict())
+                session = _SESSION
+            if session is None:
+                self._send_json(404, {"error": "No active game."})
+                return
+            with session.lock:
+                self._send_json(200, session.to_state_dict())
             return
         if path == "/play":
             with _LOCK:
-                if _SESSION is None:
-                    self._redirect("/")
-                    return
-                body = _SESSION.render_html().encode()
+                session = _SESSION
+            if session is None:
+                self._redirect("/")
+                return
+            with session.lock:
+                body = session.render_html().encode()
             self._send(200, body)
             return
         if path == "/" and _AUTO_PLAY and qs.get("new") != ["1"]:
             with _LOCK:
-                if _SESSION is not None:
-                    body = _SESSION.render_html().encode()
-                    self._send(200, body)
-                    return
+                session = _SESSION
+            if session is not None:
+                with session.lock:
+                    body = session.render_html().encode()
+                self._send(200, body)
+                return
         self._send(200, _index())
 
     def do_POST(self) -> None:  # noqa: N802
@@ -217,11 +248,13 @@ class Handler(BaseHTTPRequestHandler):
             try:
                 payload = self._json_body()
                 with _LOCK:
-                    if _SESSION is None:
-                        self._send_json(404, {"error": "No active game."})
-                        return
-                    _SESSION.apply_spec(payload)
-                    state = _SESSION.to_state_dict()
+                    session = _SESSION
+                if session is None:
+                    self._send_json(404, {"error": "No active game."})
+                    return
+                with session.lock:
+                    session.apply_spec(payload)
+                    state = session.to_state_dict()
                 self._send_json(200, state)
             except Exception as exc:
                 self._send_json(400, {"error": str(exc)})
@@ -236,11 +269,13 @@ class Handler(BaseHTTPRequestHandler):
                 return
             if path == "/act":
                 with _LOCK:
-                    if _SESSION is None:
-                        self._redirect("/")
-                        return
+                    session = _SESSION
+                if session is None:
+                    self._redirect("/")
+                    return
+                with session.lock:
                     index = int(form.get("index", ["-1"])[0])
-                    _SESSION.apply(index)
+                    session.apply(index)
                 self._redirect("/play")
                 return
         except Exception as exc:
@@ -267,5 +302,8 @@ def serve(
         _SESSION = initial_session
     httpd = ThreadingHTTPServer((host, port), Handler)
     actual_port = httpd.server_address[1]
-    print(f"Battleboats UI at http://{host}:{actual_port}  (checkpoints in {_CHECKPOINT_DIR})", flush=True)
+    extra = ""
+    if _SESSION is not None and getattr(_SESSION, "log_path", None):
+        extra = f"  (game log {_SESSION.log_path})"
+    print(f"Battleboats UI at http://{host}:{actual_port}  (checkpoints in {_CHECKPOINT_DIR}){extra}", flush=True)
     httpd.serve_forever()

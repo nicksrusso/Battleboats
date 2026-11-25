@@ -13,12 +13,15 @@ The human sees fog of war strictly per the spotting rules:
 
 from __future__ import annotations
 
+import atexit
 import html
 import json
 import random
+import threading
+import time
 from collections import deque
 from pathlib import Path
-from typing import Dict, List, Optional, Tuple
+from typing import Callable, Dict, List, Optional, Tuple
 
 from battleboats.agents.heuristics import pk
 from battleboats.agents.random_agent import random_action
@@ -38,9 +41,33 @@ from battleboats.core.actions import (
 from battleboats.core.gameEngine import CASH_PER_MATERIAL, gameEngine
 from battleboats.core.shipyard.ship_data import BASE_STATS, PORT, spot_distance
 from battleboats.core.shipyard.ship_type import ShipType
+from battleboats.llm.openrouter import (
+    DEFAULT_MAX_TOKENS,
+    DEFAULT_REASONING,
+    DEFAULT_TEMPERATURE,
+    DEFAULT_TIMEOUT,
+    OpenRouterClient,
+    decide_llm_action,
+    format_usage_line,
+    resolve_model_id,
+    resolve_reasoning,
+    safe_error,
+)
 from battleboats.training.acting import policy_action
 from battleboats.training.checkpoints import load_checkpoint
 from battleboats.training.device import resolve_device
+from battleboats.ui.game_log import (
+    GameLog,
+    combat_result,
+    decision_record,
+    default_log_dir,
+    end_record,
+    llm_fields,
+    log_filename,
+    serialize_engine,
+    start_record,
+)
+from battleboats.llm.prompt import build_view
 from battleboats.ui.maps import ResolvedMap, resolve_map
 
 Pos = Tuple[int, int]
@@ -62,7 +89,11 @@ OPPONENT_LABELS = {
     "scripted": "Scripted (full information)",
     "random": "Random",
     "checkpoint": "Checkpoint",
+    "llm": "LLM (OpenRouter)",
+    "inkling": "Inkling (max thinking)",
 }
+
+LLM_OPPONENTS = ("llm", "inkling")
 
 
 class _TypeStandIn:
@@ -105,7 +136,11 @@ def describe_action(action: Action, engine: gameEngine, viewer_id: Optional[int]
 
 
 class PlaySession:
-    """Human seat vs one opponent. Not thread-safe; the server holds a lock."""
+    """Human seat vs one opponent.
+
+    Engine mutations go through ``self.lock``. LLM turns run in a background
+    thread so the HTTP server can keep serving ``/api/state`` polls.
+    """
 
     def __init__(
         self,
@@ -121,8 +156,15 @@ class PlaySession:
         checkpoint: Optional[Path] = None,
         device: str = "auto",
         step_budget: int = 1000,
+        llm_model: Optional[str] = None,
+        llm_reasoning: Optional[str] = None,
+        llm_client: Optional[Callable[[str, float], str]] = None,
+        llm_timeout: float = DEFAULT_TIMEOUT,
+        llm_max_tokens: int = DEFAULT_MAX_TOKENS,
+        llm_temperature: float = DEFAULT_TEMPERATURE,
+        log_dir: Optional[Path] = None,
     ) -> None:
-        if opponent not in ("tactical", "random", "scripted", "checkpoint"):
+        if opponent not in ("tactical", "random", "scripted", "checkpoint", "llm", "inkling"):
             raise ValueError(f"unknown opponent {opponent!r}")
         if human_side not in (0, 1):
             raise ValueError("human_side must be 0 or 1")
@@ -135,6 +177,31 @@ class PlaySession:
         self.recent_opponent_moves: List[dict] = []
         self.recent_combat: List[dict] = []
         self.error = ""
+        self.lock = threading.RLock()
+        self.thinking = False
+        self.thinking_message = ""
+        self.thinking_started: Optional[float] = None
+        self.last_llm: dict = {}
+        self.llm_totals: dict = {
+            "calls": 0,
+            "prompt_tokens": 0,
+            "completion_tokens": 0,
+            "reasoning_tokens": 0,
+            "total_tokens": 0,
+            "cost_usd": 0.0,
+        }
+        self._worker: Optional[threading.Thread] = None
+        self.llm_model = resolve_model_id(llm_model, opponent=opponent)
+        self.llm_reasoning = resolve_reasoning(llm_reasoning or DEFAULT_REASONING)
+        self.llm_temperature = float(llm_temperature)
+        self.llm_client = llm_client
+        if self._uses_llm() and self.llm_client is None:
+            self.llm_client = OpenRouterClient(
+                model=self.llm_model,
+                reasoning_effort=self.llm_reasoning,
+                timeout=llm_timeout,
+                max_tokens=llm_max_tokens,
+            )
 
         resolved: ResolvedMap = resolve_map(
             map_spec,
@@ -161,12 +228,23 @@ class PlaySession:
             self.policy, _ = load_checkpoint(self.checkpoint, dev)
             self.policy.eval()
 
+        self._log_steps = 0
+        self._pending_llm_meta: Optional[dict] = None
+        self._game_log_closed = False
+        log_root = Path(log_dir) if log_dir is not None else default_log_dir(map_dir)
+        self.log_path = log_root / log_filename(self.map_name, self.opponent, self.seed)
+        self.game_log = GameLog(self.log_path)
+        self.game_log.write(start_record(self))
+        atexit.register(self._finalize_log_atexit)
         self._add_log(
             f"Game started on {self.map_name} ({self.engine.map.width}x{self.engine.map.height}), "
-            f"seed {self.seed}. You are Player {self.human_side}.",
+            f"seed {self.seed}. You are Player {self.human_side}. "
+            f"Log: {self.log_path}",
             kind="info",
         )
         self._play_opponent_until_human()
+        if self.over:
+            self._finalize_log(complete=True)
 
     @property
     def log(self) -> List[str]:
@@ -190,7 +268,13 @@ class PlaySession:
     def opponent_label(self) -> str:
         if self.opponent == "checkpoint" and self.checkpoint is not None:
             return f"Checkpoint {self.checkpoint}"
+        if self._uses_llm():
+            name = "Inkling" if "inkling" in self.llm_model.lower() or self.opponent == "inkling" else "LLM"
+            return f"{name} ({self.llm_model}, reasoning={self.llm_reasoning})"
         return OPPONENT_LABELS[self.opponent]
+
+    def _uses_llm(self) -> bool:
+        return self.opponent in LLM_OPPONENTS
 
     def _add_log(self, text: str, kind: str = "info") -> None:
         self.entries.append({"turn": self.engine.turn, "kind": kind, "text": text})
@@ -202,6 +286,9 @@ class PlaySession:
 
     def apply(self, index: int) -> None:
         self.error = ""
+        if self.thinking:
+            self.error = "Wait — the opponent is still thinking."
+            return
         legal = self.legal()
         if not legal:
             self.error = "No legal actions."
@@ -222,6 +309,9 @@ class PlaySession:
         self.error = ""
         if self.over:
             self.error = "Game is already over."
+            return
+        if self.thinking:
+            self.error = "Wait — the opponent is still thinking."
             return
         if self.engine.current_player != self.human_side:
             self.error = "Not your turn."
@@ -523,6 +613,18 @@ class PlaySession:
             "width": self.engine.map.width,
             "height": self.engine.map.height,
             "seed": self.seed,
+            "thinking": bool(self.thinking),
+            "thinking_message": self.thinking_message,
+            "thinking_for_s": (
+                round(time.monotonic() - self.thinking_started, 1)
+                if self.thinking and self.thinking_started is not None
+                else None
+            ),
+            "llm_model": self.llm_model if self._uses_llm() else "",
+            "llm_reasoning": self.llm_reasoning if self._uses_llm() else "",
+            "last_llm": dict(self.last_llm),
+            "llm_totals": dict(self.llm_totals),
+            "log_path": str(self.log_path) if getattr(self, "log_path", None) else "",
         }
 
     def to_state_dict(self) -> dict:
@@ -918,6 +1020,17 @@ class PlaySession:
   .port-tabs {{ display: flex; flex-wrap: wrap; gap: 0.3rem; margin-bottom: 0.45rem; }}
   .port-tab {{ padding: 0.25rem 0.5rem; font-size: 11px; }}
   .port-tab.active {{ background: #1e40af; border-color: var(--gold); }}
+  .thinking {{
+    background: #1e3a5f;
+    border: 1px solid #38bdf8;
+    color: #bae6fd;
+    padding: 0.75rem 1rem;
+    border-radius: 6px;
+    margin-bottom: 0.75rem;
+    font-weight: 700;
+  }}
+  .log-llm {{ color: #7dd3fc; }}
+  .log-error {{ color: #f87171; font-weight: 600; }}
 </style>
 </head>
 <body>
@@ -935,6 +1048,7 @@ class PlaySession:
     <span>Ships <span id="shipsStat" class="stat-val">{st['ships']}</span></span>
     <span>Ports <span id="portsStat" class="stat-val">{st['ports']}</span></span>
     <span>Sighted <span id="sightedStat" class="stat-val">{st['sighted_ships']}</span></span>
+    <span id="llmStat" class="muted"></span>
   </div>
   <div class="controls">
     <button id="nextShipBtn" title="Cycle ready ships (Tab)">Next Ship</button>
@@ -945,6 +1059,7 @@ class PlaySession:
 
 {result_html}
 {err_html}
+<div id="thinkingBanner" class="thinking" hidden>Inkling thinking…</div>
 
 <div class="workspace">
   <div class="board-wrap">
@@ -986,6 +1101,7 @@ const INITIAL_STATE = {state_json};
   let selectedPortKey = null;
   let hoverTile = null;
   let busy = false;
+  let pollTimer = null;
   let cellSize = 36;
   const PAD_L = 26;
   const PAD_B = 22;
@@ -997,6 +1113,7 @@ const INITIAL_STATE = {state_json};
   const hoverInfo = document.getElementById("hoverInfo");
   const errorBanner = document.getElementById("errorBanner");
   const resultBanner = document.getElementById("resultBanner");
+  const thinkingBanner = document.getElementById("thinkingBanner");
 
   function posKey(p) {{ return p[0] + "," + p[1]; }}
 
@@ -1037,8 +1154,41 @@ const INITIAL_STATE = {state_json};
     }}
   }}
 
+  function formatLlmStat(st) {{
+    const last = st.last_llm || {{}};
+    const parts = [];
+    if (last.latency_s != null) parts.push(Number(last.latency_s).toFixed(1) + "s");
+    if (last.total_tokens != null) {{
+      let tok = Number(last.total_tokens).toLocaleString() + " tok";
+      if (last.reasoning_tokens) tok += " (" + Number(last.reasoning_tokens).toLocaleString() + " reason)";
+      parts.push(tok);
+    }}
+    if (last.cost_usd != null) parts.push("$" + Number(last.cost_usd).toFixed(4));
+    if (!parts.length) return "";
+    return "Last LLM: " + parts.join(" · ");
+  }}
+
+  function ensurePoll() {{
+    if (state.status && state.status.thinking) {{
+      if (!pollTimer) {{
+        pollTimer = setInterval(async () => {{
+          try {{
+            const resp = await fetch("/api/state");
+            if (!resp.ok) return;
+            state = await resp.json();
+            syncSelections();
+            render();
+          }} catch (err) {{}}
+        }}, 600);
+      }}
+    }} else if (pollTimer) {{
+      clearInterval(pollTimer);
+      pollTimer = null;
+    }}
+  }}
+
   async function sendAction(payload) {{
-    if (busy) return;
+    if (busy || (state.status && state.status.thinking)) return;
     busy = true;
     try {{
       const resp = await fetch("/api/action", {{
@@ -1277,8 +1427,19 @@ const INITIAL_STATE = {state_json};
     document.getElementById("shipsStat").textContent = String(st.ships);
     document.getElementById("portsStat").textContent = String(st.ports);
     document.getElementById("sightedStat").textContent = String(st.sighted_ships);
-    document.getElementById("endTurnBtn").disabled = st.over || st.to_move !== st.human_side;
-    document.getElementById("nextShipBtn").disabled = st.over || state.own_ships.length === 0;
+    const blocked = st.over || st.thinking || st.to_move !== st.human_side;
+    document.getElementById("endTurnBtn").disabled = blocked;
+    document.getElementById("nextShipBtn").disabled = st.over || st.thinking || state.own_ships.length === 0;
+    const llmStat = document.getElementById("llmStat");
+    if (llmStat) llmStat.textContent = formatLlmStat(st);
+    if (st.thinking) {{
+      let msg = st.thinking_message || "Inkling thinking…";
+      if (st.thinking_for_s != null) msg += " (" + st.thinking_for_s + "s)";
+      thinkingBanner.textContent = msg;
+      thinkingBanner.hidden = false;
+    }} else {{
+      thinkingBanner.hidden = true;
+    }}
 
     if (state.error) {{
       errorBanner.textContent = state.error;
@@ -1298,6 +1459,15 @@ const INITIAL_STATE = {state_json};
       a.appendChild(btn);
       resultBanner.appendChild(span);
       resultBanner.appendChild(a);
+      if (st.log_path) {{
+        const logLine = document.createElement("div");
+        logLine.className = "muted";
+        logLine.style.fontWeight = "400";
+        logLine.style.fontSize = "12px";
+        logLine.style.marginTop = "0.35rem";
+        logLine.textContent = "Game log: " + st.log_path;
+        resultBanner.appendChild(logLine);
+      }}
       resultBanner.hidden = false;
     }} else {{
       resultBanner.hidden = true;
@@ -1404,10 +1574,11 @@ const INITIAL_STATE = {state_json};
     renderInspector();
     renderShipyard();
     renderLog();
+    ensurePoll();
   }}
 
   canvas.addEventListener("click", (ev) => {{
-    if (state.status.over) return;
+    if (state.status.over || state.status.thinking) return;
     const rect = canvas.getBoundingClientRect();
     const pos = canvasToGrid(ev.clientX - rect.left, ev.clientY - rect.top, state.status.width, state.status.height);
     if (!pos) return;
@@ -1492,6 +1663,7 @@ const INITIAL_STATE = {state_json};
 
   document.addEventListener("keydown", (ev) => {{
     if (ev.target && ["INPUT", "SELECT", "TEXTAREA"].includes(ev.target.tagName)) return;
+    if (state.status && state.status.thinking) return;
     if (ev.key === "e" || ev.key === "E") {{
       ev.preventDefault();
       if (!state.status.over) sendAction({{ type: "end_turn" }});
@@ -1535,6 +1707,12 @@ const INITIAL_STATE = {state_json};
         pre_fresh_ships = {sid: s.position for sid, s in human.sightings.items() if s.fresh}
         pre_fresh_ports = {pos for pos, s in human.port_sightings.items() if s.fresh}
         pre_own_ports = set(human.owned_port_positions)
+        legal_before = list(self.engine.enumerate_legal(pid))
+        state_before = serialize_engine(self.engine)
+        observations = {
+            str(seat): build_view(self.engine, seat, list(self.engine.enumerate_legal(seat)))
+            for seat in (0, 1)
+        }
 
         move_meta = None
         attack_meta = None
@@ -1582,6 +1760,75 @@ const INITIAL_STATE = {state_json};
                 post_fresh_ports=post_fresh_ports,
                 pre_own_ports=pre_own_ports,
             )
+
+        self._write_decision_log(
+            action,
+            pid,
+            legal=legal_before,
+            state_before=state_before,
+            observations=observations,
+            combat=combat_result(action, attack_meta, self.engine),
+        )
+        if self.over:
+            self._finalize_log(complete=True)
+
+    def close(self, complete=None) -> None:
+        # Flush and close the game log. Marks incomplete unless the game ended.
+        if complete is None:
+            complete = bool(self.over)
+        self._finalize_log(complete=complete)
+
+    def _finalize_log_atexit(self) -> None:
+        try:
+            self._finalize_log(complete=bool(self.over))
+        except Exception:
+            pass
+
+    def _finalize_log(self, *, complete: bool) -> None:
+        log = getattr(self, "game_log", None)
+        if log is None or log.closed:
+            return
+        if complete:
+            if self.engine.winner is not None:
+                reason = "capture"
+            elif self.engine.turn >= self.max_turns:
+                reason = "turn_limit"
+            else:
+                reason = "complete"
+        else:
+            reason = "incomplete"
+        log.write(end_record(self, complete=complete, reason=reason))
+        log._complete = complete
+        log.close()
+
+    def _write_decision_log(
+        self,
+        action: Action,
+        pid: int,
+        *,
+        legal,
+        state_before: dict,
+        observations: dict,
+        combat,
+    ) -> None:
+        log = getattr(self, "game_log", None)
+        if log is None or log.closed:
+            return
+        self._log_steps += 1
+        log.write(
+            decision_record(
+                self,
+                action,
+                pid,
+                legal=legal,
+                state_before=state_before,
+                observations=observations,
+                combat=combat,
+                llm=llm_fields(self._pending_llm_meta),
+                step=self._log_steps,
+            )
+        )
+        self._pending_llm_meta = None
 
     def _log_human_action(
         self,
@@ -1750,10 +1997,139 @@ const INITIAL_STATE = {state_json};
             return random_action(self.engine, pid, self.rng)
         if self.opponent == "scripted":
             return scripted_action(self.engine, pid, self.rng)
+        if self._uses_llm():
+            action, meta = self._decide_llm(pid)
+            self._record_llm_meta(meta)
+            self._log_llm_meta(meta)
+            return action
         assert self.policy is not None
         return policy_action(self.policy, self.engine, pid)
 
+    def _thinking_label(self) -> str:
+        if "inkling" in self.llm_model.lower() or self.opponent == "inkling":
+            return "Inkling thinking…"
+        return "LLM thinking…"
+
+    def _decide_llm(self, pid: int) -> tuple:
+        assert self.llm_client is not None
+        return decide_llm_action(
+            self.engine,
+            pid,
+            self.rng,
+            self.llm_client,
+            temperature=self.llm_temperature,
+        )
+
+    def _accumulate_usage(self, summary: dict) -> None:
+        self.llm_totals["calls"] += 1
+        for key in ("prompt_tokens", "completion_tokens", "reasoning_tokens", "total_tokens"):
+            if key in summary:
+                self.llm_totals[key] = int(self.llm_totals.get(key, 0)) + int(summary[key])
+        if "cost_usd" in summary:
+            self.llm_totals["cost_usd"] = float(self.llm_totals.get("cost_usd", 0.0)) + float(summary["cost_usd"])
+
+    def _record_llm_meta(self, meta: dict) -> None:
+        self._pending_llm_meta = meta
+        summary = dict(meta.get("usage_summary") or {})
+        latency = meta.get("latency_s")
+        if latency is not None:
+            summary["latency_s"] = latency
+        self.last_llm = {
+            "latency_s": latency,
+            "fallback": bool(meta.get("fallback")),
+            "passed": bool(meta.get("passed")),
+            "error": meta.get("error") or "",
+            "reasoning": (meta.get("reasoning") or "")[:240],
+            **{k: summary[k] for k in (
+                "prompt_tokens", "completion_tokens", "reasoning_tokens",
+                "total_tokens", "cost_usd",
+            ) if k in summary},
+        }
+        self._accumulate_usage(summary)
+
+    def _log_llm_meta(self, meta: dict) -> None:
+        summary = dict(meta.get("usage_summary") or {})
+        line = format_usage_line(summary, meta.get("latency_s"))
+        name = "Inkling" if "inkling" in self.llm_model.lower() or self.opponent == "inkling" else "LLM"
+        bits = [name]
+        if meta.get("passed"):
+            bits.append("API error, passed the turn")
+            if meta.get("error"):
+                bits.append(str(meta["error"]))
+        elif meta.get("fallback"):
+            bits.append("invalid reply, used a random legal move")
+        reason = (meta.get("reasoning") or "").strip()
+        if reason and not meta.get("fallback"):
+            bits.append(reason[:160])
+        if line:
+            bits.append(line)
+        kind = "error" if meta.get("passed") or meta.get("error") else "llm"
+        self._add_log(": ".join([bits[0], " · ".join(bits[1:])]) if len(bits) > 1 else bits[0], kind=kind)
+
+    def _start_llm_worker(self) -> None:
+        if self.thinking or self.over or self.engine.current_player == self.human_side:
+            return
+        self.thinking = True
+        self.thinking_started = time.monotonic()
+        self.thinking_message = self._thinking_label()
+        self._llm_turn_decisions = 0
+        worker = threading.Thread(target=self._llm_worker, name="llm-turn", daemon=True)
+        self._worker = worker
+        worker.start()
+
+    def _llm_worker(self) -> None:
+        try:
+            guard = 0
+            while guard < self.step_budget:
+                with self.lock:
+                    if self.over or self.engine.current_player == self.human_side:
+                        break
+                    pid = self.engine.current_player
+                    self.thinking_message = (
+                        f"{self._thinking_label()} (decision {self._llm_turn_decisions + 1} this turn)"
+                    )
+                try:
+                    action, meta = self._decide_llm(pid)
+                except Exception as exc:
+                    action = EndTurnAction()
+                    meta = {
+                        "fallback": True,
+                        "passed": True,
+                        "error": safe_error(exc),
+                        "latency_s": 0,
+                        "usage_summary": {},
+                        "reasoning": "",
+                    }
+                with self.lock:
+                    if self.over or self.engine.current_player != pid:
+                        break
+                    self._llm_turn_decisions += 1
+                    self._record_llm_meta(meta)
+                    self._apply(action, pid)
+                    self._log_llm_meta(meta)
+                    if self.over or self.engine.current_player == self.human_side:
+                        break
+                guard += 1
+            with self.lock:
+                if (
+                    not self.over
+                    and self.engine.current_player != self.human_side
+                    and guard >= self.step_budget
+                ):
+                    self._apply(EndTurnAction(), self.engine.current_player)
+                    # _apply already logs the action; keep a budget note if still to move.
+                    if not self.over and self.engine.current_player != self.human_side:
+                        self._add_log("Opponent: forced end turn (step budget)", kind="turn")
+        finally:
+            with self.lock:
+                self.thinking = False
+                self.thinking_message = ""
+                self.thinking_started = None
+
     def _play_opponent_until_human(self) -> None:
+        if self._uses_llm():
+            self._start_llm_worker()
+            return
         guard = 0
         while (
             not self.over
@@ -1767,5 +2143,6 @@ const INITIAL_STATE = {state_json};
             and self.engine.current_player != self.human_side
             and guard >= self.step_budget
         ):
-            self.engine.step(EndTurnAction())
-            self._add_log("Opponent: forced end turn (step budget)", kind="turn")
+            self._apply(EndTurnAction(), self.engine.current_player)
+            if not self.over and self.engine.current_player != self.human_side:
+                self._add_log("Opponent: forced end turn (step budget)", kind="turn")
