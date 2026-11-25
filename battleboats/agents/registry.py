@@ -8,9 +8,9 @@ Stateless agents wrap their functions; ``fog_commander`` gets a fresh
 from __future__ import annotations
 
 import random
-from typing import Callable, Dict
+from typing import Callable, Dict, Optional
 
-from battleboats.agents.fog_commander import FogCommander
+from battleboats.agents.fog_commander import DOCTRINES, FogCommander, FogCommanderConfig
 from battleboats.agents.random_agent import random_action
 from battleboats.agents.scripted import scripted_action
 from battleboats.agents.tactical import tactical_scripted_action
@@ -35,8 +35,16 @@ AGENT_KINDS: Dict[str, Callable[[], object]] = {
 }
 
 
-def make_agent(kind: str):
-    try:
-        return AGENT_KINDS[kind]()
-    except KeyError:
-        raise ValueError(f"unknown agent kind {kind!r}; choose from {sorted(AGENT_KINDS)}") from None
+def make_agent(kind: str, *, doctrine: Optional[str] = None):
+    """Build one agent. ``doctrine`` forces a Fog Commander doctrine (ignored for other kinds)."""
+    if kind not in AGENT_KINDS:
+        raise ValueError(f"unknown agent kind {kind!r}; choose from {sorted(AGENT_KINDS)}")
+    if kind == "fog_commander":
+        if doctrine is None:
+            return FogCommander()
+        if doctrine not in DOCTRINES:
+            raise ValueError(f"unknown doctrine {doctrine!r}; choose from {list(DOCTRINES)}")
+        return FogCommander(FogCommanderConfig(doctrine=doctrine))
+    if doctrine is not None:
+        raise ValueError(f"doctrine= is only valid for fog_commander, not {kind!r}")
+    return AGENT_KINDS[kind]()

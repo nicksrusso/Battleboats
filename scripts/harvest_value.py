@@ -1,6 +1,6 @@
 """Harvest fogged observations, terminal outcomes, and replay traces for value-net training.
 
-Plays games (default 48x24, 80% fog_commander self-play + 20% fog_commander vs
+Plays games (default 48x24, fog_commander self-play and optional vs
 scripted with seats alternated). At every decision, records BOTH seats'
 fog-of-war observations from ``battleboats.envs.observation`` (post-fix
 coastline encoding), paired with each seat's final outcome (+1/-1/0),
@@ -38,7 +38,7 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
-from battleboats.agents.fog_commander import engine_accepts  # noqa: E402
+from battleboats.agents.fog_commander import all_doctrine_pairs, engine_accepts  # noqa: E402
 from battleboats.agents.registry import AGENT_KINDS, make_agent  # noqa: E402
 from battleboats.core.actions import (  # noqa: E402
     Action,
@@ -184,7 +184,8 @@ def _play_and_save(job: Dict[str, Any]) -> Dict[str, Any]:
         engine._refresh_sightings()
 
         rngs = {0: random.Random(seed * 2 + 1), 1: random.Random(seed * 2 + 2)}
-        agents = {pid: make_agent(actors[pid]) for pid in (0, 1)}
+        forced = job.get("doctrines") or {}
+        agents = {pid: make_agent(actors[pid], doctrine=forced.get(pid) or forced.get(str(pid))) for pid in (0, 1)}
 
         tokens_list: List[np.ndarray] = []
         globals_list: List[np.ndarray] = []
@@ -322,6 +323,32 @@ def _play_and_save(job: Dict[str, Any]) -> Dict[str, Any]:
         }
 
 
+def _doctrines_for_job(kind: str, i: int, actors: Dict[int, str], schedule: str, rng: random.Random) -> Optional[Dict[int, str]]:
+    """Assign a Fog Commander doctrine to each FC seat.
+
+    ``cycle``: walk all 36 ordered (seat0, seat1) pairs evenly (self-play), or
+    walk the 6 doctrines evenly on the FC seat (vs scripted/random).
+    ``random``: uniform independent draw per FC seat, recorded on the job.
+    ``none``: leave unset; FogCommander samples internally when it first acts.
+    """
+    if schedule == "none":
+        return None
+    pairs = all_doctrine_pairs()
+    names = [a for a, _ in pairs[::6]]  # DOCTRINE_NAMES order
+    out: Dict[int, str] = {}
+    if kind == "self_play":
+        if schedule == "cycle":
+            a, b = pairs[i % len(pairs)]
+            out = {0: a, 1: b}
+        else:
+            out = {0: rng.choice(names), 1: rng.choice(names)}
+    else:
+        fc_seats = [pid for pid, k in actors.items() if k == "fog_commander"]
+        for pid in fc_seats:
+            out[pid] = names[i % len(names)] if schedule == "cycle" else rng.choice(names)
+    return out or None
+
+
 def build_schedule(
     *,
     map_spec: str,
@@ -332,58 +359,41 @@ def build_schedule(
     gamma: float,
     out_dir: Path,
     commit: str,
+    doctrine_schedule: str = "cycle",
 ) -> List[Dict[str, Any]]:
+    if doctrine_schedule not in ("cycle", "random", "none"):
+        raise ValueError(f"doctrine_schedule must be cycle, random, or none; got {doctrine_schedule!r}")
     jobs: List[Dict[str, Any]] = []
     idx = 0
-    for i in range(n_self_play):
-        jobs.append(
-            {
-                "game_idx": idx,
-                "kind": "self_play",
-                "seed": seed + i,
-                "map_spec": map_spec,
-                "actors": {0: "fog_commander", 1: "fog_commander"},
-                "gamma": gamma,
-                "out_root": str(out_dir),
-                "out_path": str(_shard_path(out_dir, idx)),
-                "commit": commit,
-            }
-        )
+    rng = random.Random(seed + 17)
+
+    def _job(kind, i, actors, seed_i):
+        nonlocal idx
+        rec = {
+            "game_idx": idx,
+            "kind": kind,
+            "seed": seed_i,
+            "map_spec": map_spec,
+            "actors": actors,
+            "gamma": gamma,
+            "out_root": str(out_dir),
+            "out_path": str(_shard_path(out_dir, idx)),
+            "commit": commit,
+        }
+        docs = _doctrines_for_job(kind, i, actors, doctrine_schedule, rng)
+        if docs is not None:
+            rec["doctrines"] = docs
+        jobs.append(rec)
         idx += 1
+
+    for i in range(n_self_play):
+        _job("self_play", i, {0: "fog_commander", 1: "fog_commander"}, seed + i)
     for i in range(n_vs_scripted):
         fc_seat = i % 2
-        actors = {fc_seat: "fog_commander", 1 - fc_seat: "scripted"}
-        jobs.append(
-            {
-                "game_idx": idx,
-                "kind": "vs_scripted",
-                "seed": seed + 100_000 + i,
-                "map_spec": map_spec,
-                "actors": actors,
-                "gamma": gamma,
-                "out_root": str(out_dir),
-                "out_path": str(_shard_path(out_dir, idx)),
-                "commit": commit,
-            }
-        )
-        idx += 1
+        _job("vs_scripted", i, {fc_seat: "fog_commander", 1 - fc_seat: "scripted"}, seed + 100_000 + i)
     for i in range(n_vs_random):
         fc_seat = i % 2
-        actors = {fc_seat: "fog_commander", 1 - fc_seat: "random"}
-        jobs.append(
-            {
-                "game_idx": idx,
-                "kind": "vs_random",
-                "seed": seed + 200_000 + i,
-                "map_spec": map_spec,
-                "actors": actors,
-                "gamma": gamma,
-                "out_root": str(out_dir),
-                "out_path": str(_shard_path(out_dir, idx)),
-                "commit": commit,
-            }
-        )
-        idx += 1
+        _job("vs_random", i, {fc_seat: "fog_commander", 1 - fc_seat: "random"}, seed + 200_000 + i)
     return jobs
 
 
@@ -464,12 +474,26 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--map", default="48x24", help="Map preset (default: 48x24)")
     ap.add_argument("--self-play", type=int, default=4000)
+    ap.add_argument(
+        "--games-per-matchup",
+        type=int,
+        default=0,
+        help="If >0, set --self-play to 36 times this (exactly this many games for each "
+        "ordered Fog Commander doctrine pair). Overrides --self-play.",
+    )
     ap.add_argument("--vs-scripted", type=int, default=1000)
     ap.add_argument("--vs-random", type=int, default=0)
     ap.add_argument("--seed", type=int, default=0)
     ap.add_argument("--gamma", type=float, default=GAMMA_DEFAULT)
     ap.add_argument("--workers", type=int, default=10)
     ap.add_argument("--log-every", type=int, default=25)
+    ap.add_argument(
+        "--doctrine-schedule",
+        choices=("cycle", "random", "none"),
+        default="cycle",
+        help="How to assign Fog Commander doctrines per seat: cycle all 36 ordered "
+        "pairs evenly (default), random uniform per seat, or leave FogCommander to sample.",
+    )
     ap.add_argument("--resume", action="store_true")
     ap.add_argument(
         "--output-dir",
@@ -477,6 +501,9 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         default=Path("runs/value_harvest_48x24_v0.5.0"),
     )
     args = ap.parse_args(argv)
+    if args.games_per_matchup:
+        from battleboats.agents.fog_commander import all_doctrine_pairs as _pairs
+        args.self_play = len(_pairs()) * int(args.games_per_matchup)
 
     out_dir = args.output_dir
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -490,6 +517,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         gamma=args.gamma,
         out_dir=out_dir,
         commit=commit,
+        doctrine_schedule=args.doctrine_schedule,
     )
     total = len(jobs)
     results_by_idx: Dict[int, Dict[str, Any]] = {}
@@ -507,11 +535,13 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     run_cfg = {
         "map": args.map,
         "self_play": args.self_play,
+        "games_per_matchup": args.games_per_matchup or None,
         "vs_scripted": args.vs_scripted,
         "vs_random": args.vs_random,
         "seed": args.seed,
         "gamma": args.gamma,
         "workers": args.workers,
+        "doctrine_schedule": args.doctrine_schedule,
         "obs_encoding": OBS_ENCODING_VERSION,
         "commit": commit,
         "total_games": total,
@@ -521,7 +551,8 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     print(
         f"Starting value harvest: dir={out_dir} map={args.map} total={total} "
         f"(self_play={args.self_play}, vs_scripted={args.vs_scripted}, vs_random={args.vs_random}) "
-        f"workers={args.workers} resumed={len(results_by_idx)} pending={len(pending)} "
+        f"workers={args.workers} doctrine_schedule={args.doctrine_schedule} "
+        f"resumed={len(results_by_idx)} pending={len(pending)} "
         f"obs={OBS_ENCODING_VERSION}",
         flush=True,
     )

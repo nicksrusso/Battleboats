@@ -74,3 +74,31 @@ HIP_VISIBLE_DEVICES=0 poetry run python scripts/train_value.py --config configs/
 ```
 
 (`HIP_VISIBLE_DEVICES=0` pins an AMD box to the discrete GPU when an iGPU is also visible.)
+
+## Mixed-doctrine harvest and later-position weighting
+
+`scripts/harvest_value.py --games-per-matchup 2000 --doctrine-schedule cycle`
+plays 72,000 Fog Commander self-play games on 48x24: exactly 2,000 games for
+each of the 36 ordered doctrine pairs (Raider Blitz, Economic Boom, Wolfpack
+Stealth, Capital Armada, Island Hopper, Balanced Adaptive, both seats). Each
+shard records the doctrine used by each seat. No scripted or random opponent.
+
+`configs/value_net_v0.5.0_mixed.yaml` is the default training recipe for that
+harvest. It uses the **large** encoder (574,210 params, `d_model=128`, 4 layers,
+8 heads, dropout 0.2) on GPU (`train.device: cuda`, launch with
+`HIP_VISIBLE_DEVICES=0` on AMD ROCm). Point `--config` at
+`configs/value_net_v0.5.0.yaml` (and shrink the `model:` block) to train the
+small 80,898-param net on the same data.
+
+Later positions are weighted more heavily, three ways, all configurable:
+
+* Cache pool (`data.sample_weight_floor` / `sample_weight_power`, default in
+  this recipe 0.25 / 1.0): of each game's rows, the 128 kept positions are
+  drawn with probability `0.25 + 0.75 * (turn / game_turns)`.
+* Per-epoch sample (`k_per_game: 64`): the same curve, without replacement.
+* Training loss: the same curve (or `train.loss_weight_*` if set), then
+  renormalized so the mean weight in a batch is 1, so the learning rate scale
+  does not change. Early positions are still trained, just with less weight.
+
+`floor=1` recovers uniform sampling and unweighted loss (the older configs).
+Weight decay is `train.weight_decay` (0.02 here); dropout is `model.dropout`.

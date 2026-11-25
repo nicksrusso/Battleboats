@@ -39,6 +39,8 @@ def main(argv=None) -> int:
         test_frac=d["test_frac"],
         workers=a.workers or d.get("cache_workers", 2),
         max_games=a.max_games,
+        weight_floor=float(d.get("sample_weight_floor", 1.0)),
+        weight_power=float(d.get("sample_weight_power", 1.0)),
     )
     meta["build_seconds"] = round(time.time() - t0, 1)
     print(json.dumps(meta, indent=2))
