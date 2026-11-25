@@ -1,4 +1,4 @@
-"""One local game: human vs tactical, scripted, random, or a policy checkpoint.
+"""One local game: human vs tactical, fog_commander, scripted, random, or a policy checkpoint.
 
 The human sees fog of war strictly per the spotting rules:
 - Own ships and own ports in full.
@@ -25,6 +25,7 @@ from typing import Callable, Dict, List, Optional, Tuple
 
 from battleboats.agents.heuristics import pk
 from battleboats.agents.random_agent import random_action
+from battleboats.agents.fog_commander import fog_commander_action
 from battleboats.agents.scripted import scripted_action
 from battleboats.agents.tactical import tactical_scripted_action
 from battleboats.core.actions import (
@@ -86,6 +87,7 @@ _SHIP_CODE = {
 
 OPPONENT_LABELS = {
     "tactical": "Tactical (fog of war)",
+    "fog_commander": "Fog Commander (fog of war)",
     "scripted": "Scripted baseline (full-information opponent)",
     "random": "Random",
     "checkpoint": "Checkpoint",
@@ -164,7 +166,7 @@ class PlaySession:
         llm_temperature: float = DEFAULT_TEMPERATURE,
         log_dir: Optional[Path] = None,
     ) -> None:
-        if opponent not in ("tactical", "random", "scripted", "checkpoint", "llm", "inkling"):
+        if opponent not in ("tactical", "fog_commander", "random", "scripted", "checkpoint", "llm", "inkling"):
             raise ValueError(f"unknown opponent {opponent!r}")
         if human_side not in (0, 1):
             raise ValueError("human_side must be 0 or 1")
@@ -1993,6 +1995,8 @@ const INITIAL_STATE = {state_json};
         pid = self.engine.current_player
         if self.opponent == "tactical":
             return tactical_scripted_action(self.engine, pid, self.rng)
+        if self.opponent == "fog_commander":
+            return fog_commander_action(self.engine, pid, self.rng)
         if self.opponent == "random":
             return random_action(self.engine, pid, self.rng)
         if self.opponent == "scripted":

@@ -170,6 +170,8 @@ poetry run python scripts/eval_agent.py \
     --checkpoint runs/selfplay/latest.pt --opponent scripted --games 40
 ```
 
+`--opponent fog_commander` (also in `scripts/play.py` and the play UI) is a fog-limited scripted agent with six sampled doctrines, built from the Gemini 4 Carbon pseudocode. It reads only its seat's information. `scripts/eval_fog_commander.py` plays it against itself, scripted, and random, and `scripts/harvest_tactical.py --labeler fog_commander` harvests its decisions. Design, fog leaks found, deviations, and results: `docs/fog_commander.md`.
+
 # Heuristic weights
 
 `battleboats/agents/heuristics.py` loads `runs/weights/v5.json` when that file exists (also the old absolute path on Nick's machine). After `runs/` was deleted, import falls back to a seven-key hand prior with intercept 0 and `econ_value_self` weight 0, which keeps the symmetric-start zero-sum check and the columns in `scripts/play_human_vs_random.py`. Put `v5.json` back at `runs/weights/v5.json` to restore the fitted weights.
