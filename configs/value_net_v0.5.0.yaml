@@ -1,0 +1,45 @@
+# Value net v0.5.0 — fogged 76-dim tokens + 8 globals -> V(s) in [-1, 1]
+# (outcome from the observing seat's view). See docs/value_net.md.
+version: "0.5.0"
+
+data:
+  harvest_dir: runs/value_harvest_48x24_fc_v0.5.0
+  cache_dir: runs/value_harvest_48x24_fc_v0.5.0/value_cache_k64   # built once by build_value_cache
+  k_pool: 64            # positions kept per game in the cache (seeded per game)
+  k_per_game: 32        # positions drawn per train game per epoch (equal game weight)
+  val_frac: 0.05        # game-level split by sha1(seed)
+  test_frac: 0.05
+  include_draws: false  # task.md §1.2: first run trains on decisive games only
+  seed: 0
+  cache_workers: 8
+
+model:
+  d_model: 64
+  nhead: 4
+  num_layers: 2
+  dim_feedforward: 128
+  dropout: 0.1
+  aux_head: true        # discounted-return head (outcome * 0.99^decisions_left)
+
+train:
+  epochs: 40
+  batch_size: 256
+  lr: 0.0003
+  weight_decay: 0.01
+  warmup_steps: 300
+  grad_clip: 1.0
+  aux_weight: 0.25
+  torch_threads: 14
+  num_workers: 2        # DataLoader workers (collate + memmap reads)
+  eval_batch_size: 512
+  log_every: 100
+  max_steps_per_epoch: 0  # 0 = full epoch
+  seed: 0
+
+eval:
+  baseline_fit_rows: 60000
+  min_acc_margin: 0.02  # acc must exceed 0.5 by this much
+  brier_margin: 0.005   # Brier must beat coin (0.25) and best baseline by this much
+  gate_baselines: [coin_flip, constant_prior, seat_prior, logistic_simple]  # task.md §1.2; logistic_rich reported only
+
+out_root: runs/value_net_v0.5.0
