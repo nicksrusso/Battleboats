@@ -1,0 +1,21 @@
+[package]
+name = "battleboats-py"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+rust-version.workspace = true
+description = "PyO3 extension module for the Battleboats Rust core"
+
+[lib]
+name = "battleboats_core"
+crate-type = ["cdylib"]
+
+[dependencies]
+bb_engine = { package = "battleboats-core", path = "../battleboats-core" }
+pyo3 = { version = "0.23.5", features = ["auto-initialize"] }
+serde_json = "1.0"
+
+[features]
+# Enabled by maturin. Left off for `cargo test`, which must link libpython.
+extension-module = ["pyo3/extension-module"]

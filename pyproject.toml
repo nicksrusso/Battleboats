@@ -30,6 +30,12 @@ pettingzoo = "^1.26.1"
 scikit-learn = "^1.8.0"
 wandb = "^0.27.0"
 weave = "^0.52.42"
+# Optional. `poetry install -E rust` installs maturin; it does not compile
+# the extension by itself. Build with `poetry run maturin develop`.
+maturin = { version = ">=1.7,<2.0", optional = true }
+
+[tool.poetry.extras]
+rust = ["maturin"]
 
 [tool.poetry.group.dev.dependencies]
 black = "^26.3.1"
