@@ -234,3 +234,55 @@ def test_train_early_stop_and_device_cpu(tiny_cache, tmp_path):
     rows = [ln for ln in (run / "metrics.csv").read_text().strip().splitlines() if ln]
     assert 2 <= len(rows) <= 3  # header + 1 or 2 epoch rows
     assert (run / "summary.json").exists()
+
+
+
+def test_position_weight_uniform_and_later_bias():
+    from battleboats.training.value_data import position_weight
+
+    frac = np.array([0.0, 0.5, 1.0])
+    assert np.allclose(position_weight(frac, floor=1.0, power=1.0), 1.0)
+    w = position_weight(frac, floor=0.25, power=1.0)
+    assert np.allclose(w, [0.25, 0.625, 1.0])
+    assert w[0] < w[1] < w[2]
+    tw = position_weight(torch.tensor(frac, dtype=torch.float32), floor=0.25, power=1.0)
+    assert torch.allclose(tw, torch.tensor([0.25, 0.625, 1.0]))
+
+
+def test_epoch_sampling_biases_later_positions(tiny_cache):
+    from battleboats.training.value_data import ValueCache, ValueDataset
+
+    _, cdir, _ = tiny_cache
+    cache = ValueCache(cdir)
+    # Need a split with enough rows per game to subsample.
+    ds = ValueDataset(cache, "train", include_draws=True, k_per_game=2, seed=0,
+                      weight_floor=0.05, weight_power=2.0)
+    if ds.n_games == 0 or len(ds.all_rows) < 4:
+        pytest.skip("not enough train rows")
+    uniform = []
+    weighted = []
+    for ep in range(40):
+        ds.weight_floor, ds.weight_power = 1.0, 1.0
+        ds.set_epoch(ep)
+        uniform.extend(cache.turn_frac[ds.rows].tolist())
+        ds.weight_floor, ds.weight_power = 0.05, 2.0
+        ds.set_epoch(ep + 1000)
+        weighted.extend(cache.turn_frac[ds.rows].tolist())
+    # Later-biased draws should have a higher mean turn fraction than uniform.
+    assert np.mean(weighted) >= np.mean(uniform) - 1e-9
+    # And on this tiny set, if there is spread, the bias should show up.
+    if np.std(cache.turn_frac[ds.all_rows]) > 0.05:
+        assert np.mean(weighted) > np.mean(uniform)
+
+
+def test_mixed_config_weighting_and_large_model():
+    import yaml
+    from battleboats.training.value_net import ValueNet, count_params
+
+    cfg = yaml.safe_load((Path(__file__).resolve().parents[1] / "configs" / "value_net_v0.5.0_mixed.yaml").read_text())
+    assert cfg["data"]["sample_weight_floor"] < 1.0
+    assert cfg["data"]["k_per_game"] >= 64 and cfg["data"]["k_pool"] >= 64
+    assert cfg["train"]["loss_weight_floor"] < 1.0
+    assert cfg["train"]["device"] == "cuda"
+    assert cfg["model"]["dropout"] >= 0.1 and cfg["train"]["weight_decay"] > 0
+    assert count_params(ValueNet(**cfg["model"])) == 574210

@@ -1,0 +1,55 @@
+# Default recipe for the 72k mixed-doctrine harvest (2,000 games x 36 ordered
+# Fog Commander matchups). Uses the large encoder (574,210 params) on GPU
+# (torch.cuda / AMD ROCm). To compare the small 80,898-param net, copy the
+# model: block from configs/value_net_v0.5.0.yaml and drop train.device to cpu
+# or keep cuda. See docs/value_net.md.
+version: "0.5.0"
+
+data:
+  harvest_dir: runs/value_harvest_48x24_fc_mixed_72k_v0.5.0
+  cache_dir: runs/value_harvest_48x24_fc_mixed_72k_v0.5.0/value_cache_k128
+  k_pool: 128           # later-biased pool of positions kept per game
+  k_per_game: 64        # positions drawn per train game per epoch (later-biased)
+  sample_weight_floor: 0.25   # early-game relative weight; 1.0 at the last turn
+  sample_weight_power: 1.0    # 1 = linear in turn/total_turns; >1 skews later
+  val_frac: 0.05
+  test_frac: 0.05
+  include_draws: false
+  seed: 0
+  cache_workers: 8
+
+model:
+  d_model: 128
+  nhead: 8
+  num_layers: 4
+  dim_feedforward: 256
+  dropout: 0.2
+  aux_head: true
+
+train:
+  epochs: 40
+  batch_size: 512
+  lr: 0.0003
+  weight_decay: 0.02
+  warmup_steps: 200
+  grad_clip: 1.0
+  aux_weight: 0.25
+  loss_weight_floor: 0.25   # same curve as sampling; loss is mean-normalized
+  loss_weight_power: 1.0
+  torch_threads: 4
+  num_workers: 2
+  eval_batch_size: 1024
+  log_every: 50
+  max_steps_per_epoch: 0
+  device: cuda
+  patience: 8
+  min_delta: 0.0005
+  seed: 0
+
+eval:
+  baseline_fit_rows: 60000
+  min_acc_margin: 0.02
+  brier_margin: 0.005
+  gate_baselines: [coin_flip, constant_prior, seat_prior, logistic_simple]
+
+out_root: runs/value_net_v0.5.0_mixed

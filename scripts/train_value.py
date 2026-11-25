@@ -29,7 +29,7 @@ import torch  # noqa: E402
 import yaml  # noqa: E402
 from torch.utils.data import DataLoader  # noqa: E402
 
-from battleboats.training.value_data import ValueCache, ValueDataset, build_value_cache, collate_value, value_metrics  # noqa: E402
+from battleboats.training.value_data import ValueCache, ValueDataset, build_value_cache, collate_value, position_weight, value_metrics  # noqa: E402
 from battleboats.training.value_eval import Baselines, evaluate_split, format_report, move_batch, predict, resolve_device  # noqa: E402
 from battleboats.training.value_net import ValueNet, count_params, save_value_checkpoint  # noqa: E402
 
@@ -106,13 +106,21 @@ def main(argv=None) -> int:
     if not (cache_dir / "cache_meta.json").exists():
         print(f"[data] building cache {cache_dir} from {dc['harvest_dir']}", flush=True)
         build_value_cache(dc["harvest_dir"], cache_dir, k_pool=dc["k_pool"], seed=dc.get("seed", 0),
-                          val_frac=dc["val_frac"], test_frac=dc["test_frac"], workers=dc.get("cache_workers", 2))
+                          val_frac=dc["val_frac"], test_frac=dc["test_frac"], workers=dc.get("cache_workers", 2),
+                          weight_floor=float(dc.get("sample_weight_floor", 1.0)),
+                          weight_power=float(dc.get("sample_weight_power", 1.0)))
     cache = ValueCache(cache_dir)
     inc = bool(dc.get("include_draws", False))
-    train_ds = ValueDataset(cache, "train", include_draws=inc, k_per_game=int(dc["k_per_game"]), seed=int(dc.get("seed", 0)))
+    sw_floor = float(dc.get("sample_weight_floor", 1.0))
+    sw_power = float(dc.get("sample_weight_power", 1.0))
+    lw_floor = float(tc.get("loss_weight_floor", sw_floor))
+    lw_power = float(tc.get("loss_weight_power", sw_power))
+    train_ds = ValueDataset(cache, "train", include_draws=inc, k_per_game=int(dc["k_per_game"]), seed=int(dc.get("seed", 0)),
+                            weight_floor=sw_floor, weight_power=sw_power)
     val_ds = ValueDataset(cache, "val", include_draws=inc, k_per_game=0)
     print(f"[data] cache {cache.meta['games']} games / {len(cache):,} pooled rows; split games {cache.meta['split_games']}; "
-          f"train {train_ds.n_games} games x<= {dc['k_per_game']} = {len(train_ds):,} rows/epoch; val {val_ds.n_games} games / {len(val_ds):,} rows", flush=True)
+          f"train {train_ds.n_games} games x<= {dc['k_per_game']} = {len(train_ds):,} rows/epoch; val {val_ds.n_games} games / {len(val_ds):,} rows; "
+          f"sample_w floor={sw_floor} power={sw_power}; loss_w floor={lw_floor} power={lw_power}", flush=True)
 
     model = ValueNet(**mc)
     n_params = count_params(model)
@@ -169,11 +177,13 @@ def main(argv=None) -> int:
                 pg["lr"] = lr_at(step, total_steps, float(tc["lr"]), int(tc.get("warmup_steps", 0)))
             b = move_batch(b, device)
             v, aux = model.forward_all(b["tokens"], b["pad_mask"], b["globals"])
-            mse = torch.mean((v - b["target"]) ** 2)
+            w = position_weight(b["turn_frac"], lw_floor, lw_power)
+            w = w / w.mean().clamp(min=1e-6)
+            mse = torch.mean(w * (v - b["target"]) ** 2)
             loss = mse
-            aux_l = torch.zeros(())
+            aux_l = torch.zeros((), device=device)
             if aux is not None and aux_w > 0:
-                aux_l = torch.mean((aux - b["returns"]) ** 2)
+                aux_l = torch.mean(w * (aux - b["returns"]) ** 2)
                 loss = loss + aux_w * aux_l
             opt.zero_grad(set_to_none=True)
             loss.backward()

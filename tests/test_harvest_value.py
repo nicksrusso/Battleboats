@@ -83,3 +83,69 @@ def test_harvest_value_records_both_seats_outcomes_and_replay(tmp_path: Path) ->
         for s in (0, 1):
             obs = build_observation(eng, s)
             assert obs["entity_tokens"].shape[1] == TOKEN_DIM
+
+
+def test_build_schedule_cycles_all_36_pairs_evenly():
+    from collections import Counter
+
+    from battleboats.agents.fog_commander import DOCTRINE_NAMES, all_doctrine_pairs
+    from scripts.harvest_value import build_schedule
+
+    pairs = all_doctrine_pairs()
+    assert len(pairs) == 36 and len(DOCTRINE_NAMES) == 6
+    assert len(set(pairs)) == 36
+
+    jobs = build_schedule(
+        map_spec="48x24",
+        n_self_play=72,  # exactly 2 of each pair
+        n_vs_scripted=0,
+        n_vs_random=0,
+        seed=0,
+        gamma=0.99,
+        out_dir=Path("/tmp/unused"),
+        commit="test",
+        doctrine_schedule="cycle",
+    )
+    assert len(jobs) == 72
+    counts = Counter((j["doctrines"][0], j["doctrines"][1]) for j in jobs)
+    assert set(counts) == set(pairs)
+    assert set(counts.values()) == {2}
+    # First 36 jobs are one full pass in order.
+    assert [(j["doctrines"][0], j["doctrines"][1]) for j in jobs[:36]] == list(pairs)
+
+
+def test_forced_doctrine_is_recorded_per_seat(tmp_path: Path) -> None:
+    from battleboats.agents.fog_commander import all_doctrine_pairs
+
+    pairs = all_doctrine_pairs()
+    out_dir = tmp_path / "harvest"
+    rc = harvest_main(
+        [
+            "--map", "16x8",
+            "--self-play", "3",
+            "--vs-scripted", "0",
+            "--doctrine-schedule", "cycle",
+            "--workers", "1",
+            "--log-every", "3",
+            "--seed", "11",
+            "--output-dir", str(out_dir),
+        ]
+    )
+    assert rc == 0
+    manifest = json.loads((out_dir / "manifest.json").read_text())
+    assert manifest["n_ok"] == 3
+    # doctrine_schedule is on run_config, not always copied onto the manifest summary
+    for i, rec in enumerate(sorted(manifest["games"], key=lambda g: g["game_idx"])):
+        expected = {"0": pairs[i][0], "1": pairs[i][1]}
+        # progress/manifest may stringify keys
+        got = {str(k): v for k, v in rec["doctrines"].items()}
+        assert got == expected, (got, expected)
+
+
+def test_make_agent_forces_doctrine_per_instance():
+    from battleboats.agents.registry import make_agent
+
+    a = make_agent("fog_commander", doctrine="RAIDER_BLITZ")
+    b = make_agent("fog_commander", doctrine="ECONOMIC_BOOM")
+    assert a.config.doctrine == "RAIDER_BLITZ"
+    assert b.config.doctrine == "ECONOMIC_BOOM"

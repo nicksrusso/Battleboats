@@ -155,6 +155,11 @@ DOCTRINES: Dict[str, Doctrine] = {
 DOCTRINE_NAMES: Tuple[str, ...] = tuple(DOCTRINES)
 
 
+def all_doctrine_pairs() -> Tuple[Tuple[str, str], ...]:
+    """All 36 ordered pairs (including same-doctrine), seat 0 x seat 1."""
+    return tuple((a, b) for a in DOCTRINE_NAMES for b in DOCTRINE_NAMES)
+
+
 @dataclass
 class FogCommanderConfig:
     max_steps_per_turn: int = 250

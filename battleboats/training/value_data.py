@@ -93,20 +93,44 @@ def list_harvest_games(harvest_dir) -> List[Dict]:
     return games
 
 
-def _pool_rows(n_rows: int, k_pool: int, rng: np.random.Generator) -> np.ndarray:
+def position_weight(turn_frac, floor: float = 1.0, power: float = 1.0):
+    """Per-position weight from game progress (turn / game length).
+
+    ``w = floor + (1 - floor) * clip(turn_frac, 0, 1) ** power``.
+    ``floor=1`` is uniform (backward compatible). ``floor=0.25, power=1`` is
+    linear from 0.25 early to 1.0 at the end, so later positions count more
+    while early ones are still seen. Accepts numpy arrays or torch tensors.
+    """
+    floor, power = float(floor), float(power)
+    if isinstance(turn_frac, torch.Tensor):
+        f = turn_frac.clamp(0, 1)
+        return floor + (1.0 - floor) * torch.pow(f, power)
+    f = np.clip(np.asarray(turn_frac, dtype=np.float64), 0.0, 1.0)
+    return floor + (1.0 - floor) * np.power(f, power)
+
+
+def _pool_rows(n_rows: int, k_pool: int, rng: np.random.Generator, weights=None) -> np.ndarray:
     if k_pool <= 0 or n_rows <= k_pool:
         return np.arange(n_rows)
-    return np.sort(rng.choice(n_rows, size=k_pool, replace=False))
+    p = None
+    if weights is not None:
+        w = np.maximum(np.asarray(weights, dtype=np.float64), 0.0)
+        s = w.sum()
+        if s > 0 and np.isfinite(s):
+            p = w / s
+    return np.sort(rng.choice(n_rows, size=k_pool, replace=False, p=p))
 
 
 def _extract_game(args) -> Optional[Dict]:
-    path, game_rec, k_pool, base_seed = args
+    path, game_rec, k_pool, base_seed, weight_floor, weight_power = args
     try:
         with np.load(path, allow_pickle=False) as z:
             rs = z["row_splits"].astype(np.int64)
             n = len(rs) - 1
             rng = np.random.default_rng([int(base_seed), int(game_rec["game_idx"])])
-            idx = _pool_rows(n, k_pool, rng)
+            turns = max(1, int(game_rec.get("turns", 1)))
+            frac = np.clip(z["turn"].astype(np.float64) / turns, 0.0, 1.0)
+            idx = _pool_rows(n, k_pool, rng, weights=position_weight(frac, weight_floor, weight_power))
             tok = z["tokens_data"]
             pieces = [tok[rs[i] : rs[i + 1]] for i in idx]
             lens = np.array([len(p) for p in pieces], dtype=np.int64)
@@ -134,6 +158,8 @@ def build_value_cache(
     workers: int = 2,
     max_games: Optional[int] = None,
     log_every: int = 500,
+    weight_floor: float = 1.0,
+    weight_power: float = 1.0,
 ) -> Dict:
     """Read every completed shard once and write the memmap cache. Returns cache_meta."""
     harvest_dir, cache_dir = Path(harvest_dir), Path(cache_dir)
@@ -141,7 +167,7 @@ def build_value_cache(
     games = list_harvest_games(harvest_dir)
     if max_games is not None:
         games = games[: int(max_games)]
-    jobs = [(str(harvest_dir / g["path"]), g, k_pool, seed) for g in games]
+    jobs = [(str(harvest_dir / g["path"]), g, k_pool, seed, float(weight_floor), float(weight_power)) for g in games]
 
     tok_path = cache_dir / "tokens.f16.tmp"
     lens_all, glob_all, out_all, ret_all, seat_all, turn_all, frac_all, game_all = ([] for _ in range(8))
@@ -158,7 +184,7 @@ def build_value_cache(
                 yield from pool.imap(_extract_game, jobs, chunksize=4)
 
     with tok_path.open("wb") as fh:
-        for (path, g, _, _), res in zip(jobs, _iter()):
+        for (path, g, *_), res in zip(jobs, _iter()):
             if res is None or "error" in res:
                 errors.append(res["error"] if res else path)
                 continue
@@ -211,6 +237,8 @@ def build_value_cache(
     meta = {
         "harvest_dir": str(harvest_dir),
         "k_pool": k_pool,
+        "weight_floor": float(weight_floor),
+        "weight_power": float(weight_power),
         "seed": seed,
         "val_frac": val_frac,
         "test_frac": test_frac,
@@ -279,11 +307,14 @@ class ValueDataset(Dataset):
     """Rows of one split. ``k_per_game`` > 0: equal-weight draws per game per epoch
     (call ``set_epoch``); 0: every pooled row (use for eval)."""
 
-    def __init__(self, cache: ValueCache, split: str, include_draws: bool = False, k_per_game: int = 0, seed: int = 0):
+    def __init__(self, cache: ValueCache, split: str, include_draws: bool = False, k_per_game: int = 0, seed: int = 0,
+                 weight_floor: float = 1.0, weight_power: float = 1.0):
         self.cache = cache
         self.split = split
         self.k = int(k_per_game)
         self.seed = int(seed)
+        self.weight_floor = float(weight_floor)
+        self.weight_power = float(weight_power)
         self.all_rows = cache.split_rows(split, include_draws=include_draws)
         self._by_game = cache.rows_by_game(self.all_rows) if self.k > 0 else None
         self.set_epoch(0)
@@ -295,7 +326,12 @@ class ValueDataset(Dataset):
         rng = np.random.default_rng([self.seed, int(epoch)])
         picks = []
         for _, rr in sorted(self._by_game.items()):
-            picks.append(rr if len(rr) <= self.k else rng.choice(rr, size=self.k, replace=False))
+            if len(rr) <= self.k:
+                picks.append(rr)
+            else:
+                w = position_weight(self.cache.turn_frac[rr], self.weight_floor, self.weight_power)
+                w = w / w.sum()
+                picks.append(rng.choice(rr, size=self.k, replace=False, p=w))
         self.rows = np.sort(np.concatenate(picks)) if picks else np.zeros(0, np.int64)
 
     @property
