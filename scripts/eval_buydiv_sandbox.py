@@ -4,12 +4,14 @@
 Runs a checkpoint for ``--episodes`` games (default 128, even split across
 16x8 and 20x10), reports buy counts, gold share, diversity mean with a Wald
 95% CI, and min/max type counts. Optionally runs the same protocol on a
-baseline (frozen v0.4.0) for comparison.
+baseline checkpoint for comparison.
 
     PYTHONPATH=<repo> python scripts/eval_buydiv_sandbox.py \
-        --checkpoint runs/sandbox_buydiv_v0.4.0/update_300.pt \
-        --baseline runs/checkpoints/v0.4.0_8ad2530.pt \
-        --output-dir runs/sandbox_buydiv_v0.4.0/eval_unmasked
+        --checkpoint path/to/policy.pt \
+        --baseline path/to/baseline.pt \
+        --output-dir runs/sandbox_buydiv/eval_unmasked
+
+Pre-v0.5.0 official checkpoints were archived; pass paths explicitly.
 """
 
 from __future__ import annotations

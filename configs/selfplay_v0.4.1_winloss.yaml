@@ -1,6 +1,6 @@
-# BAT-24 trial: PPO self-play from tagged v0.4.1 with terminal win/loss/draw
+# BAT-24 trial template: PPO self-play with terminal win/loss/draw
 # rewards only. Same map pool, opponent ring, fleet starts, and PPO
-# hyperparameters as runs/selfplay_v0.4.0_smoke (BAT-20) for comparability.
+# hyperparameters as the old selfplay_v0.4.0_smoke (BAT-20) for comparability.
 # Shaping is off. The v0.2.2 draw penalty is kept (reward.draw -0.15).
 # Terminal outcomes: +1 win, -1 loss, -0.15 timeout draw.
 #
@@ -10,7 +10,10 @@
 run_dir: runs/selfplay_v0.4.1_winloss
 device: cpu
 seed: 0
-init_checkpoint: runs/checkpoints/v0.4.1_79754fb.pt
+# Pre-v0.5.0 official checkpoints were archived in
+# ~/Desktop/repos/battleboats_archive/runs_pre_v0.5.0_20261124.tar.zst
+# (sha256 c0f63624052c78da0b48d413b23f2b15a6240f554e762adf5e70ca631db69c03).
+# Pass --init-checkpoint / set init_checkpoint to warm-start; omit for random init.
 map_pool:
   - {width: 16, height: 8, count: 20, ports: 2}
   - {width: 20, height: 10, count: 20, ports: 2}

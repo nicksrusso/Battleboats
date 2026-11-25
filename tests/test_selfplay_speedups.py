@@ -290,7 +290,7 @@ def test_bigmaps_config_collection_knobs() -> None:
     assert (cfg.num_workers, cfg.games_per_worker, cfg.collect_threads, cfg.ppo_threads) == (7, 8, 1, 8)
     assert cfg.dropout == 0.0
     assert cfg.rollout_decisions == 2048
-    assert cfg.init_checkpoint == Path("runs/checkpoints/v0.0.1_f4f7bef.pt")
+    assert cfg.init_checkpoint is None
 
 
 def _record_dists(monkeypatch):

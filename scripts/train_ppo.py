@@ -156,10 +156,10 @@ def main() -> None:
     # Data / env
     p.add_argument("--scenarios", type=Path, default=Path("runs/scenarios/scenarios_500.json"),
                    help="JSON list of scenarios to cycle through for game starts.")
-    p.add_argument("--bc-checkpoint", type=Path,
-                   default=Path("runs/checkpoints/bc_policy_latest.pt"),
+    p.add_argument("--bc-checkpoint", type=Path, default=None,
                    help="Warm-start policy + initial opponent from this BC checkpoint. "
-                        "Pass --bc-checkpoint '' for random init.")
+                        "Default is random init. Pre-v0.5.0 official weights were "
+                        "archived (see battleboats.training.checkpoints.NO_CHECKPOINT_MSG).")
     p.add_argument("--max-steps", type=int, default=400, help="Engine-step budget per game.")
     # PPO loop
     p.add_argument("--updates", type=int, default=50, help="Number of PPO updates (outer loop).")

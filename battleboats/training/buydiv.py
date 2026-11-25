@@ -42,8 +42,8 @@ import yaml
 
 from battleboats.core.shipyard.ship_data import BASE_STATS
 from battleboats.core.shipyard.ship_type import ShipType
-from battleboats.training.checkpoints import (frozen_copy, load_checkpoint,
-                                              save_checkpoint)
+from battleboats.training.checkpoints import (NO_CHECKPOINT_MSG, frozen_copy,
+                                              load_checkpoint, save_checkpoint)
 from battleboats.training.loop import PPOHyper, apply_ppo
 from battleboats.training.policy import VERB_TO_IDX, PolicyNetwork, set_dropout
 from battleboats.training.ppo_buffer import RolloutBuffer
@@ -152,7 +152,7 @@ def mean_diversity(items: Sequence[Dict[str, int]]) -> float:
 
 @dataclass
 class BuyDivConfig:
-    init_checkpoint: str = "runs/checkpoints/v0.4.0_8ad2530.pt"
+    init_checkpoint: Optional[str] = None
     run_dir: str = "runs/sandbox_buydiv_v0.4.0"
     updates: int = 300
     decisions_per_update: int = 1024
@@ -510,6 +510,8 @@ def _run_buydiv(cfg: BuyDivConfig) -> Dict[str, Any]:
     run_dir.mkdir(parents=True, exist_ok=True)
     (run_dir / "config.yaml").write_text(yaml.safe_dump(asdict(cfg), sort_keys=False))
 
+    if not cfg.init_checkpoint:
+        raise SystemExit(NO_CHECKPOINT_MSG)
     policy, _model_cfg = load_checkpoint(Path(cfg.init_checkpoint), device)
     set_dropout(policy, float(cfg.dropout))
     policy.to(device)

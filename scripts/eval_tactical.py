@@ -1,16 +1,19 @@
-"""Smoke-test the tactical scripted agent against v0.3.0, itself, and random.
+"""Smoke-test the tactical scripted agent against a policy, itself, and random.
 
     poetry run python scripts/eval_tactical.py \\
-        --checkpoint runs/checkpoints/v0.3.0_26348ee.pt \\
-        --maps-dir runs/selfplay_mixed_v0.2.2/maps \\
-        --config runs/selfplay_mixed_v0.2.2/config.yaml \\
-        --output-dir runs/eval/scripted_v_v0.3.0/
+        --checkpoint path/to/policy.pt \\
+        --maps-dir path/to/maps \\
+        --config path/to/selfplay_config.yaml \\
+        --output-dir runs/eval/scripted_vs_policy/
 
-100 games vs the checkpoint (50 per seat, 16x8 and 20x10 from the v0.2.2
-pool, per-map max_turns / max_steps from that run's config), plus 20
-scripted-vs-scripted and 20 scripted-vs-random sanity games. Reports
-W/L/D with Wilson CIs, per-seat and per-size splits, turn stats, buy
-mix, and landing-ship capture / survival stats for the scripted seat.
+100 games vs the checkpoint (50 per seat, sizes and per-map max_turns /
+max_steps from the given run config), plus 20 scripted-vs-scripted and
+20 scripted-vs-random sanity games. Reports W/L/D with Wilson CIs,
+per-seat and per-size splits, turn stats, buy mix, and landing-ship
+capture / survival stats for the scripted seat.
+
+Pre-v0.5.0 official checkpoints and run dirs were archived; see
+``battleboats.training.checkpoints.NO_CHECKPOINT_MSG``.
 """
 
 from __future__ import annotations
@@ -40,7 +43,8 @@ from battleboats.core.shipyard.ship_type import ShipType
 from battleboats.envs.action_masks import ActionMasks
 from battleboats.envs.battleboats_aec import BattleboatsAEC
 from battleboats.envs.map_pool import episode_limits
-from battleboats.training.checkpoints import load_checkpoint
+from battleboats.training.checkpoints import (NO_CHECKPOINT_MSG, no_archived,
+                                              load_checkpoint)
 from battleboats.training.selfplay import load_selfplay_config
 from battleboats.training.selfplay_purchases import hull_name
 from battleboats.training.manifest import append_eval
@@ -517,31 +521,25 @@ def _jsonable(obj):
 
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument(
-        "--checkpoint",
-        type=Path,
-        default=Path("runs/checkpoints/v0.3.0_26348ee.pt"),
-    )
-    parser.add_argument(
-        "--maps-dir",
-        type=Path,
-        default=Path("runs/selfplay_mixed_v0.2.2/maps"),
-    )
-    parser.add_argument(
-        "--config",
-        type=Path,
-        default=Path("runs/selfplay_mixed_v0.2.2/config.yaml"),
-    )
+    parser.add_argument("--checkpoint", type=Path, default=None)
+    parser.add_argument("--maps-dir", type=Path, default=None)
+    parser.add_argument("--config", type=Path, default=None)
     parser.add_argument(
         "--output-dir",
         type=Path,
-        default=Path("runs/eval/scripted_v_v0.3.0"),
+        default=Path("runs/eval/scripted_vs_policy"),
     )
     parser.add_argument("--games", type=int, default=100)
     parser.add_argument("--sanity-games", type=int, default=20)
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--threads", type=int, default=8)
     args = parser.parse_args()
+    if args.checkpoint is None:
+        raise SystemExit(NO_CHECKPOINT_MSG)
+    if args.maps_dir is None:
+        raise SystemExit(no_archived("maps-dir"))
+    if args.config is None:
+        raise SystemExit(no_archived("config"))
 
     torch.set_num_threads(args.threads)
     torch.set_num_interop_threads(1)
@@ -554,8 +552,8 @@ def main() -> None:
     policy.eval()
 
     vs_jobs = _schedule(maps, cfg, args.games, args.seed)
-    vs_games = run_vs_policy(vs_jobs, policy, device, label="vs v0.3.0")
-    vs_summary = summarize(vs_games, focal="tactical", label="tactical vs v0.3.0")
+    vs_games = run_vs_policy(vs_jobs, policy, device, label="vs checkpoint")
+    vs_summary = summarize(vs_games, focal="tactical", label="tactical vs checkpoint")
 
     ss_jobs = _schedule(maps, cfg, args.sanity_games, args.seed + 10_000)
     ss_games = run_pair(
@@ -581,11 +579,11 @@ def main() -> None:
             "landings": "target the nearest known capturable port (any enemy or neutral, by water-path distance); always flee combat ships; never AttackAction",
             "fog": "same sightings as policy observation (known_enemy_ships / known_enemy_ports); stale last-seen positions decay over 4 turns",
         },
-        "vs_v0.3.0": vs_summary,
+        "vs_checkpoint": vs_summary,
         "scripted_vs_scripted": ss_summary,
         "scripted_vs_random": sr_summary,
         "games": {
-            "vs_v0.3.0": vs_games,
+            "vs_checkpoint": vs_games,
             "scripted_vs_scripted": ss_games,
             "scripted_vs_random": sr_games,
         },

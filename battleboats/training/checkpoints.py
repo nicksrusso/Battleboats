@@ -17,6 +17,23 @@ from battleboats.envs.observation import TOKEN_DIM
 from battleboats.training.policy import PolicyNetwork
 
 
+# Pre-v0.5.0 official weights and run directories, packed 2026-11-24.
+ARCHIVED_RUNS_TAR = (
+    "~/Desktop/repos/battleboats_archive/runs_pre_v0.5.0_20261124.tar.zst"
+)
+ARCHIVED_RUNS_SHA256 = (
+    "c0f63624052c78da0b48d413b23f2b15a6240f554e762adf5e70ca631db69c03"
+)
+
+
+def no_archived(kind: str = "checkpoint") -> str:
+    """Error when a caller needed a path that used to live under runs/."""
+    return f"no {kind}; old ones archived in {ARCHIVED_RUNS_TAR}"
+
+
+NO_CHECKPOINT_MSG = no_archived("checkpoint")
+
+
 def model_config_of(policy: PolicyNetwork) -> Dict[str, Any]:
     """Rebuild the ``model_config`` dict from a live module.
 

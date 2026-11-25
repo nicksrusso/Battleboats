@@ -8,9 +8,11 @@ tactical). Observations are the policy's fog tensors.
 
     PYTHONPATH=<repo> python scripts/harvest_tactical.py \
         --self-play 2000 --vs-policy 400 --vs-random 200 \
-        --output-dir runs/bc_tactical_v040/harvest --workers 12
+        --output-dir runs/bc_tactical/harvest --workers 12
 
-vs-policy loads ``--checkpoint`` (default v0.3.0) on CPU.
+vs-policy loads ``--checkpoint`` on CPU. Pre-v0.5.0 official
+checkpoints and the v0.2.2 map pool were archived; pass those paths
+explicitly (see ``battleboats.training.checkpoints.NO_CHECKPOINT_MSG``).
 """
 from __future__ import annotations
 
@@ -47,15 +49,6 @@ from battleboats.training.tactical_bc import (
     write_game_npz,
 )
 
-DEFAULT_MAPS = Path(
-    "/home/nick/Desktop/repos/Battleboats/runs/selfplay_mixed_v0.2.2/maps"
-)
-DEFAULT_CONFIG = Path(
-    "/home/nick/Desktop/repos/Battleboats/runs/selfplay_mixed_v0.2.2/config.yaml"
-)
-DEFAULT_CKPT = Path(
-    "/home/nick/Desktop/repos/Battleboats/runs/checkpoints/v0.3.0_26348ee.pt"
-)
 
 
 def _play_game(
@@ -298,15 +291,13 @@ def main() -> None:
     parser.add_argument("--self-play", type=int, default=2000)
     parser.add_argument("--vs-policy", type=int, default=400)
     parser.add_argument("--vs-random", type=int, default=200)
-    parser.add_argument("--maps-dir", type=Path, default=DEFAULT_MAPS)
-    parser.add_argument("--config", type=Path, default=DEFAULT_CONFIG)
-    parser.add_argument("--checkpoint", type=Path, default=DEFAULT_CKPT)
+    parser.add_argument("--maps-dir", type=Path, default=None)
+    parser.add_argument("--config", type=Path, default=None)
+    parser.add_argument("--checkpoint", type=Path, default=None)
     parser.add_argument(
         "--output-dir",
         type=Path,
-        default=Path(
-            "/home/nick/Desktop/repos/Battleboats/runs/bc_tactical_v040/harvest"
-        ),
+        default=Path("runs/bc_tactical/harvest"),
     )
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--workers", type=int, default=12)
@@ -314,8 +305,16 @@ def main() -> None:
     parser.add_argument("--resume", action="store_true")
     args = parser.parse_args()
 
+    from battleboats.training.checkpoints import NO_CHECKPOINT_MSG, no_archived
     from battleboats.training.selfplay import load_selfplay_config
     from scripts.eval_tactical import _list_maps
+
+    if args.maps_dir is None:
+        raise SystemExit(no_archived("maps-dir"))
+    if args.config is None:
+        raise SystemExit(no_archived("config"))
+    if args.vs_policy > 0 and args.checkpoint is None:
+        raise SystemExit(NO_CHECKPOINT_MSG)
 
     cfg = load_selfplay_config(args.config)
     maps = _list_maps(args.maps_dir)
