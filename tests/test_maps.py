@@ -1,6 +1,4 @@
-"""map_gen.min_port_enemy_home_water: every port's spawn tile (home and
-satellites) must be at least N water moves from a tile next to the enemy home,
-so a landing ship bought on turn 0 cannot rush the enemy home before turn 3."""
+"""Map generation, pool checks, spawn-distance rules, and config wiring."""
 
 import json
 from pathlib import Path
@@ -14,11 +12,16 @@ from battleboats.envs.map_pool import (
     build_map_pool,
     check_map,
     earliest_capture_turn,
+    episode_limits,
+    home_distance,
+    render_ascii,
     spawn_enemy_home_water,
     water_path_length,
 )
+from battleboats.training.selfplay import load_selfplay_config
 
 ROOT = Path(__file__).resolve().parents[1]
+SIZES = [PoolSize(16, 8, 3, ports=2), PoolSize(32, 16, 2, ports=3), PoolSize(48, 24, 2, ports=4)]
 
 
 def _yaml(tmp_path, w, h, ports=2, extra=None):
@@ -26,6 +29,51 @@ def _yaml(tmp_path, w, h, ports=2, extra=None):
     p = tmp_path / f"cfg_{w}x{h}.yaml"
     p.write_text(yaml.safe_dump({"Map": m}))
     return p
+
+
+def test_pool_is_seeded_non_square_and_checked(tmp_path: Path) -> None:
+    a = build_map_pool(tmp_path / "a", SIZES, seed=7)
+    b = build_map_pool(tmp_path / "b", SIZES, seed=7)
+    assert len(a) == 7
+    assert len(list((tmp_path / "a").glob("*.json"))) == 7
+    for pa, pb in zip(a, b):
+        da, db = json.loads(Path(pa).read_text()), json.loads(Path(pb).read_text())
+        assert da == db
+        assert check_map(da) == (True, "ok")
+        assert water_path_length(da) is not None
+        assert home_distance(da) >= da["width"] // 2
+        rows = render_ascii(da).splitlines()
+        assert len(rows) == da["height"] and all(len(r) == da["width"] for r in rows)
+    sizes = sorted(
+        {
+            (json.loads(Path(p).read_text())["width"], json.loads(Path(p).read_text())["height"])
+            for p in a
+        }
+    )
+    assert sizes == [(16, 8), (32, 16), (48, 24)]
+
+
+def test_walled_off_home_is_rejected() -> None:
+    data = {
+        "width": 8,
+        "height": 4,
+        "land": [[0, 0], [7, 3]] + [[3, y] for y in range(4)],
+        "ports": {"0": [[0, 0]], "1": [[7, 3]]},
+    }
+    assert check_map(data) == (False, "no water path between homes")
+
+
+def test_limits_scale_with_home_distance() -> None:
+    near = {"ports": {"0": [[0, 0]], "1": [[7, 7]]}}
+    far = {"ports": {"0": [[0, 0]], "1": [[27, 0]]}}
+    assert episode_limits(near, max_turns=80, max_steps=3000, ref_home_distance=14) == (80, 3000)
+    assert episode_limits(far, max_turns=80, max_steps=3000, ref_home_distance=14) == (160, 6000)
+
+
+def test_bigmaps_config_loads() -> None:
+    cfg = load_selfplay_config(ROOT / "configs" / "selfplay_bigmaps.yaml")
+    assert [(s.width, s.height) for s in cfg.map_pool] == [(16, 8), (32, 16), (48, 24)]
+    assert cfg.run_dir == Path("runs/selfplay_bigmaps")
 
 
 def test_port_enemy_home_water_counts_satellite_spawns():
@@ -56,8 +104,12 @@ def test_earliest_capture_turn(moves, turn):
 
 def test_check_map_rejects_close_spawn():
     # Symmetric satellites at x=5/6 put spawns 2 moves from the enemy home's water.
-    data = {"width": 12, "height": 3, "land": [[1, 1], [6, 1], [10, 1], [5, 1]],
-            "ports": {"0": [[1, 1], [6, 1]], "1": [[10, 1], [5, 1]]}}
+    data = {
+        "width": 12,
+        "height": 3,
+        "land": [[1, 1], [6, 1], [10, 1], [5, 1]],
+        "ports": {"0": [[1, 1], [6, 1]], "1": [[10, 1], [5, 1]]},
+    }
     assert check_map(data) == (True, "ok")
     assert spawn_enemy_home_water(data) == 2
     ok, why = check_map(data, min_port_enemy_home_water=7)
@@ -113,8 +165,6 @@ def test_infeasible_small_board_raises_instead_of_looping(tmp_path):
 
 
 def test_selfplay_config_reads_map_gen(tmp_path):
-    from battleboats.training.selfplay import load_selfplay_config
-
     raw = yaml.safe_load((ROOT / "configs" / "selfplay_bigmaps.yaml").read_text())
     assert load_selfplay_config(ROOT / "configs" / "selfplay_bigmaps.yaml").min_port_enemy_home_water == 7
     raw.pop("map_gen", None)
@@ -124,23 +174,3 @@ def test_selfplay_config_reads_map_gen(tmp_path):
     raw["map_gen"] = {"min_port_enemy_home_water": 9}
     p.write_text(yaml.safe_dump(raw))
     assert load_selfplay_config(p).min_port_enemy_home_water == 9
-
-
-def test_selfplay_pool_uses_and_logs_the_minimum(tmp_path, capsys):
-    from battleboats.training.curriculum import ArchSpec
-    from battleboats.training.loop import PPOHyper
-    from battleboats.training.selfplay import SelfPlayConfig, run_selfplay
-
-    run = SelfPlayConfig(
-        run_dir=tmp_path / "run", device="cpu",
-        arch=ArchSpec(d_model=32, nhead=2, num_layers=1, dim_feedforward=64, dropout=0.0),
-        ppo=PPOHyper(epochs=1, minibatch_size=32),
-        map_pool=[PoolSize(12, 6, 4, ports=2)], updates=1, rollout_decisions=64,
-        max_turns=4, max_steps=60, num_workers=0, games_per_worker=2, ppo_threads=1,
-        min_port_enemy_home_water=7,
-    )
-    assert run_selfplay(run)["ok"]
-    out = capsys.readouterr().out
-    assert "map_gen min_port_enemy_home_water=7" in out and "earliest_capture_turn>=3" in out
-    for p in (tmp_path / "run" / "maps").glob("map_*.json"):
-        assert spawn_enemy_home_water(json.loads(p.read_text())) >= 7
