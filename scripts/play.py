@@ -1,10 +1,16 @@
 """Launch the local Battleboats web UI for a game against an agent.
 
     poetry run python scripts/play.py --map 16x8 --opponent tactical --seed 0
+    poetry run python scripts/play.py --map 16x8 --opponent inkling --seed 0
+    poetry run python scripts/play.py --map 16x8 --opponent llm --model thinkingmachines/inkling --reasoning max
 
 Opens a local HTTP server (127.0.0.1) with an interactive HTML5 Canvas grid,
 strict fog-of-war per config/visibilityMatrix.csv, ship/port actions, and
-combat/turn logs.
+combat/turn logs. An Inkling / LLM opponent needs OPENROUTER_API_KEY in the
+environment or a repo-root .env file (never committed). LLM turns run in the
+background; the page polls and shows "Inkling thinking…". Every game is
+logged incrementally to runs/human_games/<timestamp>_<map>_<opponent>_seed<N>.jsonl
+(the path is printed at startup and on the game-over screen).
 """
 
 from __future__ import annotations
@@ -18,6 +24,13 @@ _ROOT = Path(__file__).resolve().parents[1]
 if str(_ROOT) not in sys.path:
     sys.path.insert(0, str(_ROOT))
 
+from battleboats.llm.openrouter import (  # noqa: E402
+    DEFAULT_MAX_TOKENS,
+    DEFAULT_REASONING,
+    DEFAULT_TEMPERATURE,
+    DEFAULT_TIMEOUT,
+    INKLING_MODEL_ID,
+)
 from battleboats.ui.maps import list_map_options  # noqa: E402
 from battleboats.ui.server import serve  # noqa: E402
 from battleboats.ui.session import PlaySession  # noqa: E402
@@ -33,15 +46,46 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--opponent",
-        choices=("tactical", "scripted", "random", "checkpoint"),
+        choices=("tactical", "scripted", "random", "checkpoint", "llm", "inkling"),
         default=None,
-        help="Opponent agent (default: tactical; or checkpoint if --checkpoint is set).",
+        help="Opponent agent (default: tactical; checkpoint if --checkpoint is set; "
+        "inkling is an alias for llm + the Inkling flagship at max reasoning).",
     )
     parser.add_argument(
         "--checkpoint",
         type=Path,
         default=None,
         help="Optional policy checkpoint (.pt) for opponent=checkpoint.",
+    )
+    parser.add_argument(
+        "--model",
+        default=None,
+        help=f"OpenRouter model id for --opponent llm/inkling "
+        f"(default: {INKLING_MODEL_ID}).",
+    )
+    parser.add_argument(
+        "--reasoning",
+        default=DEFAULT_REASONING,
+        choices=("max", "high", "medium", "low", "minimal", "none"),
+        help="OpenRouter reasoning.effort (default: max).",
+    )
+    parser.add_argument(
+        "--timeout",
+        type=float,
+        default=DEFAULT_TIMEOUT,
+        help="HTTP timeout per LLM decision, seconds (default: 600).",
+    )
+    parser.add_argument(
+        "--max-tokens",
+        type=int,
+        default=DEFAULT_MAX_TOKENS,
+        help="Completion budget per LLM decision, including reasoning tokens.",
+    )
+    parser.add_argument(
+        "--temperature",
+        type=float,
+        default=DEFAULT_TEMPERATURE,
+        help="LLM sampling temperature (default: 0.3, same as the harness).",
     )
     parser.add_argument(
         "--side",
@@ -86,7 +130,10 @@ def main() -> None:
 
     opponent = args.opponent
     if opponent is None:
-        opponent = "checkpoint" if args.checkpoint is not None else "tactical"
+        if args.checkpoint is not None:
+            opponent = "checkpoint"
+        else:
+            opponent = "tactical"
 
     map_dir = args.checkpoint_dir / "play_maps"
     session = PlaySession(
@@ -98,6 +145,11 @@ def main() -> None:
         map_dir=map_dir,
         checkpoint=args.checkpoint,
         device=args.device,
+        llm_model=args.model,
+        llm_reasoning=args.reasoning,
+        llm_timeout=args.timeout,
+        llm_max_tokens=args.max_tokens,
+        llm_temperature=args.temperature,
     )
     print(
         f"Map: {session.map_name} ({session.engine.map.width}x{session.engine.map.height}) · "
@@ -105,6 +157,7 @@ def main() -> None:
         f"Max turns: {session.max_turns}",
         flush=True,
     )
+    print(f"Game log: {session.log_path}", flush=True)
     serve(
         args.host,
         args.port,

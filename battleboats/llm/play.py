@@ -117,7 +117,7 @@ def _field_text(value) -> str:
 def message_text(body: dict) -> str:
     message = body["choices"][0]["message"]
     content = _field_text(message.get("content"))
-    reasoning = _field_text(message.get("reasoning_content"))
+    reasoning = _field_text(message.get("reasoning_content") or message.get("reasoning"))
     if reasoning and content:
         return f"[Start thinking]\n{reasoning}\n[End thinking]\n{content}"
     if content:
