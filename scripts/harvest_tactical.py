@@ -35,6 +35,7 @@ if str(_ROOT) not in sys.path:
 os.environ.setdefault("OMP_NUM_THREADS", "1")
 os.environ.setdefault("MKL_NUM_THREADS", "1")
 
+from battleboats.agents.fog_commander import FogCommander, canonical_build_action
 from battleboats.agents.random_agent import random_action
 from battleboats.agents.tactical import tactical_scripted_action
 from battleboats.core.actions import BuildShipAction, CapturePortAction
@@ -49,6 +50,7 @@ from battleboats.training.tactical_bc import (
     write_game_npz,
 )
 
+LABEL_KINDS = ("tactical", "fog_commander")  # scripted seats whose actions are labels
 
 
 def _play_game(
@@ -67,11 +69,14 @@ def _play_game(
         env.prime_legal_actions = False
     env.reset(seed=seed)
     rngs = {0: random.Random(seed * 2 + 1), 1: random.Random(seed * 2 + 2)}
+    fog_commander = FogCommander()
 
     def action_for(pid: int):
         kind = actors[pid]
         if kind == "tactical":
             return tactical_scripted_action(env.engine, pid, rngs[pid])
+        if kind == "fog_commander":
+            return fog_commander.act(env.engine, pid, rngs[pid])
         if kind == "random":
             return random_action(env.engine, pid, rngs[pid])
         import torch
@@ -102,8 +107,10 @@ def _play_game(
         # build the observation or choose an action.
         engine._refresh_sightings()
         action = action_for(pid)
-        if actors[pid] == "tactical":
-            encoded = encode_tactical_action(engine, pid, action)
+        if actors[pid] in LABEL_KINDS:
+            # The policy has one buy per (port, type); fog_commander picks its own
+            # spawn tile, so its buys are labelled as the canonical legal buy.
+            encoded = encode_tactical_action(engine, pid, canonical_build_action(engine, pid, action))
             if encoded.ok:
                 rows_by_pid[pid].append(
                     {
@@ -145,7 +152,7 @@ def _play_game(
 
     labeled_rows: List[Dict[str, Any]] = []
     for pid, rows in rows_by_pid.items():
-        if actors[pid] != "tactical" or not rows:
+        if actors[pid] not in LABEL_KINDS or not rows:
             continue
         if winner is None:
             z = 0.0
@@ -185,6 +192,7 @@ def _schedule_jobs(
     n_vs_policy: int,
     n_vs_random: int,
     seed: int,
+    labeler: str = "tactical",
 ) -> List[Dict[str, Any]]:
     # Re-importing is fine; the caller already has maps/cfg. Build one
     # combined schedule: self-play, then vs-policy, then vs-random, each
@@ -203,13 +211,13 @@ def _schedule_jobs(
             job = dict(raw)
             job["kind"] = kind
             if kind == "self_play":
-                job["actors"] = {0: "tactical", 1: "tactical"}
+                job["actors"] = {0: labeler, 1: labeler}
             elif kind == "vs_policy":
-                seat = job["seat"]  # tactical seat (same interleaving as eval)
-                job["actors"] = {seat: "tactical", 1 - seat: "policy"}
+                seat = job["seat"]  # labelled seat (same interleaving as eval)
+                job["actors"] = {seat: labeler, 1 - seat: "policy"}
             else:
                 seat = job["seat"]
-                job["actors"] = {seat: "tactical", 1 - seat: "random"}
+                job["actors"] = {seat: labeler, 1 - seat: "random"}
             jobs.append(job)
     return jobs
 
@@ -303,6 +311,12 @@ def main() -> None:
     parser.add_argument("--workers", type=int, default=12)
     parser.add_argument("--gamma", type=float, default=GAMMA_DEFAULT)
     parser.add_argument("--resume", action="store_true")
+    parser.add_argument(
+        "--labeler",
+        choices=sorted(LABEL_KINDS),
+        default="tactical",
+        help="scripted agent whose decisions become labels (default: tactical)",
+    )
     args = parser.parse_args()
 
     from battleboats.training.checkpoints import NO_CHECKPOINT_MSG, no_archived
@@ -325,6 +339,7 @@ def main() -> None:
         n_vs_policy=args.vs_policy,
         n_vs_random=args.vs_random,
         seed=args.seed,
+        labeler=args.labeler,
     )
     # Unique game_idx across kinds (self-play first).
     for i, job in enumerate(jobs):

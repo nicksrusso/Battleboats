@@ -10,6 +10,7 @@ import random
 from pathlib import Path
 from typing import Dict, Optional
 
+from battleboats.agents.fog_commander import fog_commander_action
 from battleboats.agents.scripted import scripted_action
 from battleboats.agents.tactical import tactical_scripted_action
 from battleboats.envs.battleboats_aec import BattleboatsAEC
@@ -35,12 +36,13 @@ def evaluate_checkpoint(
 ) -> Dict[str, float]:
     """Return win/loss/draw rates for ``checkpoint`` over ``games`` matches.
 
-    ``opponent`` is ``random``, ``scripted`` (greedy baseline), or ``tactical``.
+    ``opponent`` is ``random``, ``scripted`` (greedy baseline), ``tactical``, or
+    ``fog_commander``.
     The learner alternates seats.
     """
-    if opponent not in ("random", "scripted", "tactical"):
+    if opponent not in ("random", "scripted", "tactical", "fog_commander"):
         raise ValueError(
-            f"opponent must be random, scripted, or tactical, got {opponent!r}"
+            f"opponent must be random, scripted, tactical, or fog_commander, got {opponent!r}"
         )
     dev = resolve_device(device)
     policy, _ = load_checkpoint(checkpoint, dev)
@@ -58,6 +60,8 @@ def evaluate_checkpoint(
         action_fn = scripted_action
     elif opponent == "tactical":
         action_fn = tactical_scripted_action
+    elif opponent == "fog_commander":
+        action_fn = fog_commander_action  # memory keyed to the engine's players; resets per game
     else:
         action_fn = None
     for g in range(games):

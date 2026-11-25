@@ -36,6 +36,7 @@ if str(_ROOT) not in sys.path:
 
 import torch
 
+from battleboats.agents.fog_commander import FogCommander
 from battleboats.agents.random_agent import random_action
 from battleboats.agents.tactical import tactical_scripted_action
 from battleboats.core.actions import AttackAction, BuildShipAction, CapturePortAction
@@ -166,12 +167,13 @@ def play_game(
     policy=None,
     device=None,
 ) -> Dict[str, Any]:
-    """Play one game. ``actors[pid]`` is ``tactical``, ``random``, or ``policy``."""
+    """Play one game. ``actors[pid]`` is ``tactical``, ``fog_commander``, ``random``, or ``policy``."""
     env = BattleboatsAEC(str(map_path), max_turns=max_turns)
     if hasattr(env, "prime_legal_actions"):
         env.prime_legal_actions = False
     env.reset(seed=seed)
     rngs = {0: random.Random(seed * 2 + 1), 1: random.Random(seed * 2 + 2)}
+    fog_commander = FogCommander()
     scripted_pids = tuple(pid for pid, kind in actors.items() if kind == "tactical")
     tracker = _new_tracker(scripted_pids)
     buys = {0: Counter(), 1: Counter()}
@@ -183,6 +185,8 @@ def play_game(
         kind = actors[pid]
         if kind == "tactical":
             return tactical_scripted_action(env.engine, pid, rngs[pid])
+        if kind == "fog_commander":
+            return fog_commander.act(env.engine, pid, rngs[pid])
         if kind == "random":
             return random_action(env.engine, pid, rngs[pid])
         masks = ActionMasks(env.engine, pid, device=device)
