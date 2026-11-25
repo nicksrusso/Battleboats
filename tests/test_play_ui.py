@@ -380,6 +380,11 @@ def _assert_state_is_fog_safe(state: dict, engine, human_id: int, ever_seen: set
 
     for entry in state.get("log") or []:
         text = entry.get("text", "")
+        # Human-authored lines ("You: DD #4 attacked ...") use kind combat_miss
+        # when a shot misses. Those IDs are the fire-er (possibly later sunk,
+        # so no longer in owned_ship_ids) and a target the human just shot at.
+        if text.startswith("You:"):
+            continue
         if not (text.startswith("Opponent") or entry.get("kind") in {"enemy_move", "spot", "combat_loss", "combat_miss"}):
             continue
         for raw_id in re.findall(r"#(\d+)", text):

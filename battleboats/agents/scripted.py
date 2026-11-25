@@ -1,8 +1,14 @@
 """Full-information scripted baseline.
 
-Priority: capture, attack, unload, load, build a port, buy the ship the fleet
-is missing, then a move that shortens the relevant Manhattan distance. If
-nothing improves, end the turn.
+Priority: capture, attack, unload, load, build a port, buy the next ship in a
+per-seat randomized build queue, then a move that shortens the relevant
+Manhattan distance. If nothing improves, end the turn.
+
+The queue is a shuffled cycle of every buyable ship type, stored on the
+engine and refilled when it runs out. The head is bought only when it is
+legal and affordable this turn; otherwise the agent saves cash and does
+not skip ahead to a cheaper type. Draws use the caller's RNG so a game
+is deterministic given the seed.
 
 This opponent reads ``engine`` directly (both fleets, both homes). It is a
 yardstick, not a fog-of-war agent. The play UI labels it as full information.
@@ -13,7 +19,8 @@ Swap the body later if a fog-limited script is wanted; callers only need
 from __future__ import annotations
 
 import random
-from typing import List, Optional, Sequence
+from collections import deque
+from typing import Deque, List, Optional, Sequence
 
 from battleboats.core.actions import (
     Action,
@@ -26,15 +33,12 @@ from battleboats.core.actions import (
     MerchantUnloadAction,
     MoveAction,
 )
+from battleboats.core.shipyard.ship_data import BASE_STATS
 from battleboats.core.shipyard.ship_type import ShipType
 
-_BUY_ORDER = (
-    ShipType.MERCHANT,
-    ShipType.LANDING,
-    ShipType.DESTROYER,
-    ShipType.SUBMARINE,
-    ShipType.CRUISER,
-)
+# Every type the rules allow to be bought. A cycle of this tuple is shuffled
+# each time a seat's queue is empty, so long-run buy rates stay nearly equal.
+BUYABLE_TYPES: tuple = tuple(t for t in ShipType if t in BASE_STATS)
 
 
 def scripted_action(engine, player_id: int, rng: random.Random) -> Action:
@@ -57,7 +61,7 @@ def scripted_action(engine, player_id: int, rng: random.Random) -> Action:
         if options:
             return rng.choice(options)
 
-    build = _choose_build(engine, player_id, pick(BuildShipAction))
+    build = _choose_build(engine, player_id, pick(BuildShipAction), rng)
     if build is not None:
         return build
 
@@ -71,40 +75,51 @@ def scripted_action(engine, player_id: int, rng: random.Random) -> Action:
     return legal[-1]
 
 
-def _counts(engine, player_id: int) -> dict:
-    counts = {t: 0 for t in ShipType}
-    for sid in engine.players[player_id].owned_ship_ids:
-        ship = engine.ships.get(sid)
-        if ship is not None:
-            counts[ship.type] += 1
-    return counts
+def sample_build_cycle(rng: random.Random) -> List[ShipType]:
+    """One shuffled permutation of every buyable type."""
+    cycle = list(BUYABLE_TYPES)
+    rng.shuffle(cycle)
+    return cycle
 
 
-def _choose_build(engine, player_id: int, options: Sequence[Action]) -> Optional[Action]:
+def build_queue_for(engine, player_id: int, rng: Optional[random.Random] = None) -> Deque[ShipType]:
+    """Per-game, per-player buy queue stored on the engine.
+
+    Reset is detected via ``id(engine.players[0])``, which changes both
+    when a new ``gameEngine`` is constructed and when ``engine.reset()``
+    rebuilds the player list. An empty queue is filled from ``rng`` when
+    one is given; tests may also seed or replace the deque themselves.
+    """
+    marker = id(engine.players[0])
+    state = getattr(engine, "_scripted_buy_state", None)
+    if state is None or state["marker"] != marker:
+        state = {"marker": marker, "queues": {0: deque(), 1: deque()}}
+        engine._scripted_buy_state = state
+    queue = state["queues"][player_id]
+    if not queue and rng is not None:
+        queue.extend(sample_build_cycle(rng))
+    return queue
+
+
+def _choose_build(
+    engine,
+    player_id: int,
+    options: Sequence[Action],
+    rng: random.Random,
+) -> Optional[Action]:
     if not options:
         return None
-    counts = _counts(engine, player_id)
-    combat = sum(counts[t] for t in (
-        ShipType.CARRIER, ShipType.BATTLESHIP, ShipType.CRUISER,
-        ShipType.DESTROYER, ShipType.SUBMARINE,
-    ))
-    wanted = None
-    if counts[ShipType.MERCHANT] < 1:
-        wanted = ShipType.MERCHANT
-    elif counts[ShipType.LANDING] < 1:
-        wanted = ShipType.LANDING
-    elif combat < 2:
-        wanted = ShipType.DESTROYER
-    else:
+    queue = build_queue_for(engine, player_id, rng)
+    if not queue:
         return None
+    wanted = queue[0]
     matching = [a for a in options if isinstance(a, BuildShipAction) and a.ship_type is wanted]
-    if matching:
-        return matching[0]
-    for ship_type in _BUY_ORDER:
-        matching = [a for a in options if isinstance(a, BuildShipAction) and a.ship_type is ship_type]
-        if matching:
-            return matching[0]
-    return None
+    if not matching:
+        return None
+    queue.popleft()
+    if not queue:
+        queue.extend(sample_build_cycle(rng))
+    return matching[0]
 
 
 def _objective_distance(engine, player_id: int, ship, pos) -> Optional[int]:
