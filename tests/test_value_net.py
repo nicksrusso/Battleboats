@@ -188,3 +188,49 @@ def test_train_script_runs_and_resumes(tiny_cache, tmp_path):
     # Resume to 2 epochs: appends exactly one epoch row.
     assert train_main(["--resume", str(run), "--set", "train.epochs=2", "--skip-test"]) == 0
     assert len((run / "metrics.csv").read_text().strip().splitlines()) == 3
+
+
+
+def test_resolve_device_cpu_and_fallback():
+    from battleboats.training.value_eval import resolve_device
+
+    assert resolve_device("cpu").type == "cpu"
+    # "auto" may be cuda when a GPU is present; still a valid torch device.
+    d = resolve_device("auto")
+    assert d.type in ("cpu", "cuda")
+    if not __import__("torch").cuda.is_available():
+        assert resolve_device("cuda").type == "cpu"
+
+
+def test_large_config_param_count():
+    import yaml
+    from battleboats.training.value_net import ValueNet, count_params
+
+    cfg = yaml.safe_load((Path(__file__).resolve().parents[1] / "configs" / "value_net_v0.5.0_large.yaml").read_text())
+    m = ValueNet(**cfg["model"])
+    n = count_params(m)
+    assert n == 574210
+    assert cfg["data"]["include_draws"] is False and cfg["data"]["k_pool"] == 64
+    assert cfg["train"]["device"] == "cuda" and cfg["train"]["patience"] >= 1
+
+
+def test_train_early_stop_and_device_cpu(tiny_cache, tmp_path):
+    from scripts.train_value import main as train_main
+
+    hdir, cdir, _ = tiny_cache
+    cfg = Path(__file__).resolve().parents[1] / "configs" / "value_net_v0.5.0.yaml"
+    run = tmp_path / "run_es"
+    rc = train_main(
+        ["--config", str(cfg), "--run-dir", str(run), "--set",
+         f"data.harvest_dir={hdir}", f"data.cache_dir={cdir}", "data.include_draws=true",
+         "data.k_per_game=4", "model.d_model=16", "model.nhead=2", "model.num_layers=1",
+         "model.dim_feedforward=32", "train.batch_size=8", "train.torch_threads=1",
+         "train.num_workers=0", "train.warmup_steps=1", "train.log_every=1",
+         "train.epochs=4", "train.patience=1", "train.min_delta=1.0",
+         "train.device=cpu", "eval.baseline_fit_rows=500"]
+    )
+    assert rc == 0
+    # min_delta=1.0 means epoch 1 cannot beat epoch 0 by that much, so we stop after stale=1.
+    rows = [ln for ln in (run / "metrics.csv").read_text().strip().splitlines() if ln]
+    assert 2 <= len(rows) <= 3  # header + 1 or 2 epoch rows
+    assert (run / "summary.json").exists()

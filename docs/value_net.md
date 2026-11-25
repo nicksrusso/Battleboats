@@ -58,3 +58,19 @@ home seen, ...). All features are fog-fair.
 accuracy, Brier (by 0.005) and log-loss all better than the best of coin flip,
 constant prior, seat prior and `logistic_simple`. Beating `logistic_rich` is
 reported separately.
+
+## Large model (GPU)
+
+`configs/value_net_v0.5.0_large.yaml` is the same data and 90/5/5 split, with a
+bigger encoder: `d_model=128`, 4 layers, 8 heads, `dim_feedforward=256`
+(574,210 parameters). Training uses `train.device: cuda` (works on NVIDIA CUDA
+or AMD ROCm via `torch.cuda`). LR is 3e-4 with 200-step warmup and cosine decay;
+batch size 512; early stopping on val Brier with patience 8 and `min_delta` 0.0005.
+Best checkpoint is still `best.pt` (lowest val Brier). `train_value.py` falls
+back to CPU and prints a note if a GPU was requested but is not available.
+
+```bash
+HIP_VISIBLE_DEVICES=0 poetry run python scripts/train_value.py --config configs/value_net_v0.5.0_large.yaml
+```
+
+(`HIP_VISIBLE_DEVICES=0` pins an AMD box to the discrete GPU when an iGPU is also visible.)

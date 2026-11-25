@@ -1,0 +1,49 @@
+# Value net v0.5.0 large — same data/split as value_net_v0.5.0.yaml, bigger encoder.
+# d_model=128, 4 layers, 8 heads, ff=256: 574,210 params (about 7x the 80,898
+# small net). Train on GPU (torch.cuda; NVIDIA or AMD ROCm). See docs/value_net.md.
+version: "0.5.0"
+
+data:
+  harvest_dir: runs/value_harvest_48x24_fc_v0.5.0
+  cache_dir: runs/value_harvest_48x24_fc_v0.5.0/value_cache_k64
+  k_pool: 64
+  k_per_game: 32
+  val_frac: 0.05
+  test_frac: 0.05
+  include_draws: false  # decisive games only
+  seed: 0
+  cache_workers: 8
+
+model:
+  d_model: 128
+  nhead: 8
+  num_layers: 4
+  dim_feedforward: 256
+  dropout: 0.1
+  aux_head: true
+
+train:
+  epochs: 40
+  batch_size: 512
+  lr: 0.0003
+  weight_decay: 0.01
+  warmup_steps: 200     # ~1 epoch at 218 steps/epoch; then cosine to 5% of lr
+  grad_clip: 1.0
+  aux_weight: 0.25
+  torch_threads: 4      # GPU does the matmuls; leave CPU for the small-net run
+  num_workers: 2
+  eval_batch_size: 1024
+  log_every: 50
+  max_steps_per_epoch: 0
+  device: cuda
+  patience: 8           # stop if val Brier has not improved by min_delta
+  min_delta: 0.0005
+  seed: 0
+
+eval:
+  baseline_fit_rows: 60000
+  min_acc_margin: 0.02
+  brier_margin: 0.005
+  gate_baselines: [coin_flip, constant_prior, seat_prior, logistic_simple]
+
+out_root: runs/value_net_v0.5.0_large
