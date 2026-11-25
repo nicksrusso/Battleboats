@@ -259,3 +259,184 @@ def test_old_checkpoint_without_global_proj_loads(tmp_path: Path) -> None:
     assert "global_proj.weight" in loaded.state_dict()
     assert loaded.global_proj.in_features == GLOBALS_DIM
     torch.testing.assert_close(loaded.proj.weight, policy.proj.weight)
+
+
+def _unsighted_coastal_land(engine, observer_id: int):
+    """Coastal land tiles that are not ports and lie outside Port spot range."""
+    from battleboats.core.shipyard.ship_data import PORT, spot_distance
+    from battleboats.envs.observation import _coastline_scan
+
+    m = engine.map
+    candidates = []
+    for pos in _coastline_scan(m):
+        if m.is_port(pos):
+            continue
+        seen = any(
+            m.manhattan(engine.ships[sid].position, pos) <= spot_distance(engine.ships[sid].type, PORT)
+            for sid in engine.players[observer_id].owned_ship_ids
+        ) or any(
+            m.manhattan(ppos, pos) <= spot_distance(PORT, PORT)
+            for ppos in engine.players[observer_id].owned_port_positions
+        )
+        if not seen:
+            candidates.append(pos)
+    return candidates
+
+
+def _assert_obs_equal(e1, e2, pid: int) -> None:
+    from battleboats.envs.observation import build_observation
+
+    o1 = build_observation(e1, pid)
+    o2 = build_observation(e2, pid)
+    assert build_entity_refs(e1, pid) == build_entity_refs(e2, pid)
+    assert np.array_equal(o1["entity_tokens"], o2["entity_tokens"])
+    assert np.array_equal(o1["globals"], o2["globals"])
+
+
+def test_unsighted_enemy_ports_appear_as_plain_coastline(tmp_path: Path) -> None:
+    from battleboats.core.gameEngine import gameEngine
+    from battleboats.ui.maps import resolve_map
+
+    rm = resolve_map("32x16", seed=4, map_dir=tmp_path)
+    engine = gameEngine(str(rm.path))
+    engine.reset(seed=4)
+
+    for pid in (0, 1):
+        refs = build_entity_refs(engine, pid)
+        coast_set = {ident for kind, ident in refs if kind == "coastline"}
+        enemy_port_set = {ident for kind, ident in refs if kind == "enemy_port"}
+        own_port_set = {ident for kind, ident in refs if kind == "friendly_port"}
+        unsighted_enemy = [
+            pos
+            for pos, port in engine.ports.items()
+            if port.owner != pid and pos not in engine.players[pid].port_sightings
+        ]
+        assert unsighted_enemy, "32x16 should start with unsighted enemy ports"
+        for pos in unsighted_enemy:
+            assert pos in coast_set
+            assert pos not in enemy_port_set
+            assert pos not in own_port_set
+
+
+def test_observation_fog_invariant_to_unsighted_ports_and_enemy_home(tmp_path: Path) -> None:
+    from battleboats.core.gameEngine import gameEngine
+    from battleboats.core.map.Map import NO_OWNER
+    from battleboats.core.port import Port
+    from battleboats.core.shipyard.ship_type import ShipType
+    from battleboats.ui.maps import resolve_map
+
+    rm = resolve_map("48x24", seed=7, map_dir=tmp_path)
+    base = gameEngine(str(rm.path))
+    base.reset(seed=7)
+
+    pid = 0
+    opp = 1
+    assert not base.players[pid].port_sightings
+    extra_land = _unsighted_coastal_land(base, pid)
+    assert len(extra_land) >= 3
+
+    # 1) Add an unsighted enemy port on an existing coastal land tile.
+    e_add = base.clone()
+    new_pos = extra_land[0]
+    e_add.map.add_port(new_pos, opp)
+    e_add.players[opp].owned_port_positions.add(new_pos)
+    e_add.ports[new_pos] = Port(position=new_pos, owner=opp, is_home=False, stockpile=125)
+    e_add._refresh_sightings()
+    _assert_obs_equal(base, e_add, pid)
+
+    # 2) Move an unsighted enemy satellite port to another coastal land tile.
+    e_move = base.clone()
+    sat_pos = next(
+        pos for pos, port in e_move.ports.items() if port.owner == opp and not port.is_home
+    )
+    dst_pos = extra_land[1]
+    sat = e_move.ports.pop(sat_pos)
+    e_move.players[opp].owned_port_positions.discard(sat_pos)
+    e_move.map.port_owner[sat_pos] = NO_OWNER
+    e_move.map.port_positions = [p for p in e_move.map.port_positions if p != sat_pos]
+    e_move.map._coastline_cache = None
+    sat.position = dst_pos
+    e_move.ports[dst_pos] = sat
+    e_move.players[opp].owned_port_positions.add(dst_pos)
+    e_move.map.add_port(dst_pos, opp)
+    e_move._refresh_sightings()
+    _assert_obs_equal(base, e_move, pid)
+
+    # 3) Remove an unsighted enemy satellite port (leaving the tile as coastal land).
+    e_del = base.clone()
+    e_del.ports.pop(sat_pos)
+    e_del.players[opp].owned_port_positions.discard(sat_pos)
+    e_del.map.port_owner[sat_pos] = NO_OWNER
+    e_del.map.port_positions = [p for p in e_del.map.port_positions if p != sat_pos]
+    e_del.map._coastline_cache = None
+    e_del._refresh_sightings()
+    _assert_obs_equal(base, e_del, pid)
+
+    # 4) Move the enemy home port to a different unsighted coastal tile + swap flags.
+    e_home = base.clone()
+    old_home = e_home.players[opp].home_port
+    new_home = extra_land[2]
+    e_home.ports[old_home].is_home = False
+    e_home.map.add_port(new_home, opp)
+    e_home.players[opp].owned_port_positions.add(new_home)
+    e_home.ports[new_home] = Port(position=new_home, owner=opp, is_home=True, stockpile=0)
+    e_home.players[opp].home_port = new_home
+    e_home.players[opp].cash += 999
+    # Also spawn an unseen enemy ship and reseed engine RNG.
+    hidden_water = next(
+        (x, y)
+        for x in range(e_home.map.width // 2, e_home.map.width)
+        for y in range(e_home.map.height)
+        if e_home.map.is_water((x, y)) and not e_home.map.is_occupied((x, y))
+    )
+    e_home._spawn_ship(opp, ShipType.SUBMARINE, hidden_water)
+    e_home.rng = np.random.default_rng(99999)
+    e_home._refresh_sightings()
+    _assert_obs_equal(base, e_home, pid)
+
+
+def test_spotting_enemy_port_moves_tile_from_coastline_to_enemy_port(tmp_path: Path) -> None:
+    from battleboats.core.gameEngine import gameEngine
+    from battleboats.core.shipyard.ship_data import PORT, spot_distance
+    from battleboats.core.shipyard.ship_type import ShipType
+    from battleboats.ui.maps import resolve_map
+
+    rm = resolve_map("48x24", seed=10, map_dir=tmp_path)
+    engine = gameEngine(str(rm.path))
+    engine.reset(seed=10)
+
+    opp_port = engine.players[1].home_port
+    assert opp_port not in engine.players[0].port_sightings
+    refs_before = build_entity_refs(engine, 0)
+    assert ("coastline", opp_port) in refs_before
+    assert ("enemy_port", opp_port) not in refs_before
+
+    # Place a friendly Destroyer adjacent to opp_port so it spots the port.
+    adj = next(
+        (opp_port[0] + dx, opp_port[1] + dy)
+        for dx, dy in ((1, 0), (-1, 0), (0, 1), (0, -1))
+        if engine.map.in_bounds((opp_port[0] + dx, opp_port[1] + dy))
+        and engine.map.is_water((opp_port[0] + dx, opp_port[1] + dy))
+    )
+    dd = engine._spawn_ship(0, ShipType.DESTROYER, adj)
+    engine._refresh_sightings()
+    refs_seen = build_entity_refs(engine, 0)
+    assert ("enemy_port", opp_port) in refs_seen
+    assert ("coastline", opp_port) not in refs_seen
+
+    # Move the scout far away (> Port spot range): sighting turns stale, tile stays enemy_port.
+    far = next(
+        (x, y)
+        for x in range(engine.map.width)
+        for y in range(engine.map.height)
+        if engine.map.is_water((x, y))
+        and not engine.map.is_occupied((x, y))
+        and engine.map.manhattan((x, y), opp_port) > spot_distance(ShipType.DESTROYER, PORT)
+    )
+    engine.map.relocate_ship(dd.id, dd.position, far)
+    dd.position = far
+    engine._refresh_sightings()
+    assert engine.players[0].port_sightings[opp_port].fresh is False
+    refs_stale = build_entity_refs(engine, 0)
+    assert ("enemy_port", opp_port) in refs_stale
+    assert ("coastline", opp_port) not in refs_stale

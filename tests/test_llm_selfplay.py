@@ -201,7 +201,9 @@ def test_stale_sighting_hides_true_position(tmp_path: Path) -> None:
     assert "(3,1)" in prompt
     assert f"s{merchant.id}" in prompt
     assert all(pos != [15, 6] for pos in view["land"])
-    assert [15, 7] not in view["land"]
+    assert [0, 0] not in view["land"]
+    assert [15, 7] in view["land"]
+    assert all(p["pos"] != [15, 7] for p in view["ports"])
 
 
 def test_wall_blocks_capture_path(tmp_path: Path) -> None:
