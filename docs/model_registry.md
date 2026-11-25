@@ -5,14 +5,22 @@ was trained, how it plays, and what to use it for. Version naming and the
 mapping from tags to weight files are in [model_versions.md](model_versions.md);
 this page does not repeat those rules.
 
-Weights live outside git in `runs/checkpoints/` on Nick's PC. Every headline
-number below is taken from a file (checkpoint `.json` metadata,
-`docs/model_versions.md`, a `runs/eval/*/summary.json`, or
+**Archived.** All pre-v0.5.0 weights and run directories were packed into
+`~/Desktop/repos/battleboats_archive/runs_pre_v0.5.0_20261124.tar.zst`
+(sha256 `c0f63624052c78da0b48d413b23f2b15a6240f554e762adf5e70ca631db69c03`)
+and removed from `runs/` on 2026-11-24. They were trained under the old
+visibility/scouting rules and are obsolete for the spotting-matrix game.
+The next tagged model is v0.5.0; no weights exist yet. Paths below are
+historical locations inside the archive.
+
+Headline numbers below were taken from those files (checkpoint `.json`
+metadata, `docs/model_versions.md`, a `runs/eval/*/summary.json`, or
 `runs/eval/behavior_scripted_v_v0.3.0/REPORT.md`). sha256 prefixes were
 recomputed from the `.pt` files and match the metadata. Anything not found in
-those files is called out as unverified or omitted. The live catalog of what
+those files is called out as unverified or omitted. The catalog of what
 was trained how — full configs, parent checkpoints, and evals — is the run
-index described in [Training run index](#training-run-index).
+index described in [Training run index](#training-run-index), which rebuilds
+from whatever is present under `runs/` (currently empty until a v0.5.0 run).
 
 W/L/D is wins/losses/draws for the named side. Wilson intervals are 95% on the
 win rate. "Score" counts a draw as half a win.
@@ -27,9 +35,11 @@ win rate. "Score" counts a draw as half a win.
 | v0.3.0 | 26348ee | Mixed 16x8+20x10 self-play from v0.2.0, tagged at update 800 | vs v0.2.0 129/67/4 (current best tagged trained policy) |
 | v0.4.0 | 8ad2530 | Behavior clone of the #46 tactical scripted agent | Sampled vs tactical 24/28/48 (score 0.480); vs v0.3.0 11/50/39 (score 0.305). Use sampled play, not greedy. |
 | v0.4.1 | docs commit (tag); weights 79754fb | v0.4.0 BC + buy-diversity sandbox fine-tune from both seats, anchor 0.05 | Sampled vs v0.4.0 14/11/25 (score 0.530); vs tactical 10/25/15 (score 0.350); self-play 36 decisive / 14 draws (72%). Use sampled play. |
+| v0.5.0 | — | Spotting-matrix rules (visibilityMatrix.csv, destroyer strength 50, sub cost 125). No weights yet. | — |
 
-An earlier sandbox-warmup tag, [v0.0.1](model_versions.md), exists at f4f7bef
+An earlier sandbox-warmup tag, [v0.0.1](model_versions.md), existed at f4f7bef
 (`runs/checkpoints/v0.0.1_f4f7bef.pt`). It is not part of this self-play series.
+All of the rows above through v0.4.1, including v0.0.1, are in the archive.
 
 ---
 
@@ -186,8 +196,10 @@ checkpoint (path, sha256, and tag if it matches `runs/checkpoints/vX.Y.Z_*`),
 reward settings, updates completed, the final checkpoint, and an `evals` list
 that eval scripts append to.
 
-Those manifests are gitignored along with the rest of `runs/`. Rebuild the
-index from a checkout that can see the run directories:
+Those manifests are gitignored along with the rest of `runs/`. The pre-v0.5.0
+tree is in the archive named above; a fresh checkout has no runs until the
+next training job. Rebuild the index from a checkout that can see the run
+directories (or after unpacking the archive):
 
 ```bash
 poetry run python scripts/runs_index.py --runs-root runs

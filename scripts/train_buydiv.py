@@ -3,7 +3,12 @@
 
     PYTHONPATH=<repo> python scripts/train_buydiv.py \
         --config configs/sandbox_buydiv.yaml \
-        --run-dir runs/sandbox_buydiv_v0.4.0
+        --init path/to/policy.pt \
+        --run-dir runs/sandbox_buydiv
+
+Requires ``init_checkpoint`` in the config or ``--init``. Pre-v0.5.0
+official weights were archived; see
+``battleboats.training.checkpoints.NO_CHECKPOINT_MSG``.
 """
 
 from __future__ import annotations

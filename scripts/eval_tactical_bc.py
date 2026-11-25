@@ -1,13 +1,19 @@
 #!/usr/bin/env python3
-"""Evaluate a tactical BC checkpoint vs tactical, v0.3.0, and itself.
+"""Evaluate a tactical BC checkpoint vs tactical, a frozen policy, and itself.
 
-Uses the same v0.2.2 pool, caps, and 25-per-(seat, size) schedule as
-``eval_tactical.py``. The BC policy is the ``policy`` actor (greedy by
-default; pass --sample to draw from the policy like PPO eval).
+Uses the same caps and 25-per-(seat, size) schedule as ``eval_tactical.py``.
+The BC policy is the ``policy`` actor (greedy by default; pass --sample to
+draw from the policy like PPO eval).
 
     PYTHONPATH=<repo> python scripts/eval_tactical_bc.py \
-        --checkpoint runs/bc_tactical_v040/train/best.pt \
-        --output-dir runs/eval/bc_v0.4.0/
+        --checkpoint path/to/bc_policy.pt \
+        --v030-checkpoint path/to/opponent.pt \
+        --maps-dir path/to/maps \
+        --config path/to/selfplay_config.yaml \
+        --output-dir runs/eval/bc_policy/
+
+Pre-v0.5.0 official checkpoints and the v0.2.2 map pool were archived;
+see ``battleboats.training.checkpoints.NO_CHECKPOINT_MSG``.
 """
 from __future__ import annotations
 
@@ -31,7 +37,8 @@ from battleboats.core.actions import (AttackAction, BuildShipAction,
 from battleboats.core.shipyard.ship_type import ShipType
 from battleboats.envs.action_masks import ActionMasks
 from battleboats.envs.battleboats_aec import BattleboatsAEC
-from battleboats.training.checkpoints import load_checkpoint
+from battleboats.training.checkpoints import (NO_CHECKPOINT_MSG, no_archived,
+                                              load_checkpoint)
 from battleboats.training.selfplay import load_selfplay_config
 from battleboats.training.selfplay_purchases import hull_name
 from battleboats.training.manifest import append_eval
@@ -39,15 +46,6 @@ from scripts.eval_tactical import (_finalize_survivors, _list_maps,
                                    _new_tracker, _note_births, _note_deaths,
                                    _schedule, summarize)
 
-DEFAULT_MAPS = Path(
-    "/home/nick/Desktop/repos/Battleboats/runs/selfplay_mixed_v0.2.2/maps"
-)
-DEFAULT_CONFIG = Path(
-    "/home/nick/Desktop/repos/Battleboats/runs/selfplay_mixed_v0.2.2/config.yaml"
-)
-DEFAULT_V030 = Path(
-    "/home/nick/Desktop/repos/Battleboats/runs/checkpoints/v0.3.0_26348ee.pt"
-)
 
 
 def _play(
@@ -201,9 +199,9 @@ def _focalize(games: List[Dict[str, Any]], focal: str) -> List[Dict[str, Any]]:
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--checkpoint", type=Path, required=True)
-    parser.add_argument("--v030-checkpoint", type=Path, default=DEFAULT_V030)
-    parser.add_argument("--maps-dir", type=Path, default=DEFAULT_MAPS)
-    parser.add_argument("--config", type=Path, default=DEFAULT_CONFIG)
+    parser.add_argument("--v030-checkpoint", type=Path, default=None)
+    parser.add_argument("--maps-dir", type=Path, default=None)
+    parser.add_argument("--config", type=Path, default=None)
     parser.add_argument("--output-dir", type=Path, required=True)
     parser.add_argument("--games", type=int, default=100)
     parser.add_argument("--self-play-games", type=int, default=40)
@@ -223,6 +221,12 @@ def main() -> None:
     )
     parser.add_argument("--vs-label", type=str, default="frozen")
     args = parser.parse_args()
+    if args.maps_dir is None:
+        raise SystemExit(no_archived("maps-dir"))
+    if args.config is None:
+        raise SystemExit(no_archived("config"))
+    if not args.skip_vs_v030 and args.v030_checkpoint is None:
+        raise SystemExit(NO_CHECKPOINT_MSG)
 
     torch.set_num_threads(args.threads)
     torch.set_num_interop_threads(1)

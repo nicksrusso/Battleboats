@@ -3,7 +3,7 @@
     poetry run python scripts/train_selfplay.py --config configs/selfplay.yaml
     poetry run python scripts/train_selfplay.py \\
         --config configs/selfplay_smoke.yaml \\
-        --init-checkpoint runs/curriculum_smoke/latest.pt
+        --init-checkpoint path/to/warmstart.pt
 
 The opponent ring is uniform over recent checkpoints. There is no Elo, no
 PFSP, and no exploiter. ``RecentSnapshots.sample`` is the place a later

@@ -1,11 +1,20 @@
 # Model versions
 
-Tagged weights live outside git (``runs/`` is gitignored) in
+Tagged weights lived outside git (``runs/`` is gitignored) in
 ``runs/checkpoints/<version>_<commit>.pt`` on Nick's PC. ``<commit>`` is the
 code the weights were trained with, and the annotated git tag ``<version>``
-points at that commit. v0.1.0 also keeps its run config
+points at that commit. v0.1.0 also kept its run config
 (``<version>_<commit>.config.yaml``) and metadata (``<version>_<commit>.json``)
-next to the weights, as do later versions.
+next to the weights, as did later versions.
+
+**Archived.** All pre-v0.5.0 runs and official checkpoints were packed on
+2026-11-24 after the spotting-matrix rules change, then deleted from
+``runs/``. The tarball is
+``~/Desktop/repos/battleboats_archive/runs_pre_v0.5.0_20261124.tar.zst``
+(sha256
+``c0f63624052c78da0b48d413b23f2b15a6240f554e762adf5e70ca631db69c03``).
+The next tagged model is v0.5.0; there are no v0.5.0 weights yet. Paths in
+the tables below are the historical locations inside the archive.
 
 Versions use periods: `vMAJOR.MINOR.PATCH` (v0.1.1, not v011). Run
 directories for versioned models carry the same name, e.g.
@@ -98,5 +107,5 @@ experiment, not model versions; there is no tagged v0.2.1 model.
 
 - Game rebalance (Nick, 2026-11-24). Detection is now an exact spotting-distance matrix, `battleboats/core/config/visibilityMatrix.csv` (row spots column, in tiles), replacing the visibility × scouting coefficients, which are gone from `shipTypes.csv`. Submarine strength 100 → 50; Destroyer vs Submarine modifier 1.5 → 4; Submarine vs Carrier/Battleship/Cruiser 2/2/1 → 3/4/2.
 - Follow-up (#56): Destroyer strength 25 → 50, Destroyer vs Submarine modifier 4 → 2 (DD→SS P_kill stays 0.80), Submarine cost 100 → 125. Still v0.5.0 rules; no model was trained in between.
-- Under the bump rule this is a minor bump, so the next tagged model is v0.5.0. v0.0.1–v0.4.1 were all trained under the old rules.
-- The observation shape is unchanged, so older checkpoints still load and run, but stats slots 3 and 4 now hold per-hull spotting summaries (mean distance the hull is spotted at / spots at) instead of the visibility and scouting coefficients. What those checkpoints learned for those slots, and their sense of what they can see, is stale. Treat v0.4.x evals under the new rules as off-distribution.
+- Under the bump rule this is a minor bump, so the next tagged model is v0.5.0. v0.0.1–v0.4.1 were all trained under the old rules and have been archived (see the notice at the top of this page).
+- The observation shape is unchanged, so those archived checkpoints still load and run, but stats slots 3 and 4 now hold per-hull spotting summaries (mean distance the hull is spotted at / spots at) instead of the visibility and scouting coefficients. What those checkpoints learned for those slots, and their sense of what they can see, is stale. Treat v0.4.x evals under the new rules as off-distribution.

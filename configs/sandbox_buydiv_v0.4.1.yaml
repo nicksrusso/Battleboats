@@ -1,10 +1,14 @@
-# Fine-tune v0.4.0 in the buy-diversity sandbox with both learner seats
-# and a non-buy MSE anchor toward the frozen init (BAT-23).
+# Buy-diversity sandbox fine-tune with both learner seats and a non-buy
+# MSE anchor toward the frozen init (BAT-23 template).
 # Reward is potential-based delta of max(0, 1 - std/mean) over all 8 hulls
 # plus a small coverage bonus (training only). Cheap types (destroyer,
 # submarine, merchant) are masked with annealed probability p; landing is
 # never masked. Evaluate unmasked. CPU only.
-init_checkpoint: runs/checkpoints/v0.4.0_8ad2530.pt
+# Pre-v0.5.0 official checkpoints were archived in
+# ~/Desktop/repos/battleboats_archive/runs_pre_v0.5.0_20261124.tar.zst
+# (sha256 c0f63624052c78da0b48d413b23f2b15a6240f554e762adf5e70ca631db69c03).
+# init_checkpoint (or --init) is required; there is no default warm start.
+init_checkpoint: null
 run_dir: runs/sandbox_buydiv_v0.4.1
 updates: 300
 decisions_per_update: 1024
@@ -15,7 +19,7 @@ sizes:
 p_start: 0.7
 p_end: 0.0
 coverage_coef: 0.25
-# Non-buy log-prob MSE toward frozen v0.4.0, excluding build_ship so the
+# Non-buy log-prob MSE toward the frozen init, excluding build_ship so the
 # diversity objective can still move the hull head. 0.05 and 0.15 are the
 # probe values; the full run uses the coefficient chosen after the probe.
 anchor_coef: 0.05

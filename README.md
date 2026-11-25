@@ -148,7 +148,7 @@ poetry run python scripts/train_curriculum.py --config configs/curriculum_smoke.
 
 Resume is on by default (`runs/curriculum/state.json`). `--no-resume` starts over. `--allow-unmet` hands a checkpoint on even if the gate is missed; otherwise the process exits 2. `--init-checkpoint` warm-starts stage 0. `--device auto` overrides the yaml.
 
-Checkpoints are `{model_state, model_config}` only. They do not store an opponent id or a rating, so a later quality-diversity run can load `runs/curriculum/latest.pt` directly.
+Checkpoints are `{model_state, model_config}` only. They do not store an opponent id or a rating, so a later quality-diversity run can load a curriculum `latest.pt` directly.
 
 # Self-play
 
@@ -158,10 +158,10 @@ After the curriculum, train the full game against the last few snapshots. Most g
 poetry run python scripts/train_selfplay.py --config configs/selfplay.yaml
 poetry run python scripts/train_selfplay.py \
     --config configs/selfplay_smoke.yaml \
-    --init-checkpoint runs/curriculum_smoke/latest.pt
+    --init-checkpoint path/to/warmstart.pt
 ```
 
-The real config looks for `runs/curriculum/latest.pt` and falls back to a random policy if that file is missing.
+Self-play configs no longer point at a default warm start. Pass `--init-checkpoint` to resume from a policy; otherwise training starts from a random policy. Pre-v0.5.0 official weights and run directories were archived in `~/Desktop/repos/battleboats_archive/runs_pre_v0.5.0_20261124.tar.zst` (see `docs/model_versions.md`).
 
 Full-game self-play collects in worker processes. `num_workers` processes (7 in `configs/selfplay_bigmaps.yaml`) each run at `collect_threads` torch threads (1) and keep `games_per_worker` games (8) open, batching one forward pass per network per round. PPO runs in the main process at `ppo_threads` (8). Each update records exactly `rollout_decisions` learner decisions. A game still running at the cap is cut, its last step is bootstrapped with the current V(s) of the learner's next decision, and it continues in the next update with the new weights, so a long 48x24 game spans many updates. `num_workers: 0` plays in the main process. `dropout` (0.0 by default) overrides the checkpoint's dropout after loading, so the PPO re-score matches the eval-mode rollout; weights load unchanged. Each update logs `dec`, `env_steps`, `collect` and `ppo` seconds, and the hull mix the learner bought that update. Win and draw rates count only games that finished that update. The other trainers (sandboxes, curriculum) still collect in one process. `reward_shaping` (off unless `enabled: true`; on in `configs/selfplay_bigmaps_shaped.yaml`) adds small per-event rewards on the learner's own steps: ship bought (weight x hull cost / 250), cargo loaded and delivered (per 100 units), port built, and enemy non-home port captured (each port once per player per game). Per-component and total per-game caps keep one player's shaping under 0.4 a game, and each update logs `shape=` totals by component. Sandboxes keep their own drill rewards. A zero-sum `kill` component pays the sinker +weight x cost / 250 on the sinking attack and charges the owner the same amount on its previous transition (found by fleet diff at its next decision), with a symmetric per-game cap outside `total_cap`. `fleet_starts` (on in `configs/selfplay_bigmaps_shaped_fleets.yaml`, prob 0.333) gives both sides the same random fleet near their homes. Each update logs attacks/sinks for both seats (`atk=`), hulls sunk and lost, results by start type, and the mean per-game minimum fleet distance. `landing_progress` is potential-based shaping, phi = -weight x min(D, norm) / norm, where D is the water distance from the nearest own landing ship to the enemy home, norm is the home-to-home water distance, and no landing ship counts as D = norm. Each learner transition gets phi' - phi, so retreating or losing the ship gives the progress back. `fleet_starts.landing_forward_prob` places both sides' landing ships 5-7 water tiles from the enemy home. Both are on in `configs/selfplay_bigmaps_shaped_fleets_landing.yaml`, and each update logs `land=` (landing ships alive, min distance, capture attempts/captures/home captures for both seats). The GPU stays unused: the network is a small transformer (`d_model` 64).
 
