@@ -87,8 +87,6 @@ poetry run pytest
 poetry run pytest -o addopts= -m slow   # god-mode MCTS benchmark
 ```
 
-The C++ port under `cpp_core/` is a skeleton (`game_engine.cpp` and `map.cpp` are empty). The Python engine is the source of truth.
-
 # Play against an agent
 
 Local page, one game at a time. Pick a side and an opponent: random, the full-information scripted baseline, or any `.pt` checkpoint under `--checkpoint-dir`.
