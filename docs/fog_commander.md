@@ -45,8 +45,9 @@ terrain mask, and `enumerate_legal(pid)` reduced to fog-safe facts.
    port changes the set. The pseudocode flood-filled water from those tokens,
    so unsighted ports became "water". This agent never uses them. A port tile
    is land, and it is a search candidate until a unit covers it at Port spot
-   range. `observation.py` is unchanged here because changing it would change
-   policy inputs; this is a known leak for the RL side.
+   range. *Fixed:* `observation.py` now excludes only ports the observer owns or
+   has sighted from coastline tokens, so unsighted enemy ports appear as
+   plain coastal land to RL policies too.
 3. **Ship ids** come from one global counter. They are used only as identity
    keys and to order ships within one owner.
 

@@ -107,5 +107,13 @@ experiment, not model versions; there is no tagged v0.2.1 model.
 
 - Game rebalance (Nick, 2026-11-24). Detection is now an exact spotting-distance matrix, `battleboats/core/config/visibilityMatrix.csv` (row spots column, in tiles), replacing the visibility × scouting coefficients, which are gone from `shipTypes.csv`. Submarine strength 100 → 50; Destroyer vs Submarine modifier 1.5 → 4; Submarine vs Carrier/Battleship/Cruiser 2/2/1 → 3/4/2.
 - Follow-up (#56): Destroyer strength 25 → 50, Destroyer vs Submarine modifier 4 → 2 (DD→SS P_kill stays 0.80), Submarine cost 100 → 125. Still v0.5.0 rules; no model was trained in between.
+- **Observation coastline fix (v0.5.0, post-archive):** `observation.py` previously
+  omitted *all* ports (including unsighted enemy ports) from coastline tokens,
+  leaving holes at hidden enemy ports and dropping tiles when an unseen enemy
+  built a port. Coastline tokens now exclude only ports the observing seat
+  owns or has sighted (`owned_port_positions | port_sightings`), so unsighted
+  enemy ports appear as plain coastline land tiles with zero fog leak.
+  Token shape `(N, 76)` and globals `(8,)` are unchanged; old checkpoints are
+  archived, and all v0.5.0 harvests/models train on this fixed encoding.
 - Under the bump rule this is a minor bump, so the next tagged model is v0.5.0. v0.0.1–v0.4.1 were all trained under the old rules and have been archived (see the notice at the top of this page).
 - The observation shape is unchanged, so those archived checkpoints still load and run, but stats slots 3 and 4 now hold per-hull spotting summaries (mean distance the hull is spotted at / spots at) instead of the visibility and scouting coefficients. What those checkpoints learned for those slots, and their sense of what they can see, is stale. Treat v0.4.x evals under the new rules as off-distribution.

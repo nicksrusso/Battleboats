@@ -15,12 +15,14 @@ Fog-of-war discipline (load-bearing):
     Enemy ships  → from player.sightings (fresh + stale), NEVER engine.ships.
     Enemy ports  → from player.port_sightings, NEVER engine.ports for enemies.
     Friendly entities → directly from engine.ships / engine.ports.
-    Coastline tiles → static map property; safe to read from engine.map.
+    Coastline tiles → static coastal land from engine.map minus ports known
+                      to player_id (owned or in port_sightings); unsighted
+                      enemy ports remain plain coastline tokens so fog never leaks.
 """
 
 import math
 from functools import lru_cache
-from typing import TYPE_CHECKING, Any, Dict, List, Sequence, Tuple
+from typing import TYPE_CHECKING, Any, Dict, List, Optional, Sequence, Tuple
 
 import numpy as np
 
@@ -241,7 +243,7 @@ def _ordered_entities(engine: "gameEngine", player_id: int):
         yield ("enemy_ship", sighting)
     for port_sighting in engine.known_enemy_ports(player_id):
         yield ("enemy_port", port_sighting)
-    for pos in _coastline_tiles(engine):
+    for pos in _coastline_tiles(engine, player_id):
         yield ("coastline", pos)
 
 
@@ -331,19 +333,28 @@ def _write_board_size(row: np.ndarray, engine: "gameEngine") -> None:
     row[BOARD_SIZE_OFFSET + 1] = engine.map.height / POSITION_SCALE
 
 
-def _coastline_tiles(engine: "gameEngine") -> List[Tuple[int, int]]:
-    """All land tiles adjacent to water and NOT currently ports.
+def _coastline_tiles(
+    engine: "gameEngine", player_id: Optional[int] = None
+) -> List[Tuple[int, int]]:
+    """Coastal land tiles not known to ``player_id`` to be ports.
 
-    These are candidate `build_port` targets. The land-next-to-water scan is
-    cached on the Map (cleared by Map.load and Map.add_port); ports are
-    filtered on every call.
+    Under fog of war (``player_id is not None``), excludes only ports the
+    observer owns or has sighted (``owned_port_positions | port_sightings``).
+    Unsighted enemy ports therefore appear as plain coastline land tiles
+    instead of leaving holes that leak hidden port locations or newly built
+    ports. When ``player_id is None`` (non-fog internal helpers), excludes all
+    true ports.
     """
     m = engine.map
     base = getattr(m, "_coastline_cache", None)
     if base is None:
         base = _coastline_scan(m)
         m._coastline_cache = base
-    return [pos for pos in base if not m.is_port(pos)]
+    if player_id is None:
+        return [pos for pos in base if not m.is_port(pos)]
+    player = engine.players[player_id]
+    known_ports = player.owned_port_positions | set(player.port_sightings)
+    return [pos for pos in base if pos not in known_ports]
 
 
 def _coastline_scan(m) -> Tuple[Tuple[int, int], ...]:
