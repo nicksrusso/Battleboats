@@ -13,6 +13,7 @@ name = "battleboats-core"
 version = "0.1.0"
 dependencies = [
  "csv",
+ "indexmap",
  "rand",
  "ryu",
  "serde",

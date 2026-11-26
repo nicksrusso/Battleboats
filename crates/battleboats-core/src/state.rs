@@ -3,6 +3,8 @@
 //! part of the hash, and strict PCG64 parity is a later issue.
 
 use std::collections::{BTreeMap, BTreeSet};
+
+use indexmap::IndexMap;
 use std::fs;
 use std::path::Path;
 
@@ -71,8 +73,9 @@ pub struct Player {
     pub cash: i64,
     pub owned_ship_ids: BTreeSet<i64>,
     pub owned_port_positions: BTreeSet<(i32, i32)>,
-    pub sightings: BTreeMap<i64, ShipSighting>,
-    pub port_sightings: BTreeMap<(i32, i32), PortSighting>,
+    /// Insertion order matches Python dict order (token rows depend on it).
+    pub sightings: IndexMap<i64, ShipSighting>,
+    pub port_sightings: IndexMap<(i32, i32), PortSighting>,
 }
 
 impl Player {
@@ -85,8 +88,8 @@ impl Player {
             cash: 0,
             owned_ship_ids: BTreeSet::new(),
             owned_port_positions,
-            sightings: BTreeMap::new(),
-            port_sightings: BTreeMap::new(),
+            sightings: IndexMap::new(),
+            port_sightings: IndexMap::new(),
         }
     }
 }
@@ -95,8 +98,8 @@ impl Player {
 pub struct GameState {
     pub map: Map,
     pub players: Vec<Player>,
-    pub ships: BTreeMap<i64, Ship>,
-    pub ports: BTreeMap<(i32, i32), Port>,
+    pub ships: IndexMap<i64, Ship>,
+    pub ports: IndexMap<(i32, i32), Port>,
     pub current_player: i64,
     pub turn: i64,
     pub winner: Option<i64>,
@@ -273,7 +276,7 @@ impl GameState {
             player.cash = STARTING_CASH;
         }
         let home_set = [homes[0], homes[1]];
-        let mut ports = BTreeMap::new();
+        let mut ports = IndexMap::new();
         for &pos in &map.port_positions {
             let owner = i64::from(map.port_owner_at(pos.0, pos.1)?);
             if owner == 0 || owner == 1 {
@@ -293,7 +296,7 @@ impl GameState {
         let mut state = Self {
             map,
             players,
-            ships: BTreeMap::new(),
+            ships: IndexMap::new(),
             ports,
             current_player: 0,
             turn: 0,

@@ -193,11 +193,21 @@ def main() -> None:
         default="cpu",
         help="cpu, cuda, cuda:N, or auto. ROCm reports the AMD GPU as cuda.",
     )
+    p.add_argument(
+        "--backend",
+        choices=("auto", "python", "rust"),
+        default="auto",
+        help="Recorded on the run. PPO rollouts still step the Python reference "
+        "env; harvest and scripted self-play use Rust when this resolves to rust.",
+    )
     p.add_argument("--seed", type=int, default=0)
     p.add_argument("--save-dir", type=Path, default=Path("runs/ppo_checkpoints"))
     p.add_argument("--save-every", type=int, default=10, help="Checkpoint every N updates.")
     p.add_argument("--wandb", action="store_true")
     args = p.parse_args()
+    from battleboats.backend_select import resolve_backend
+
+    args.backend = resolve_backend(args.backend)
     args.device = str(resolve_device(args.device))
 
     # ----------------------------------------------------------------- setup

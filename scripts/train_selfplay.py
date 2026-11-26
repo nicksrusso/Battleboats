@@ -23,6 +23,13 @@ def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--config", type=Path, required=True)
     parser.add_argument(
+        "--backend",
+        choices=("auto", "python", "rust"),
+        default="auto",
+        help="auto uses Rust for scripted self-play when the extension is built. "
+        "PPO gradient steps still use the Python reference env.",
+    )
+    parser.add_argument(
         "--device",
         default=None,
         help="Override the config device: cpu, cuda, cuda:N, or auto.",
@@ -33,6 +40,9 @@ def main() -> None:
     args = parser.parse_args()
 
     cfg = load_selfplay_config(args.config)
+    from battleboats.backend_select import resolve_backend
+
+    cfg.backend = resolve_backend(args.backend)
     if args.device:
         cfg.device = args.device
     if args.init_checkpoint is not None:

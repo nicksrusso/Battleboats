@@ -3,7 +3,9 @@
 //! `state_hash = sha256(utf8(json.dumps(state, sort_keys=True, separators=(",", ":"))))`.
 //! Collections are sorted here so map/set iteration order cannot change the digest.
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeSet;
+
+use indexmap::IndexMap;
 
 use serde::Deserialize;
 use serde_json::Value;
@@ -20,9 +22,12 @@ use crate::tables::tables;
 
 pub fn canonical_json(state: &GameState) -> String {
     let players = json_array(state.players.iter().map(player_json).collect::<Vec<_>>());
-    // BTreeMap iteration is already (x, y) / id order.
-    let ports = json_array(state.ports.values().map(port_json));
-    let ships = json_array(state.ships.values().map(ship_json));
+    let mut ports: Vec<_> = state.ports.values().collect();
+    ports.sort_by_key(|port| port.position);
+    let ports = json_array(ports.into_iter().map(port_json));
+    let mut ships: Vec<_> = state.ships.values().collect();
+    ships.sort_by_key(|ship| ship.id);
+    let ships = json_array(ships.into_iter().map(ship_json));
     let terrain = json_array(
         state
             .map
@@ -67,8 +72,12 @@ pub fn hash_canonical_json(json: &str) -> String {
 const HEX: &[u8; 16] = b"0123456789abcdef";
 
 fn player_json(player: &Player) -> String {
-    let ship_sightings = json_array(player.sightings.values().map(ship_sighting_json));
-    let port_sightings = json_array(player.port_sightings.values().map(port_sighting_json));
+    let mut ship_rows: Vec<_> = player.sightings.values().collect();
+    ship_rows.sort_by_key(|s| s.ship_id);
+    let ship_sightings = json_array(ship_rows.into_iter().map(ship_sighting_json));
+    let mut port_rows: Vec<_> = player.port_sightings.values().collect();
+    port_rows.sort_by_key(|s| s.position);
+    let port_sightings = json_array(port_rows.into_iter().map(port_sighting_json));
     json_object(&[
         ("cash", json_i64(player.cash)),
         (
@@ -160,7 +169,7 @@ fn state_from_doc(doc: CanonicalDoc) -> CoreResult<GameState> {
         map.set_terrain(cell[0], cell[1], crate::map::LAND)?;
     }
 
-    let mut ports = BTreeMap::new();
+    let mut ports = IndexMap::new();
     for port in doc.ports {
         let pos = (port.position[0], port.position[1]);
         if ports.contains_key(&pos) {
@@ -188,7 +197,7 @@ fn state_from_doc(doc: CanonicalDoc) -> CoreResult<GameState> {
         if !seen_ids.insert(player.id) {
             return Err(CoreError::new(format!("duplicate player {}", player.id)));
         }
-        let mut sightings = BTreeMap::new();
+        let mut sightings = IndexMap::new();
         for s in player.ship_sightings {
             let ship_type = ShipType::from_value(&s.ship_type)?;
             sightings.insert(
@@ -202,7 +211,7 @@ fn state_from_doc(doc: CanonicalDoc) -> CoreResult<GameState> {
                 },
             );
         }
-        let mut port_sightings = BTreeMap::new();
+        let mut port_sightings = IndexMap::new();
         for s in player.port_sightings {
             let pos = (s.position[0], s.position[1]);
             port_sightings.insert(
@@ -234,7 +243,7 @@ fn state_from_doc(doc: CanonicalDoc) -> CoreResult<GameState> {
     }
     players.sort_by_key(|p| p.id);
 
-    let mut ships = BTreeMap::new();
+    let mut ships = IndexMap::new();
     for ship in doc.ships {
         if ships.contains_key(&ship.id) {
             return Err(CoreError::new(format!("duplicate ship {}", ship.id)));

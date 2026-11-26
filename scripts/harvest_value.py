@@ -173,6 +173,22 @@ def _play_and_save(job: Dict[str, Any]) -> Dict[str, Any]:
     out_path = Path(job["out_path"])
     commit = str(job["commit"])
 
+    if str(job.get("backend") or "python") == "rust":
+        from battleboats.rust_play import play_harvest_game
+
+        try:
+            return play_harvest_game(job)
+        except Exception as exc:
+            return {
+                "game_idx": game_idx,
+                "kind": job["kind"],
+                "seed": seed,
+                "actors": actors,
+                "status": "crash",
+                "error": f"{type(exc).__name__}: {exc}",
+                "traceback": traceback.format_exc(limit=8),
+            }
+
     try:
         with tempfile.TemporaryDirectory() as td:
             rm = resolve_map(map_spec, seed=seed, map_dir=Path(td))
@@ -360,6 +376,7 @@ def build_schedule(
     out_dir: Path,
     commit: str,
     doctrine_schedule: str = "cycle",
+    backend: str = "python",
 ) -> List[Dict[str, Any]]:
     if doctrine_schedule not in ("cycle", "random", "none"):
         raise ValueError(f"doctrine_schedule must be cycle, random, or none; got {doctrine_schedule!r}")
@@ -379,6 +396,7 @@ def build_schedule(
             "out_root": str(out_dir),
             "out_path": str(_shard_path(out_dir, idx)),
             "commit": commit,
+            "backend": backend,
         }
         docs = _doctrines_for_job(kind, i, actors, doctrine_schedule, rng)
         if docs is not None:
@@ -486,6 +504,13 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     ap.add_argument("--seed", type=int, default=0)
     ap.add_argument("--gamma", type=float, default=GAMMA_DEFAULT)
     ap.add_argument("--workers", type=int, default=10)
+    ap.add_argument(
+        "--backend",
+        choices=("auto", "python", "rust"),
+        default="auto",
+        help="auto uses the Rust core when battleboats_core is installed, "
+        "otherwise the Python reference. python forces the reference engine.",
+    )
     ap.add_argument("--log-every", type=int, default=25)
     ap.add_argument(
         "--doctrine-schedule",
@@ -505,6 +530,9 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         from battleboats.agents.fog_commander import all_doctrine_pairs as _pairs
         args.self_play = len(_pairs()) * int(args.games_per_matchup)
 
+    from battleboats.backend_select import resolve_backend
+
+    backend = resolve_backend(args.backend)
     out_dir = args.output_dir
     out_dir.mkdir(parents=True, exist_ok=True)
     commit = _git_head()
@@ -518,6 +546,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         out_dir=out_dir,
         commit=commit,
         doctrine_schedule=args.doctrine_schedule,
+        backend=backend,
     )
     total = len(jobs)
     results_by_idx: Dict[int, Dict[str, Any]] = {}
@@ -542,6 +571,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         "gamma": args.gamma,
         "workers": args.workers,
         "doctrine_schedule": args.doctrine_schedule,
+        "backend": backend,
         "obs_encoding": OBS_ENCODING_VERSION,
         "commit": commit,
         "total_games": total,

@@ -34,6 +34,8 @@ def test_harvest_value_records_both_seats_outcomes_and_replay(tmp_path: Path) ->
             "7",
             "--output-dir",
             str(out_dir),
+            "--backend",
+            "python",
         ]
     )
     assert rc == 0

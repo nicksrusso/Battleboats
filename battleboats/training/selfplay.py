@@ -61,6 +61,10 @@ from battleboats.training.manifest import ManifestSession
 class SelfPlayConfig:
     run_dir: Path
     device: str = "auto"
+    # python: reference engine (default for in-process training).
+    # rust: scripted self-play smoke uses the Rust core, then PPO continues
+    # on the Python env. The CLI resolves auto before calling run_selfplay.
+    backend: str = "python"
     seed: int = 0
     arch: ArchSpec = field(default_factory=ArchSpec)
     ppo: PPOHyper = field(default_factory=PPOHyper)
@@ -265,6 +269,31 @@ def run_selfplay(cfg: SelfPlayConfig, *, resume: bool = True) -> Dict[str, Any]:
 
 def _run_selfplay(cfg: SelfPlayConfig, *, resume: bool = True) -> Dict[str, Any]:
     cfg.run_dir.mkdir(parents=True, exist_ok=True)
+    if getattr(cfg, "backend", "python") == "rust":
+        # Scripted self-play (Fog Commander) is the Rust hot path. The PPO
+        # collector below still steps the Python reference env because the
+        # policy speaks gym Action objects.
+        from battleboats.rust_play import play_harvest_game
+
+        smoke = cfg.run_dir / "rust_selfplay_smoke"
+        smoke.mkdir(parents=True, exist_ok=True)
+        meta = play_harvest_game(
+            {
+                "game_idx": 0,
+                "kind": "self_play",
+                "seed": int(cfg.seed),
+                "map_spec": f"{cfg.width}x{cfg.height}",
+                "actors": {0: "fog_commander", 1: "fog_commander"},
+                "doctrines": {0: "BALANCED_ADAPTIVE", 1: "RAIDER_BLITZ"},
+                "gamma": 0.99,
+                "out_root": str(smoke),
+                "out_path": str(smoke / "game_0.npz"),
+                "commit": "selfplay",
+                "max_steps": 30,
+            }
+        )
+        if meta.get("status") != "ok":
+            raise RuntimeError(meta.get("error") or "rust self-play smoke failed")
     device = resolve_device(cfg.device)
     rng = random.Random(cfg.seed)
     torch.manual_seed(cfg.seed)
