@@ -1,7 +1,7 @@
 """Sandboxes cut down from the real engine, not a second simulator.
 
 Each one is a 1-player episode on a freshly randomized map. The opponent seat
-is auto-end-turned, except combat, where it plays ``scripted_action``. Rewards
+is auto-end-turned, except combat, where it plays ``scripted_agent_action``. Rewards
 are completion rewards scaled by ``turn_decay`` (game turns, not actions):
 
 - merchant: a fixed number of turns (no early end). Each home unload pays
@@ -26,7 +26,7 @@ are completion rewards scaled by ``turn_decay`` (game turns, not actions):
 - scouting: random hull vs random hull. The decayed reward on the first fresh
   sighting of the enemy ship, and the episode ends. The enemy holds still and
   starts outside the learner ship's sight.
-- combat_<type>: a fixed number of turns against a scripted enemy of the
+- combat_<type>: a fixed number of turns against a scripted-agent enemy of the
   same type. The reward is the change in relative combat power, each change
   scaled by the turn it happened, paid once at the horizon. A kill is not a
   win and does not end the episode. On small boards that enemy's strength is
@@ -51,7 +51,7 @@ import random
 import tempfile
 from typing import Dict, List, Optional, Sequence, Tuple
 
-from battleboats.agents.scripted import scripted_action
+from battleboats.agents.scripted_agent import scripted_agent_action
 from battleboats.core.actions import (Action, AttackAction, BuildShipAction,
                                       CapturePortAction, EndTurnAction,
                                       MerchantLoadAction, MerchantUnloadAction,
@@ -484,10 +484,10 @@ class _Sandbox(BattleboatsBaseAEC):
                 return q
         return None
 
-    def _pass_opponent(self, *, scripted: bool, stop) -> None:
+    def _pass_opponent(self, *, plays: bool, stop) -> None:
         assert self.engine is not None
         guard = 0
-        limit = 48 if scripted else 8
+        limit = 48 if plays else 8
         while (
             self.engine.current_player != self.learner_id
             and self.engine.winner is None
@@ -495,8 +495,8 @@ class _Sandbox(BattleboatsBaseAEC):
             and self.engine.turn < self.max_turns
             and guard < limit
         ):
-            if scripted:
-                action = scripted_action(
+            if plays:
+                action = scripted_agent_action(
                     self.engine, self.engine.current_player, self._rng
                 )
             else:
@@ -757,7 +757,7 @@ class MerchantSandbox(_Sandbox):
         return False
 
     def _after_engine_step(self, agent, action) -> None:
-        self._pass_opponent(scripted=False, stop=lambda: False)
+        self._pass_opponent(plays=False, stop=lambda: False)
 
 
 class ShipBuildSandbox(_Sandbox):
@@ -870,7 +870,7 @@ class ShipBuildSandbox(_Sandbox):
         return self._built
 
     def _after_engine_step(self, agent, action) -> None:
-        self._pass_opponent(scripted=False, stop=lambda: self._built)
+        self._pass_opponent(plays=False, stop=lambda: self._built)
 
 
 class LandingSandbox(_Sandbox):
@@ -932,7 +932,7 @@ class LandingSandbox(_Sandbox):
         return self._captured
 
     def _after_engine_step(self, agent, action) -> None:
-        self._pass_opponent(scripted=False, stop=lambda: self._captured)
+        self._pass_opponent(plays=False, stop=lambda: self._captured)
 
 
 class LandingBuildSandbox(_Sandbox):
@@ -1043,11 +1043,11 @@ class LandingBuildSandbox(_Sandbox):
         return self._captured
 
     def _after_engine_step(self, agent, action) -> None:
-        self._pass_opponent(scripted=False, stop=lambda: self._captured)
+        self._pass_opponent(plays=False, stop=lambda: self._captured)
 
 
 class CombatSandbox(_Sandbox):
-    """One combat ship versus a scripted enemy of the same type.
+    """One combat ship versus a scripted-agent enemy of the same type.
 
     The episode always lasts ``max_turns``. The only reward is the
     turn-weighted ``combat_outcome``, paid once at that horizon. An early
@@ -1121,7 +1121,7 @@ class CombatSandbox(_Sandbox):
         self._strength_scale = scale
         if target.stats.strength >= full and scale < 1.0:
             raise RuntimeError("CombatSandbox: enemy strength was not reduced")
-        # No cash: the scripted policy fights this ship instead of buying more.
+        # No cash: the scripted agent fights this ship instead of buying more.
         self.engine.players[1].cash = 0
         self._hunter_id = hunter.id
         self._target_id = target.id
@@ -1162,7 +1162,7 @@ class CombatSandbox(_Sandbox):
         return False
 
     def _after_engine_step(self, agent, action) -> None:
-        self._pass_opponent(scripted=True, stop=lambda: False)
+        self._pass_opponent(plays=True, stop=lambda: False)
         if self.engine is not None:
             self.engine.players[1].cash = 0
 
@@ -1288,7 +1288,7 @@ class ScoutingSandbox(_Sandbox):
         return self._found
 
     def _after_engine_step(self, agent, action) -> None:
-        self._pass_opponent(scripted=False, stop=lambda: self._found)
+        self._pass_opponent(plays=False, stop=lambda: self._found)
 
 
 class TypedBuildSandbox(_Sandbox):
@@ -1438,7 +1438,7 @@ class TypedBuildSandbox(_Sandbox):
 
     def _after_engine_step(self, agent, action) -> None:
         self._pass_opponent(
-            scripted=False, stop=lambda: self._built_target or self._built_wrong
+            plays=False, stop=lambda: self._built_target or self._built_wrong
         )
         self._cap_cash()
         self._show_cue()
@@ -1605,7 +1605,7 @@ class BuyDiversitySandbox(_Sandbox):
         self.engine._refresh_sightings()
         self._apply_cheap_mask()
         self._pass_opponent(
-            scripted=False,
+            plays=False,
             stop=lambda: self.engine is not None and self.engine.winner is not None,
         )
 
@@ -1666,7 +1666,7 @@ class BuyDiversitySandbox(_Sandbox):
 
     def _after_engine_step(self, agent, action) -> None:
         self._pass_opponent(
-            scripted=False,
+            plays=False,
             stop=lambda: self.engine is not None and self.engine.winner is not None,
         )
         # Opponent home still ticks income; keep them broke so a slip in the

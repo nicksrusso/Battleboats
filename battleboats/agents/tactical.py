@@ -1,9 +1,9 @@
 """Noisy full-information tactical scripted agent.
 
-Plugs in wherever ``scripted_action(engine, pid, rng)`` does (evaluate,
+Plugs in wherever an ``(engine, pid, rng)`` opponent does (evaluate,
 ``collect_trajectory``'s ``opponent_action``, head-to-heads). This module
-is a new opponent; the greedy sandbox baseline in ``scripted.py`` is
-unchanged.
+is the fog-limited tactical opponent. The combat sandbox uses the
+scripted agent.
 
 The agent is limited to the same fog of war as the trained policy.
 Enemy ships and ports come only from ``engine.known_enemy_ships`` and

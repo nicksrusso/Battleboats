@@ -12,10 +12,11 @@ PYTHONPATH=. python scripts/harvest_tactical.py --labeler scripted_agent ...   #
 poetry run python scripts/eval_agent.py --checkpoint ... --opponent scripted_agent
 ```
 
-`battleboats/agents/registry.py` maps `scripted_agent`, `scripted`, `tactical`
-and `random` to objects with `act(engine, pid, rng)`. Configs, CLIs, and
+`battleboats/agents/registry.py` maps `scripted_agent`, `tactical`, and
+`random` to objects with `act(engine, pid, rng)`. Configs, CLIs, and
 stored harvest metadata may still say `fog_commander`; that name is an alias
 for `scripted_agent`. `battleboats.agents.fog_commander` re-exports this module.
+The name `scripted` was a separate full-information baseline and is rejected.
 
 ## What it reads
 

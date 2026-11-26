@@ -1,7 +1,7 @@
 """Harvest fogged observations, terminal outcomes, and replay traces for value-net training.
 
 Plays games (default 48x24, scripted_agent self-play and optional vs
-scripted with seats alternated). At every decision, records BOTH seats'
+tactical with seats alternated). At every decision, records BOTH seats'
 fog-of-war observations from ``battleboats.envs.observation`` (post-fix
 coastline encoding), paired with each seat's final outcome (+1/-1/0),
 discounted return, turn count, and enough metadata (map JSON, seed, full
@@ -343,7 +343,7 @@ def _doctrines_for_job(kind: str, i: int, actors: Dict[int, str], schedule: str,
     """Assign a scripted agent doctrine to each FC seat.
 
     ``cycle``: walk all 36 ordered (seat0, seat1) pairs evenly (self-play), or
-    walk the 6 doctrines evenly on the FC seat (vs scripted/random).
+    walk the 6 doctrines evenly on the scripted-agent seat (vs tactical/random).
     ``random``: uniform independent draw per FC seat, recorded on the job.
     ``none``: leave unset; ScriptedAgent samples internally when it first acts.
     """
@@ -408,7 +408,7 @@ def build_schedule(
         _job("self_play", i, {0: "scripted_agent", 1: "scripted_agent"}, seed + i)
     for i in range(n_vs_scripted):
         fc_seat = i % 2
-        _job("vs_scripted", i, {fc_seat: "scripted_agent", 1 - fc_seat: "scripted"}, seed + 100_000 + i)
+        _job("vs_scripted", i, {fc_seat: "scripted_agent", 1 - fc_seat: "tactical"}, seed + 100_000 + i)
     for i in range(n_vs_random):
         fc_seat = i % 2
         _job("vs_random", i, {fc_seat: "scripted_agent", 1 - fc_seat: "random"}, seed + 200_000 + i)
@@ -500,7 +500,12 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         help="If >0, set --self-play to 36 times this (exactly this many games for each "
         "ordered scripted agent doctrine pair). Overrides --self-play.",
     )
-    ap.add_argument("--vs-scripted", type=int, default=1000)
+    ap.add_argument(
+        "--vs-scripted",
+        type=int,
+        default=1000,
+        help="Games of scripted_agent vs tactical (the removed full-information baseline's seat).",
+    )
     ap.add_argument("--vs-random", type=int, default=0)
     ap.add_argument("--seed", type=int, default=0)
     ap.add_argument("--gamma", type=float, default=GAMMA_DEFAULT)

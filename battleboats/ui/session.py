@@ -1,4 +1,4 @@
-"""One local game: human vs tactical, scripted_agent, scripted, random, or a policy checkpoint.
+"""One local game: human vs tactical, scripted_agent, random, or a policy checkpoint.
 
 The human sees fog of war strictly per the spotting rules:
 - Own ships and own ports in full.
@@ -25,9 +25,8 @@ from typing import Callable, Dict, List, Optional, Tuple
 
 from battleboats.agents.heuristics import pk
 from battleboats.agents.random_agent import random_action
-from battleboats.agents.registry import normalize_agent_kind
+from battleboats.agents.registry import normalize_agent_kind, reject_removed_scripted
 from battleboats.agents.scripted_agent import scripted_agent_action
-from battleboats.agents.scripted import scripted_action
 from battleboats.agents.tactical import tactical_scripted_action
 from battleboats.core.actions import (
     Action,
@@ -89,7 +88,6 @@ _SHIP_CODE = {
 OPPONENT_LABELS = {
     "tactical": "Tactical (fog of war)",
     "scripted_agent": "Scripted agent (fog of war)",
-    "scripted": "Scripted baseline (full-information opponent)",
     "random": "Random",
     "checkpoint": "Checkpoint",
     "llm": "LLM (OpenRouter)",
@@ -167,8 +165,9 @@ class PlaySession:
         llm_temperature: float = DEFAULT_TEMPERATURE,
         log_dir: Optional[Path] = None,
     ) -> None:
+        reject_removed_scripted(opponent)
         opponent = normalize_agent_kind(opponent)
-        if opponent not in ("tactical", "scripted_agent", "random", "scripted", "checkpoint", "llm", "inkling"):
+        if opponent not in ("tactical", "scripted_agent", "random", "checkpoint", "llm", "inkling"):
             raise ValueError(f"unknown opponent {opponent!r}")
         if human_side not in (0, 1):
             raise ValueError("human_side must be 0 or 1")
@@ -2001,8 +2000,6 @@ const INITIAL_STATE = {state_json};
             return scripted_agent_action(self.engine, pid, self.rng)
         if self.opponent == "random":
             return random_action(self.engine, pid, self.rng)
-        if self.opponent == "scripted":
-            return scripted_action(self.engine, pid, self.rng)
         if self._uses_llm():
             action, meta = self._decide_llm(pid)
             self._record_llm_meta(meta)
