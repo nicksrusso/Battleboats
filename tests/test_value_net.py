@@ -286,3 +286,36 @@ def test_mixed_config_weighting_and_large_model():
     assert cfg["train"]["device"] == "cuda"
     assert cfg["model"]["dropout"] >= 0.1 and cfg["train"]["weight_decay"] > 0
     assert count_params(ValueNet(**cfg["model"])) == 574210
+
+
+
+def test_subepoch_eval_writes_mid_epoch_rows(tiny_cache, tmp_path):
+    from scripts.train_value import main as train_main
+
+    hdir, cdir, _ = tiny_cache
+    cfg = Path(__file__).resolve().parents[1] / "configs" / "value_net_v0.5.0.yaml"
+    run = tmp_path / "run_sub"
+    rc = train_main(
+        ["--config", str(cfg), "--run-dir", str(run), "--set",
+         f"data.harvest_dir={hdir}", f"data.cache_dir={cdir}", "data.include_draws=true",
+         "data.k_per_game=8", "model.d_model=16", "model.nhead=2", "model.num_layers=1",
+         "model.dim_feedforward=32", "train.batch_size=8", "train.torch_threads=1",
+         "train.num_workers=0", "train.warmup_steps=1", "train.log_every=1",
+         "train.epochs=1", "train.max_steps_per_epoch=4", "train.eval_every_frac=0.5",
+         "train.device=cpu", "train.patience=0", "eval.baseline_fit_rows=500",
+         "--skip-test"]
+    )
+    assert rc == 0
+    rows = [ln for ln in (run / "metrics.csv").read_text().strip().splitlines() if ln]
+    assert len(rows) == 3  # header + mid-epoch + end-of-epoch
+    body = (run / "metrics.csv").read_text()
+    assert "epoch 0 +" in body  # mid-epoch tag, e.g. +0.50 or +0.67 if the epoch is short
+
+
+def test_r2_config_keys():
+    import yaml
+    cfg = yaml.safe_load((Path(__file__).resolve().parents[1] / "configs" / "value_net_v0.5.0_mixed_r2.yaml").read_text())
+    assert cfg["data"]["k_per_game"] == 16 and cfg["data"]["k_pool"] == 128
+    assert abs(cfg["train"]["lr"] - 0.0001) < 1e-12
+    assert cfg["train"]["eval_every_frac"] == 0.25
+    assert cfg["train"]["patience"] == 8

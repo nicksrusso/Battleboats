@@ -102,3 +102,13 @@ Later positions are weighted more heavily, three ways, all configurable:
 
 `floor=1` recovers uniform sampling and unweighted loss (the older configs).
 Weight decay is `train.weight_decay` (0.02 here); dropout is `model.dropout`.
+
+## Mixed rerun (r2)
+
+`configs/value_net_v0.5.0_mixed_r2.yaml` is a lower-capacity schedule for the
+same 72k cache after the first mixed run peaked at epoch 0 and then overfit:
+16 positions per game per epoch (pool still 128), learning rate `1e-4`, and
+`train.eval_every_frac: 0.25` so validation (and early-stopping patience,
+counted in evals) runs four times per epoch. `eval_every_frac: 0` (the default
+in other configs) keeps the old end-of-epoch-only behaviour. `best.pt` is still
+the lowest val Brier.
