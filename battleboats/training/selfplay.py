@@ -270,7 +270,7 @@ def run_selfplay(cfg: SelfPlayConfig, *, resume: bool = True) -> Dict[str, Any]:
 def _run_selfplay(cfg: SelfPlayConfig, *, resume: bool = True) -> Dict[str, Any]:
     cfg.run_dir.mkdir(parents=True, exist_ok=True)
     if getattr(cfg, "backend", "python") == "rust":
-        # Scripted self-play (Fog Commander) is the Rust hot path. The PPO
+        # Scripted self-play (scripted agent) is the Rust hot path. The PPO
         # collector below still steps the Python reference env because the
         # policy speaks gym Action objects.
         from battleboats.rust_play import play_harvest_game
@@ -283,7 +283,7 @@ def _run_selfplay(cfg: SelfPlayConfig, *, resume: bool = True) -> Dict[str, Any]
                 "kind": "self_play",
                 "seed": int(cfg.seed),
                 "map_spec": f"{cfg.width}x{cfg.height}",
-                "actors": {0: "fog_commander", 1: "fog_commander"},
+                "actors": {0: "scripted_agent", 1: "scripted_agent"},
                 "doctrines": {0: "BALANCED_ADAPTIVE", 1: "RAIDER_BLITZ"},
                 "gamma": 0.99,
                 "out_root": str(smoke),

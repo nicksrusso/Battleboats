@@ -7,7 +7,7 @@ behavior-cloning warm start.
 
 ## Data
 
-* Source: `scripts/harvest_value.py` shards (fog_commander self-play on 48x24,
+* Source: `scripts/harvest_value.py` shards (scripted_agent self-play on 48x24,
   `runs/value_harvest_48x24_fc_v0.5.0`). Each decision has one row per seat; the
   label is that seat's final outcome (+1 / -1 / 0 draw) plus the discounted
   return `outcome * 0.99^(decisions_left)`.
@@ -78,7 +78,7 @@ HIP_VISIBLE_DEVICES=0 poetry run python scripts/train_value.py --config configs/
 ## Mixed-doctrine harvest and later-position weighting
 
 `scripts/harvest_value.py --games-per-matchup 2000 --doctrine-schedule cycle`
-plays 72,000 Fog Commander self-play games on 48x24: exactly 2,000 games for
+plays 72,000 scripted agent self-play games on 48x24: exactly 2,000 games for
 each of the 36 ordered doctrine pairs (Raider Blitz, Economic Boom, Wolfpack
 Stealth, Capital Armada, Island Hopper, Balanced Adaptive, both seats). Each
 shard records the doctrine used by each seat. No scripted or random opponent.

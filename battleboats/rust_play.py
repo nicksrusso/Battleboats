@@ -1,7 +1,7 @@
-"""One harvest game on the Rust engine, observation, and Fog Commander.
+"""One harvest game on the Rust engine, observation, and scripted agent.
 
-Python agents other than Fog Commander still need the reference engine, so
-this path is the fog-commander self-play hot path. Random seats sample the
+Python agents other than scripted agent still need the reference engine, so
+this path is the scripted-agent self-play hot path. Random seats sample the
 Rust legal list with the caller's ``random.Random``.
 """
 
@@ -16,6 +16,7 @@ from typing import Any, Dict, List, Optional
 import numpy as np
 
 import battleboats_core
+from battleboats.agents.registry import is_scripted_agent_kind
 from battleboats.envs.observation import GLOBALS_DIM, TOKEN_DIM
 
 
@@ -51,9 +52,9 @@ def play_harvest_game(job: Dict[str, Any]) -> Dict[str, Any]:
     rngs = {0: random.Random(seed * 2 + 1), 1: random.Random(seed * 2 + 2)}
     agents = []
     for pid in (0, 1):
-        if actors[pid] == "fog_commander":
+        if is_scripted_agent_kind(actors[pid]):
             doctrine = forced.get(pid) or forced.get(str(pid))
-            agents.append(battleboats_core.FogCommander(doctrine))
+            agents.append(battleboats_core.ScriptedAgent(doctrine))
         else:
             agents.append(None)
 

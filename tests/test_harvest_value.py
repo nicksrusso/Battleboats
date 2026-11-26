@@ -52,8 +52,8 @@ def test_harvest_value_records_both_seats_outcomes_and_replay(tmp_path: Path) ->
 
     # Check mixed seats in vs_scripted
     vs_games = [g for g in manifest["games"] if g["kind"] == "vs_scripted"]
-    assert vs_games[0]["actors"] == {"0": "fog_commander", "1": "scripted"}
-    assert vs_games[1]["actors"] == {"0": "scripted", "1": "fog_commander"}
+    assert vs_games[0]["actors"] == {"0": "scripted_agent", "1": "scripted"}
+    assert vs_games[1]["actors"] == {"0": "scripted", "1": "scripted_agent"}
 
     # Check shard contents and replay roundtrip
     for rec in manifest["games"]:
@@ -90,7 +90,7 @@ def test_harvest_value_records_both_seats_outcomes_and_replay(tmp_path: Path) ->
 def test_build_schedule_cycles_all_36_pairs_evenly():
     from collections import Counter
 
-    from battleboats.agents.fog_commander import DOCTRINE_NAMES, all_doctrine_pairs
+    from battleboats.agents.scripted_agent import DOCTRINE_NAMES, all_doctrine_pairs
     from scripts.harvest_value import build_schedule
 
     pairs = all_doctrine_pairs()
@@ -117,7 +117,7 @@ def test_build_schedule_cycles_all_36_pairs_evenly():
 
 
 def test_forced_doctrine_is_recorded_per_seat(tmp_path: Path) -> None:
-    from battleboats.agents.fog_commander import all_doctrine_pairs
+    from battleboats.agents.scripted_agent import all_doctrine_pairs
 
     pairs = all_doctrine_pairs()
     out_dir = tmp_path / "harvest"
@@ -147,7 +147,7 @@ def test_forced_doctrine_is_recorded_per_seat(tmp_path: Path) -> None:
 def test_make_agent_forces_doctrine_per_instance():
     from battleboats.agents.registry import make_agent
 
-    a = make_agent("fog_commander", doctrine="RAIDER_BLITZ")
-    b = make_agent("fog_commander", doctrine="ECONOMIC_BOOM")
+    a = make_agent("scripted_agent", doctrine="RAIDER_BLITZ")
+    b = make_agent("scripted_agent", doctrine="ECONOMIC_BOOM")
     assert a.config.doctrine == "RAIDER_BLITZ"
     assert b.config.doctrine == "ECONOMIC_BOOM"

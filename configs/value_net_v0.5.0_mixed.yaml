@@ -1,5 +1,5 @@
 # Default recipe for the 72k mixed-doctrine harvest (2,000 games x 36 ordered
-# Fog Commander matchups). Uses the large encoder (574,210 params) on GPU
+# scripted agent matchups). Uses the large encoder (574,210 params) on GPU
 # (torch.cuda / AMD ROCm). To compare the small 80,898-param net, copy the
 # model: block from configs/value_net_v0.5.0.yaml and drop train.device to cpu
 # or keep cuda. See docs/value_net.md.

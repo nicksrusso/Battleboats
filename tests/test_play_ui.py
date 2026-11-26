@@ -434,14 +434,14 @@ def test_new_game_form_lists_scripted_opponents(ui_server: int) -> None:
     assert status == 200
     assert 'value="tactical"' in text
     assert 'value="scripted"' in text
-    assert 'value="fog_commander"' in text
-    assert "Fog Commander (fog of war)" in text
+    assert 'value="scripted_agent"' in text
+    assert "Scripted agent (fog of war)" in text
     assert "Tactical (fog of war)" in text
     assert "Scripted baseline (full-information opponent)" in text
     assert "you still have fog of war" in text.lower() or "You always play under fog of war" in text
 
 
-@pytest.mark.parametrize("opponent", ("tactical", "scripted", "fog_commander"))
+@pytest.mark.parametrize("opponent", ("tactical", "scripted", "scripted_agent"))
 @pytest.mark.parametrize("human_side", (0, 1))
 def test_full_game_via_api_vs_scripted_opponents_is_fog_safe(
     tmp_path: Path, opponent: str, human_side: int

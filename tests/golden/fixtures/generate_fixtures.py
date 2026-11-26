@@ -14,7 +14,7 @@ import time
 from pathlib import Path
 from typing import Any, Dict, List, Tuple
 
-from battleboats.agents.fog_commander import DOCTRINE_NAMES
+from battleboats.agents.scripted_agent import DOCTRINE_NAMES
 from battleboats.agents.registry import make_agent
 from battleboats.core.actions import EndTurnAction
 from battleboats.envs.map_pool import PoolSize, build_map_pool
@@ -171,9 +171,9 @@ def generate_all(out_path: Path = FIXTURE_PATH) -> Dict[str, Any]:
     for i in range(8):
         d0 = doctrines[i % len(doctrines)]
         d1 = doctrines[(i + 2) % len(doctrines)]
-        specs.append(("16x8", i % 4, "fog_commander", d0, "fog_commander", d1, 80))
-    specs.append(("16x8", 0, "fog_commander", doctrines[0], "random", None, 60))
-    specs.append(("16x8", 1, "random", None, "fog_commander", doctrines[3], 60))
+        specs.append(("16x8", i % 4, "scripted_agent", d0, "scripted_agent", d1, 80))
+    specs.append(("16x8", 0, "scripted_agent", doctrines[0], "random", None, 60))
+    specs.append(("16x8", 1, "random", None, "scripted_agent", doctrines[3], 60))
     specs.append(("16x8", 2, "random", None, "random", None, 25))
     specs.append(("16x8", 3, "random", None, "random", None, 25))
 
@@ -181,13 +181,13 @@ def generate_all(out_path: Path = FIXTURE_PATH) -> Dict[str, Any]:
     for i in range(18):
         d0 = doctrines[i % len(doctrines)]
         d1 = doctrines[(i * 2 + 1) % len(doctrines)]
-        specs.append(("32x16", i % 6, "fog_commander", d0, "fog_commander", d1, 100))
+        specs.append(("32x16", i % 6, "scripted_agent", d0, "scripted_agent", d1, 100))
     for i in range(4):
         d = doctrines[i % len(doctrines)]
         if i % 2 == 0:
-            specs.append(("32x16", i % 6, "fog_commander", d, "random", None, 70))
+            specs.append(("32x16", i % 6, "scripted_agent", d, "random", None, 70))
         else:
-            specs.append(("32x16", i % 6, "random", None, "fog_commander", d, 70))
+            specs.append(("32x16", i % 6, "random", None, "scripted_agent", d, 70))
     specs.append(("32x16", 4, "random", None, "random", None, 25))
     specs.append(("32x16", 5, "random", None, "random", None, 25))
 
@@ -195,13 +195,13 @@ def generate_all(out_path: Path = FIXTURE_PATH) -> Dict[str, Any]:
     for i in range(20):
         d0 = doctrines[i % len(doctrines)]
         d1 = doctrines[(i + 3) % len(doctrines)]
-        specs.append(("48x24", i % 6, "fog_commander", d0, "fog_commander", d1, 110))
+        specs.append(("48x24", i % 6, "scripted_agent", d0, "scripted_agent", d1, 110))
     for i in range(4):
         d = doctrines[(i + 2) % len(doctrines)]
         if i % 2 == 0:
-            specs.append(("48x24", i % 6, "fog_commander", d, "random", None, 80))
+            specs.append(("48x24", i % 6, "scripted_agent", d, "random", None, 80))
         else:
-            specs.append(("48x24", i % 6, "random", None, "fog_commander", d, 80))
+            specs.append(("48x24", i % 6, "random", None, "scripted_agent", d, 80))
 
     games: List[Dict[str, Any]] = []
     for idx, (preset, map_idx, k0, d0, k1, d1, max_turns) in enumerate(specs):

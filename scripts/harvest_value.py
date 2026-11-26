@@ -1,6 +1,6 @@
 """Harvest fogged observations, terminal outcomes, and replay traces for value-net training.
 
-Plays games (default 48x24, fog_commander self-play and optional vs
+Plays games (default 48x24, scripted_agent self-play and optional vs
 scripted with seats alternated). At every decision, records BOTH seats'
 fog-of-war observations from ``battleboats.envs.observation`` (post-fix
 coastline encoding), paired with each seat's final outcome (+1/-1/0),
@@ -38,8 +38,8 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
-from battleboats.agents.fog_commander import all_doctrine_pairs, engine_accepts  # noqa: E402
-from battleboats.agents.registry import AGENT_KINDS, make_agent  # noqa: E402
+from battleboats.agents.scripted_agent import all_doctrine_pairs, engine_accepts  # noqa: E402
+from battleboats.agents.registry import AGENT_KINDS, is_scripted_agent_kind, make_agent  # noqa: E402
 from battleboats.core.actions import (  # noqa: E402
     Action,
     AttackAction,
@@ -340,12 +340,12 @@ def _play_and_save(job: Dict[str, Any]) -> Dict[str, Any]:
 
 
 def _doctrines_for_job(kind: str, i: int, actors: Dict[int, str], schedule: str, rng: random.Random) -> Optional[Dict[int, str]]:
-    """Assign a Fog Commander doctrine to each FC seat.
+    """Assign a scripted agent doctrine to each FC seat.
 
     ``cycle``: walk all 36 ordered (seat0, seat1) pairs evenly (self-play), or
     walk the 6 doctrines evenly on the FC seat (vs scripted/random).
     ``random``: uniform independent draw per FC seat, recorded on the job.
-    ``none``: leave unset; FogCommander samples internally when it first acts.
+    ``none``: leave unset; ScriptedAgent samples internally when it first acts.
     """
     if schedule == "none":
         return None
@@ -359,7 +359,7 @@ def _doctrines_for_job(kind: str, i: int, actors: Dict[int, str], schedule: str,
         else:
             out = {0: rng.choice(names), 1: rng.choice(names)}
     else:
-        fc_seats = [pid for pid, k in actors.items() if k == "fog_commander"]
+        fc_seats = [pid for pid, k in actors.items() if is_scripted_agent_kind(k)]
         for pid in fc_seats:
             out[pid] = names[i % len(names)] if schedule == "cycle" else rng.choice(names)
     return out or None
@@ -405,13 +405,13 @@ def build_schedule(
         idx += 1
 
     for i in range(n_self_play):
-        _job("self_play", i, {0: "fog_commander", 1: "fog_commander"}, seed + i)
+        _job("self_play", i, {0: "scripted_agent", 1: "scripted_agent"}, seed + i)
     for i in range(n_vs_scripted):
         fc_seat = i % 2
-        _job("vs_scripted", i, {fc_seat: "fog_commander", 1 - fc_seat: "scripted"}, seed + 100_000 + i)
+        _job("vs_scripted", i, {fc_seat: "scripted_agent", 1 - fc_seat: "scripted"}, seed + 100_000 + i)
     for i in range(n_vs_random):
         fc_seat = i % 2
-        _job("vs_random", i, {fc_seat: "fog_commander", 1 - fc_seat: "random"}, seed + 200_000 + i)
+        _job("vs_random", i, {fc_seat: "scripted_agent", 1 - fc_seat: "random"}, seed + 200_000 + i)
     return jobs
 
 
@@ -450,7 +450,8 @@ def _summarize(results: Sequence[Dict[str, Any]], elapsed: float) -> Dict[str, A
             d["decisive"] += 1
             d[f"seat{r['winner']}"] += 1
             seat_wins[r["winner"]] += 1
-            if r["actors"][str(r["winner"])] == "fog_commander" if str(r["winner"]) in r["actors"] else r["actors"][r["winner"]] == "fog_commander":
+            winner_key = str(r["winner"]) if str(r["winner"]) in r["actors"] else r["winner"]
+            if is_scripted_agent_kind(r["actors"][winner_key]):
                 d["fc_wins"] += 1
         for pid in (0, 1):
             agent_name = r["actors"][str(pid)] if str(pid) in r["actors"] else r["actors"][pid]
@@ -497,7 +498,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         type=int,
         default=0,
         help="If >0, set --self-play to 36 times this (exactly this many games for each "
-        "ordered Fog Commander doctrine pair). Overrides --self-play.",
+        "ordered scripted agent doctrine pair). Overrides --self-play.",
     )
     ap.add_argument("--vs-scripted", type=int, default=1000)
     ap.add_argument("--vs-random", type=int, default=0)
@@ -516,8 +517,8 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         "--doctrine-schedule",
         choices=("cycle", "random", "none"),
         default="cycle",
-        help="How to assign Fog Commander doctrines per seat: cycle all 36 ordered "
-        "pairs evenly (default), random uniform per seat, or leave FogCommander to sample.",
+        help="How to assign scripted agent doctrines per seat: cycle all 36 ordered "
+        "pairs evenly (default), random uniform per seat, or leave ScriptedAgent to sample.",
     )
     ap.add_argument("--resume", action="store_true")
     ap.add_argument(
@@ -527,7 +528,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     )
     args = ap.parse_args(argv)
     if args.games_per_matchup:
-        from battleboats.agents.fog_commander import all_doctrine_pairs as _pairs
+        from battleboats.agents.scripted_agent import all_doctrine_pairs as _pairs
         args.self_play = len(_pairs()) * int(args.games_per_matchup)
 
     from battleboats.backend_select import resolve_backend
