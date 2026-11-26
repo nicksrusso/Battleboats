@@ -551,7 +551,7 @@ impl GameState {
     }
 
     fn destroy_ship(&mut self, ship_id: i64) -> CoreResult<()> {
-        let Some(ship) = self.ships.remove(&ship_id) else {
+        let Some(ship) = self.ships.shift_remove(&ship_id) else {
             return Ok(());
         };
         if let Some(player) = self.players.iter_mut().find(|p| p.id == ship.owner) {
@@ -568,7 +568,7 @@ impl GameState {
                 .map(|s| s.fresh)
                 .unwrap_or(false)
             {
-                observer.sightings.remove(&ship_id);
+                observer.sightings.shift_remove(&ship_id);
             }
         }
         Ok(())

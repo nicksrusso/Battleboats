@@ -3,6 +3,7 @@
 //! Importing this fails only when the extension was not built. The pure-Python
 //! engine does not import this module.
 
+use bb_engine::fog::{CommanderRng, FogCommander as CoreFog, FogConfig};
 use bb_engine::{
     canonical_json, decode_json, format_python_json_float, state_from_canonical_json, state_hash,
     tables, Action, CoreError, Engine, ShipType, SpotKey, CASH_PER_MATERIAL, MERCHANT_CAPACITY,
@@ -119,8 +120,10 @@ fn port_views<'py>(
 ) -> PyResult<Bound<'py, PyList>> {
     let state = engine.require().map_err(core_err)?;
     let player = player_or_err(state, player_id)?;
+    let mut rows: Vec<_> = player.port_sightings.values().collect();
+    rows.sort_by_key(|s| s.position);
     let list = PyList::empty(py);
-    for sighting in player.port_sightings.values() {
+    for sighting in rows {
         if fresh_only && !sighting.fresh {
             continue;
         }
@@ -144,6 +147,116 @@ fn pos_list<'py>(py: Python<'py>, cells: &[(i32, i32)]) -> PyResult<Bound<'py, P
         list.append(pair)?;
     }
     Ok(list)
+}
+
+struct PyRng<'a> {
+    inner: &'a Bound<'a, PyAny>,
+}
+
+impl CommanderRng for PyRng<'_> {
+    fn random(&mut self) -> f64 {
+        self.inner
+            .call_method0("random")
+            .unwrap()
+            .extract()
+            .unwrap()
+    }
+    fn randrange(&mut self, n: usize) -> usize {
+        self.inner
+            .call_method1("randrange", (n,))
+            .unwrap()
+            .extract()
+            .unwrap()
+    }
+    fn uniform(&mut self, lo: f64, hi: f64) -> f64 {
+        self.inner
+            .call_method1("uniform", (lo, hi))
+            .unwrap()
+            .extract()
+            .unwrap()
+    }
+}
+
+#[pyclass(name = "FogCommander")]
+struct FogCommander {
+    inner: CoreFog,
+}
+
+#[pymethods]
+impl FogCommander {
+    #[new]
+    #[pyo3(signature = (doctrine = None))]
+    fn new(doctrine: Option<String>) -> Self {
+        let mut config = FogConfig::default();
+        config.doctrine = doctrine;
+        Self {
+            inner: CoreFog::new(config),
+        }
+    }
+
+    fn doctrine_for(&self, pid: i64) -> Option<String> {
+        self.inner.doctrine_name(pid).map(str::to_string)
+    }
+
+    fn act<'py>(
+        &mut self,
+        py: Python<'py>,
+        game: &Game,
+        pid: i64,
+        rng: &Bound<'py, PyAny>,
+    ) -> PyResult<Bound<'py, PyList>> {
+        let state = game.inner.require().map_err(core_err)?;
+        let mut py_rng = PyRng { inner: rng };
+        let action = self.inner.act(state, pid, &mut py_rng);
+        action_list(py, &action)
+    }
+}
+
+#[pyclass]
+struct Batch {
+    games: Vec<Engine>,
+}
+
+#[pymethods]
+impl Batch {
+    #[new]
+    fn new(map_paths: Vec<String>, kill_curve_k: f64) -> Self {
+        Self {
+            games: map_paths
+                .into_iter()
+                .map(|path| Engine::from_map_path(path, kill_curve_k))
+                .collect(),
+        }
+    }
+
+    fn reset(&mut self, seeds: Vec<i64>) -> PyResult<()> {
+        for (game, seed) in self.games.iter_mut().zip(seeds) {
+            game.reset(Some(seed)).map_err(core_err)?;
+        }
+        Ok(())
+    }
+
+    fn step(&mut self, index: usize, action: &Bound<'_, PyAny>) -> PyResult<()> {
+        let text = py_dumps(action)?;
+        let decoded = decode_json(&text).map_err(core_err)?;
+        self.games
+            .get_mut(index)
+            .ok_or_else(|| PyValueError::new_err("batch index out of range"))?
+            .step(&decoded)
+            .map_err(core_err)
+    }
+
+    fn state_hash(&self, index: usize) -> PyResult<String> {
+        let game = self
+            .games
+            .get(index)
+            .ok_or_else(|| PyValueError::new_err("batch index out of range"))?;
+        Ok(state_hash(game.require().map_err(core_err)?))
+    }
+
+    fn len(&self) -> usize {
+        self.games.len()
+    }
 }
 
 #[pyclass(name = "Game")]
@@ -215,6 +328,18 @@ impl Game {
         self.inner.is_terminal().map_err(core_err)
     }
 
+    fn turn(&self) -> PyResult<i64> {
+        Ok(self.inner.require().map_err(core_err)?.turn)
+    }
+
+    fn current_player(&self) -> PyResult<i64> {
+        Ok(self.inner.require().map_err(core_err)?.current_player)
+    }
+
+    fn winner(&self) -> PyResult<Option<i64>> {
+        Ok(self.inner.require().map_err(core_err)?.winner)
+    }
+
     #[pyo3(name = "clone")]
     fn clone_game(&self) -> Self {
         Self {
@@ -249,11 +374,14 @@ impl Game {
     ) -> PyResult<Bound<'py, PyList>> {
         let state = self.inner.require().map_err(core_err)?;
         let player = player_or_err(state, player_id)?;
+        let mut rows: Vec<_> = player
+            .sightings
+            .values()
+            .filter(|s| s.fresh && state.ships.contains_key(&s.ship_id))
+            .collect();
+        rows.sort_by_key(|s| s.ship_id);
         let list = PyList::empty(py);
-        for sighting in player.sightings.values() {
-            if !sighting.fresh || !state.ships.contains_key(&sighting.ship_id) {
-                continue;
-            }
+        for sighting in rows {
             let dict = PyDict::new(py);
             dict.set_item("id", sighting.ship_id)?;
             dict.set_item("type", sighting.ship_type.value())?;
@@ -270,8 +398,10 @@ impl Game {
     ) -> PyResult<Bound<'py, PyList>> {
         let state = self.inner.require().map_err(core_err)?;
         let player = player_or_err(state, player_id)?;
+        let mut rows: Vec<_> = player.sightings.values().collect();
+        rows.sort_by_key(|s| s.ship_id);
         let list = PyList::empty(py);
-        for sighting in player.sightings.values() {
+        for sighting in rows {
             let dict = PyDict::new(py);
             dict.set_item("ship_id", sighting.ship_id)?;
             dict.set_item("type", sighting.ship_type.value())?;
@@ -289,6 +419,17 @@ impl Game {
         player_id: i64,
     ) -> PyResult<Bound<'py, PyList>> {
         port_views(&self.inner, py, player_id, true)
+    }
+
+    fn observation<'py>(
+        &self,
+        py: Python<'py>,
+        player_id: i64,
+    ) -> PyResult<(Vec<f32>, Vec<f32>, usize)> {
+        let state = self.inner.require().map_err(core_err)?;
+        let obs = state.observation(player_id);
+        let globals = obs.globals.to_vec();
+        Ok((obs.tokens, globals, obs.n_tokens))
     }
 
     fn known_enemy_ports<'py>(
@@ -501,6 +642,8 @@ fn battleboats_core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     // Fail at import if the balance CSVs baked into the binary do not parse.
     let _ = tables();
     m.add_class::<Game>()?;
+    m.add_class::<FogCommander>()?;
+    m.add_class::<Batch>()?;
     m.add_function(wrap_pyfunction!(schema_version, m)?)?;
     m.add_function(wrap_pyfunction!(starting_cash, m)?)?;
     m.add_function(wrap_pyfunction!(port_production, m)?)?;

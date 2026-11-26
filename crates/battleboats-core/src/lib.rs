@@ -9,8 +9,10 @@
 pub mod action;
 pub mod canonical;
 pub mod error;
+pub mod fog;
 pub mod jsonfmt;
 pub mod map;
+pub mod observation;
 pub mod rules;
 pub mod ship;
 pub mod state;

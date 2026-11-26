@@ -96,6 +96,8 @@ cargo test -p battleboats-core
 
 When the extension is built, `tests/golden/` runs the same rules and replays against Rust. Rust combat uses a seeded ChaCha generator. Replay fixtures inject the recorded `combat_outcomes`, so state hashes match without a NumPy PCG64 port. Python still rolls with `numpy.random.default_rng`.
 
+Rust is the production hot path for harvest and scripted self-play when the extension imports (`--backend auto`, the default). `--backend python` forces the reference engine. The interactive play UI and PPO gradient rollouts still step the Python engine. New rules should land in both so the golden suite stays meaningful. Observation tokens and Fog Commander actions are checked against Python on the golden fixtures.
+
 `runs/` and `**.json` are gitignored. Maps used by training and by the engine tests are generated at runtime. `pytest` writes `battleboats/core/config/map.json` only when that file is missing, so a local map is left in place.
 
 ```bash

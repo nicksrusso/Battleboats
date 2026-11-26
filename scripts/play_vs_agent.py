@@ -24,7 +24,18 @@ def main() -> None:
         default="auto",
         help="cpu, cuda, cuda:N, or auto. ROCm reports the AMD GPU as cuda.",
     )
+    parser.add_argument(
+        "--backend",
+        choices=("auto", "python", "rust"),
+        default="auto",
+        help="Recorded for the session. The interactive board still steps the "
+        "Python reference engine because the UI reads its numpy grids. "
+        "Harvest and scripted self-play honor this flag.",
+    )
     args = parser.parse_args()
+    from battleboats.backend_select import resolve_backend
+
+    resolve_backend(args.backend)
     serve(args.host, args.port, args.checkpoint_dir, args.device)
 
 

@@ -9,6 +9,7 @@ description = "Battleboats game-engine core (Python remains the reference)"
 
 [dependencies]
 csv = "1.3"
+indexmap = "2"
 rand = { version = "0.8", features = ["std_rng"] }
 ryu = "1.0"
 serde = { version = "1.0", features = ["derive"] }
