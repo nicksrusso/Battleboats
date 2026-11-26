@@ -161,6 +161,51 @@ def main(argv=None) -> int:
     t_start = time.time()
     stopped_early = False
     stale = int(best.get("stale", 0))
+    # 0 = evaluate only at the end of each epoch (default, backward compatible).
+    # 0.25 = also evaluate every quarter-epoch; patience counts these evals.
+    eval_every_frac = float(tc.get("eval_every_frac", 0.0) or 0.0)
+    eval_every = max(1, int(round(steps_per_epoch * eval_every_frac))) if eval_every_frac > 0 else 0
+    if eval_every:
+        print(f"[eval] every {eval_every} steps ({eval_every_frac:g} epoch); early-stop patience is in evals", flush=True)
+
+    def run_eval(epoch: int, step: int, sums: dict, epoch_s: float, *, tag: str) -> bool:
+        """Val eval, metrics row, best.pt on val Brier, last.pt. Returns True if we should stop."""
+        nonlocal stale, best, stopped_early
+        t_ev = time.time()
+        vm = {}
+        if len(val_ds):
+            pv = predict(model, val_ds, int(tc.get("eval_batch_size", 512)))
+            vm = value_metrics(pv["v"], pv["y"])
+        ev_s = time.time() - t_ev
+        n = max(1, sums["n"])
+        row = {"epoch": epoch, "step": step, "tag": tag,
+               "train_loss": sums["loss"] / n, "train_mse": sums["mse"] / n, "train_aux": sums["aux"] / n,
+               "val_mse": vm.get("mse"), "val_acc": vm.get("sign_acc"), "val_brier": vm.get("brier"), "val_logloss": vm.get("logloss"),
+               "epoch_s": round(epoch_s, 1), "eval_s": round(ev_s, 1),
+               "time": datetime.now(ZoneInfo("America/Chicago")).strftime("%H:%M:%S %Z")}
+        append_csv(run_dir / "metrics.csv", row)
+        if tb:
+            for k in ("train_mse", "val_mse", "val_acc", "val_brier", "val_logloss"):
+                if row[k] is not None:
+                    tb.add_scalar(k, row[k], step)
+        print(f"[{tag}] train mse {row['train_mse']:.4f} | val mse {vm.get('mse', float('nan')):.4f} acc {vm.get('sign_acc', float('nan')):.3f} "
+              f"brier {vm.get('brier', float('nan')):.4f} logloss {vm.get('logloss', float('nan')):.4f} | {epoch_s:.0f}s train + {ev_s:.0f}s eval", flush=True)
+        if vm.get("brier", float("inf")) < best["val_brier"] - float(tc.get("min_delta", 0.0)):
+            best = {"val_brier": vm["brier"], "epoch": epoch, "step": step, "tag": tag, "val": vm, "stale": 0}
+            save_value_checkpoint(run_dir / "best.pt", model, epoch=epoch, step=step, val=vm, n_params=n_params, device=str(device))
+            stale = 0
+        else:
+            stale = int(best.get("stale", 0)) + 1
+            best["stale"] = stale
+        save_value_checkpoint(run_dir / "last.pt", model, optimizer=opt.state_dict(), epoch=epoch, step=step, best=best, n_params=n_params, device=str(device))
+        patience = int(tc.get("patience", 0))
+        if patience and stale >= patience:
+            print(f"[stop] early stopping: val Brier has not improved by {tc.get('min_delta', 0)} "
+                  f"for {patience} evals (best {best['val_brier']:.4f} at {best.get('tag', 'epoch '+str(best['epoch']))})", flush=True)
+            stopped_early = True
+            return True
+        return False
+
     for epoch in range(start_epoch, int(tc["epochs"])):
         train_ds.set_epoch(epoch)
         g = torch.Generator().manual_seed(int(tc.get("seed", 0)) * 1000 + epoch)
@@ -206,40 +251,20 @@ def main(argv=None) -> int:
             if a.max_minutes and (time.time() - t_start) > a.max_minutes * 60:
                 stopped_early = True
                 break
-        ep_s = time.time() - t_ep
-        t_ev = time.time()
-        vm = {}
-        if len(val_ds):
-            pv = predict(model, val_ds, int(tc.get("eval_batch_size", 512)))
-            vm = value_metrics(pv["v"], pv["y"])
-        ev_s = time.time() - t_ev
-        n = max(1, sums["n"])
-        row = {"epoch": epoch, "step": step, "train_loss": sums["loss"] / n, "train_mse": sums["mse"] / n, "train_aux": sums["aux"] / n,
-               "val_mse": vm.get("mse"), "val_acc": vm.get("sign_acc"), "val_brier": vm.get("brier"), "val_logloss": vm.get("logloss"),
-               "epoch_s": round(ep_s, 1), "eval_s": round(ev_s, 1), "time": datetime.now(ZoneInfo("America/Chicago")).strftime("%H:%M:%S %Z")}
-        append_csv(run_dir / "metrics.csv", row)
-        if tb:
-            for k in ("train_mse", "val_mse", "val_acc", "val_brier", "val_logloss"):
-                if row[k] is not None:
-                    tb.add_scalar(k, row[k], epoch)
-        print(f"[epoch {epoch}] train mse {row['train_mse']:.4f} | val mse {vm.get('mse', float('nan')):.4f} acc {vm.get('sign_acc', float('nan')):.3f} "
-              f"brier {vm.get('brier', float('nan')):.4f} logloss {vm.get('logloss', float('nan')):.4f} | {ep_s:.0f}s train + {ev_s:.0f}s eval", flush=True)
-        if vm.get("brier", float("inf")) < best["val_brier"] - float(tc.get("min_delta", 0.0)):
-            best = {"val_brier": vm["brier"], "epoch": epoch, "val": vm, "stale": 0}
-            save_value_checkpoint(run_dir / "best.pt", model, epoch=epoch, step=step, val=vm, n_params=n_params, device=str(device))
-            stale = 0
-        else:
-            stale = int(best.get("stale", 0)) + 1
-            best["stale"] = stale
-        save_value_checkpoint(run_dir / "last.pt", model, optimizer=opt.state_dict(), epoch=epoch, step=step, best=best, n_params=n_params, device=str(device))
-        if stopped_early:
+            # Mid-epoch val evals (skip the last step; the end-of-epoch eval covers it).
+            if eval_every and (i + 1) % eval_every == 0 and (i + 1) < steps_per_epoch:
+                frac = (i + 1) / steps_per_epoch
+                model.eval()
+                if run_eval(epoch, step, sums, time.time() - t_ep, tag=f"epoch {epoch} +{frac:.2f}"):
+                    break
+                model.train()
+        if stopped_early and a.max_minutes and (time.time() - t_start) > a.max_minutes * 60:
             print(f"[stop] --max-minutes {a.max_minutes} reached", flush=True)
             break
-        patience = int(tc.get("patience", 0))
-        if patience and stale >= patience:
-            print(f"[stop] early stopping: val Brier has not improved by {tc.get('min_delta', 0)} "
-                  f"for {patience} epochs (best {best['val_brier']:.4f} at epoch {best['epoch']})", flush=True)
-            stopped_early = True
+        if not stopped_early:
+            if run_eval(epoch, step, sums, time.time() - t_ep, tag=f"epoch {epoch}"):
+                break
+        if stopped_early:
             break
 
     summary = {"run_dir": str(run_dir), "n_params": n_params, "device": str(device), "best": best, "steps": step, "train_minutes": round((time.time() - t_start) / 60, 2), "stopped_early": stopped_early}
