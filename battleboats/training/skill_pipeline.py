@@ -5,7 +5,8 @@ one. This pipeline keeps every mechanic in the same update by pooling equal
 amounts of data from each sandbox and normalizing advantages per task, so a
 dense merchant return cannot drown a single capture. The full-game stage
 keeps mixing those sandboxes in, and is scored against a random opponent and
-the scripted baseline.
+the scripted agent. Config keys ``scripted_frac`` and ``scripted_threshold``
+still name that mix and its win-rate gate.
 
 The network, observation, and action heads are the full-game ones. Sandbox
 verb filters only change the mask.
@@ -25,7 +26,7 @@ from typing import Any, Dict, List, Optional, Tuple
 import torch
 import yaml
 
-from battleboats.agents.scripted import scripted_action
+from battleboats.agents.scripted_agent import scripted_agent_action
 from battleboats.envs.action_masks import ActionMasks
 from battleboats.envs.factory import make_env
 from battleboats.envs.skill_maps import write_skill_map
@@ -363,7 +364,7 @@ def _bucket(stage, envs, maps, name, kind):
         task = next(t for t in stage.tasks if t.skill == name)
         return envs[name], maps[name], task.max_steps, task.skill, True, "none"
     return envs["full"], maps["full"], stage.max_steps, "full", False, (
-        "scripted" if kind == "full_scripted" else "random"
+        "scripted_agent" if kind == "full_scripted" else "random"
     )
 
 
@@ -390,8 +391,8 @@ def _collect(
         return 0
 
     def opponent_for(_episode_index: int):
-        if opponent == "scripted":
-            return None, scripted_action
+        if opponent == "scripted_agent":
+            return None, scripted_agent_action
         return None, None
 
     def annotate(info, live):
@@ -451,7 +452,7 @@ def _evaluate(policy, stage: StageSpec, envs, maps, cfg: PipelineConfig, update:
             max_steps=stage.max_steps,
             seed0=seed_base + 900,
             skill="full",
-            opponent="scripted",
+            opponent="scripted_agent",
         )
     return metrics
 
@@ -471,8 +472,8 @@ def _eval_one(policy, env, maps, *, episodes, hyper, max_steps, seed0, skill, op
             return 0
 
         def opponent_for(_episode_index: int, opponent=opponent):
-            if opponent == "scripted":
-                return None, scripted_action
+            if opponent == "scripted_agent":
+                return None, scripted_agent_action
             return None, None
 
         def annotate(info, live, skill=skill):

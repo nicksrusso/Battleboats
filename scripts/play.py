@@ -1,7 +1,6 @@
 """Launch the local Battleboats web UI for a game against an agent.
 
     poetry run python scripts/play.py --map 16x8 --opponent tactical --seed 0
-    poetry run python scripts/play.py --map 16x8 --opponent scripted --seed 0
     poetry run python scripts/play.py --map 32x16 --opponent scripted_agent --seed 0
     poetry run python scripts/play.py --map 16x8 --opponent inkling --seed 0
     poetry run python scripts/play.py --map 16x8 --opponent llm --model thinkingmachines/inkling --reasoning high
@@ -27,6 +26,7 @@ _ROOT = Path(__file__).resolve().parents[1]
 if str(_ROOT) not in sys.path:
     sys.path.insert(0, str(_ROOT))
 
+from battleboats.agents.registry import argparse_agent_kind  # noqa: E402
 from battleboats.llm.openrouter import (  # noqa: E402
     DEFAULT_MAX_TOKENS,
     DEFAULT_REASONING,
@@ -49,12 +49,13 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--opponent",
-        choices=("tactical", "scripted_agent", "fog_commander", "scripted", "random", "checkpoint", "llm", "inkling"),
+        type=argparse_agent_kind,
+        choices=("tactical", "scripted_agent", "fog_commander", "random", "checkpoint", "llm", "inkling"),
         default=None,
         help="Opponent agent (default: tactical; scripted_agent is the fog-limited doctrine agent; "
         "fog_commander is a deprecated alias for scripted_agent; "
-        "scripted is the full-information "
-        "baseline; checkpoint if --checkpoint is set; inkling is an alias for llm + "
+        "'scripted' was removed; "
+        "checkpoint if --checkpoint is set; inkling is an alias for llm + "
         "the Inkling flagship at high reasoning). You always have fog of war.",
     )
     parser.add_argument(

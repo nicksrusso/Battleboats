@@ -52,8 +52,8 @@ def test_harvest_value_records_both_seats_outcomes_and_replay(tmp_path: Path) ->
 
     # Check mixed seats in vs_scripted
     vs_games = [g for g in manifest["games"] if g["kind"] == "vs_scripted"]
-    assert vs_games[0]["actors"] == {"0": "scripted_agent", "1": "scripted"}
-    assert vs_games[1]["actors"] == {"0": "scripted", "1": "scripted_agent"}
+    assert vs_games[0]["actors"] == {"0": "scripted_agent", "1": "tactical"}
+    assert vs_games[1]["actors"] == {"0": "tactical", "1": "scripted_agent"}
 
     # Check shard contents and replay roundtrip
     for rec in manifest["games"]:

@@ -1,4 +1,4 @@
-"""Evaluate the scripted agent against itself, the scripted baseline, and random.
+"""Evaluate the scripted agent against itself, the tactical agent, and random.
 
     PYTHONPATH=. python scripts/eval_scripted_agent.py --maps 32x16 48x24 \
         --games 100 --workers 12 --output runs/eval_scripted_agent/summary.json
@@ -34,6 +34,7 @@ if str(REPO_ROOT) not in sys.path:
 
 from battleboats.agents.registry import (  # noqa: E402
     agent_kind_choices,
+    argparse_agent_kind,
     make_agent,
     normalize_agent_kind,
 )
@@ -169,9 +170,10 @@ def main(argv=None) -> int:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--maps", nargs="+", default=["32x16"])
     ap.add_argument("--games", type=int, default=100, help="games per matchup per map")
-    ap.add_argument("--opponents", nargs="+", default=["scripted_agent", "scripted", "random"],
+    ap.add_argument("--opponents", nargs="+", default=["scripted_agent", "tactical", "random"],
+                    type=argparse_agent_kind,
                     choices=agent_kind_choices(),
-                    help="fog_commander is a deprecated alias for scripted_agent")
+                    help="fog_commander is a deprecated alias for scripted_agent; 'scripted' was removed")
     ap.add_argument("--focal", default="scripted_agent", choices=agent_kind_choices())
     ap.add_argument("--seed", type=int, default=0)
     ap.add_argument("--workers", type=int, default=8)

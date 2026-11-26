@@ -1,7 +1,7 @@
-"""Play a checkpoint against the random, scripted, or tactical baseline.
+"""Play a checkpoint against random, the scripted agent, or the tactical agent.
 
     poetry run python scripts/eval_agent.py \\
-        --checkpoint runs/selfplay/latest.pt --opponent scripted --games 40
+        --checkpoint runs/selfplay/latest.pt --opponent scripted_agent --games 40
 """
 
 from __future__ import annotations
@@ -10,6 +10,7 @@ import argparse
 import json
 from pathlib import Path
 
+from battleboats.agents.registry import argparse_agent_kind
 from battleboats.training.evaluate import evaluate_checkpoint
 from battleboats.training.manifest import append_eval
 
@@ -19,9 +20,10 @@ def main() -> None:
     parser.add_argument("--checkpoint", type=Path, required=True)
     parser.add_argument(
         "--opponent",
-        choices=("random", "scripted", "tactical", "scripted_agent", "fog_commander"),
+        type=argparse_agent_kind,
+        choices=("random", "tactical", "scripted_agent", "fog_commander"),
         default="random",
-        help="fog_commander is a deprecated alias for scripted_agent",
+        help="fog_commander is a deprecated alias for scripted_agent; 'scripted' was removed",
     )
     parser.add_argument("--games", type=int, default=20)
     parser.add_argument("--width", type=int, default=8)

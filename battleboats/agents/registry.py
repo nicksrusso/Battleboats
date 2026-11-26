@@ -7,13 +7,19 @@ Stateless agents wrap their functions; ``scripted_agent`` gets a fresh
 
 from __future__ import annotations
 
+import argparse
 import random
 from typing import Callable, Dict, Optional
 
 from battleboats.agents.random_agent import random_action
-from battleboats.agents.scripted import scripted_action
 from battleboats.agents.scripted_agent import DOCTRINES, ScriptedAgent, ScriptedAgentConfig
 from battleboats.agents.tactical import tactical_scripted_action
+
+# The full-information baseline used this name. It is not an alias.
+REMOVED_SCRIPTED_MESSAGE = (
+    "agent 'scripted' was the full-information baseline and has been removed; "
+    "use 'scripted_agent'"
+)
 
 # Stored in older harvest metadata and still accepted by configs, CLIs, and the play UI.
 LEGACY_AGENT_KIND = "fog_commander"
@@ -32,10 +38,24 @@ class _FnAgent:
 
 AGENT_KINDS: Dict[str, Callable[[], object]] = {
     "scripted_agent": ScriptedAgent,
-    "scripted": lambda: _FnAgent(scripted_action),
     "tactical": lambda: _FnAgent(tactical_scripted_action),
     "random": lambda: _FnAgent(random_action),
 }
+
+
+def reject_removed_scripted(kind: str) -> str:
+    """Raise if ``kind`` is the removed full-information baseline."""
+    if kind == "scripted":
+        raise ValueError(REMOVED_SCRIPTED_MESSAGE)
+    return kind
+
+
+def argparse_agent_kind(kind: str) -> str:
+    """Argparse type: reject ``scripted`` with a message that names ``scripted_agent``."""
+    try:
+        return reject_removed_scripted(kind)
+    except ValueError as exc:
+        raise argparse.ArgumentTypeError(str(exc)) from exc
 
 
 def normalize_agent_kind(kind: str) -> str:
@@ -55,6 +75,7 @@ def agent_kind_choices() -> tuple:
 
 def make_agent(kind: str, *, doctrine: Optional[str] = None):
     """Build one agent. ``doctrine`` forces a scripted agent doctrine (ignored for other kinds)."""
+    reject_removed_scripted(kind)
     kind = normalize_agent_kind(kind)
     if kind not in AGENT_KINDS:
         raise ValueError(f"unknown agent kind {kind!r}; choose from {sorted(AGENT_KINDS)}")

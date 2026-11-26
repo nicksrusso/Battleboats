@@ -23,7 +23,6 @@ from battleboats.agents.scripted_agent import (
 )
 from battleboats.agents.random_agent import random_action
 from battleboats.agents.registry import make_agent
-from battleboats.agents.scripted import scripted_action
 from battleboats.agents.tactical import tactical_scripted_action
 from battleboats.core.actions import BuildShipAction, EndTurnAction
 from battleboats.core.gameEngine import gameEngine
@@ -32,7 +31,6 @@ from battleboats.core.shipyard.ship_type import ShipType
 from battleboats.ui.maps import resolve_map
 
 OPPONENTS = {
-    "scripted": scripted_action,
     "random": random_action,
     "tactical": tactical_scripted_action,
 }
@@ -124,7 +122,7 @@ def _memory_signature(mem):
 
 @pytest.mark.parametrize("preset,opponent,seed", [
     ("32x16", "self", 11),
-    ("32x16", "scripted", 12),
+    ("32x16", "tactical", 12),
     ("16x8", "self", 13),
     ("48x24", "random", 14),
 ])
@@ -226,7 +224,7 @@ def _play(tmp_path, preset, seed, kinds, max_turns=60, functional=False):
     return engine, log, bad, per_turn, agents
 
 
-@pytest.mark.parametrize("kinds", [("scripted_agent", "scripted_agent"), ("scripted_agent", "scripted"),
+@pytest.mark.parametrize("kinds", [("scripted_agent", "scripted_agent"), ("scripted_agent", "tactical"),
                                    ("random", "scripted_agent")])
 def test_deterministic_per_seed(tmp_path, kinds):
     _, log1, _, _, _ = _play(tmp_path / "a", "32x16", 3, kinds, max_turns=40)
@@ -249,17 +247,17 @@ def test_functional_wrapper_matches_class_and_resets(tmp_path):
 
 
 GAMES = [
-    ("16x8", s, k) for s, k in zip(range(100, 112), [("scripted_agent", "scripted_agent"), ("scripted_agent", "scripted"),
-                                                     ("scripted", "scripted_agent"), ("scripted_agent", "random"),
+    ("16x8", s, k) for s, k in zip(range(100, 112), [("scripted_agent", "scripted_agent"), ("scripted_agent", "tactical"),
+                                                     ("tactical", "scripted_agent"), ("scripted_agent", "random"),
                                                      ("random", "scripted_agent"), ("tactical", "scripted_agent")] * 2)
 ] + [
     ("open-8x8", s, ("scripted_agent", "scripted_agent")) for s in range(200, 206)
 ] + [
-    ("32x16", s, k) for s, k in zip(range(300, 306), [("scripted_agent", "scripted_agent"), ("scripted", "scripted_agent"),
+    ("32x16", s, k) for s, k in zip(range(300, 306), [("scripted_agent", "scripted_agent"), ("tactical", "scripted_agent"),
                                                      ("scripted_agent", "random")] * 2)
 ] + [
     ("48x24", 400, ("scripted_agent", "scripted_agent")),
-    ("24x12", 401, ("scripted_agent", "scripted")),
+    ("24x12", 401, ("scripted_agent", "tactical")),
 ]
 
 
@@ -325,6 +323,11 @@ def test_canonical_build_action_maps_to_legal(tmp_path):
     assert engine_accepts(engine, 0, other, legal)
     assert canonical_build_action(engine, 0, other) == b
     assert canonical_build_action(engine, 0, EndTurnAction()) == EndTurnAction()
+
+
+def test_removed_scripted_baseline_is_rejected():
+    with pytest.raises(ValueError, match="scripted_agent"):
+        make_agent("scripted")
 
 
 def test_fog_commander_alias_builds_the_scripted_agent():

@@ -17,7 +17,7 @@ Generated from `docs/task.md` as a reusable design artifact. Not executed or wir
 | max_tokens | 256,000 |
 
 ---
-Below is complete, self-contained pseudocode for **`scripted_agent_action(engine, player_id, rng)`**, a strictly fog-limited, rule-based Battleboats agent designed as a drop-in counterpart to `scripted_action(engine, player_id, rng)` and `tactical.py` for harvesting diverse, decisive value-network training games.
+Below is complete, self-contained pseudocode for **`scripted_agent_action(engine, player_id, rng)`**, a strictly fog-limited, rule-based Battleboats agent designed alongside `tactical.py` for harvesting diverse, decisive value-network training games. The full-information baseline this draft called `scripted_action` has been removed.
 
 ### Design Highlights (Mapped to Rules)
 1. **Hard Fog-of-War Barrier (`extract_fogged_view`, §7 & §10):** Reads only `player_id`'s own ships/ports/cash, `player_id`'s fresh and stale sightings, static coastline tokens, board dimensions, `engine.turn`, and `enumerate_legal(player_id)`. Navigable water is reconstructed strictly by flood-filling from known water seeds while treating `coastline ∪ own_ports ∪ sighted_ports` as land (any cardinal land neighbor of water is by §7/§10 either a coastline tile or a port, so inland land can never be stepped onto).

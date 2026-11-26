@@ -142,7 +142,7 @@ def collect_trajectory(
         engine = env.engine
 
         # Unrecorded opponent. ``opponent_action`` is an optional callable
-        # (engine, pid, rng) -> Action used for a scripted baseline. With neither
+        # (engine, pid, rng) -> Action used for a fixed opponent. With neither
         # a policy nor a callable, the opponent is uniform random.
         if pid != agent_pid and opponent_policy is None:
             if opponent_action is not None:

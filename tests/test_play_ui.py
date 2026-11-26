@@ -1,4 +1,4 @@
-"""HTTP play UI: tactical/scripted/checkpoint games, JSON API, fog of war, and full playouts."""
+"""HTTP play UI: tactical/scripted-agent/checkpoint games, JSON API, fog of war, and full playouts."""
 
 import json
 import random
@@ -87,7 +87,7 @@ def _save_policy(path: Path) -> None:
     save_checkpoint(policy, path)
 
 
-def test_health_and_scripted_game(ui_server: int) -> None:
+def test_health_and_scripted_agent_game(ui_server: int) -> None:
     status, _, body = _request(ui_server, "GET", "/health")
     assert status == 200
     assert body == b"ok"
@@ -96,7 +96,7 @@ def test_health_and_scripted_game(ui_server: int) -> None:
         "POST",
         "/start",
         {
-            "opponent": "scripted",
+            "opponent": "scripted_agent",
             "human_side": "1",
             "width": "4",
             "height": "4",
@@ -109,7 +109,7 @@ def test_health_and_scripted_game(ui_server: int) -> None:
     status, _, page = _request(ui_server, "GET", "/play")
     text = page.decode()
     assert status == 200
-    assert "Scripted baseline (full-information opponent)" in text
+    assert "Scripted agent (fog of war)" in text
     assert "Opponent:" in text
     status, headers, _ = _request(ui_server, "POST", "/act", {"index": "0"})
     assert status == 303
@@ -433,15 +433,15 @@ def test_new_game_form_lists_scripted_opponents(ui_server: int) -> None:
     text = page.decode()
     assert status == 200
     assert 'value="tactical"' in text
-    assert 'value="scripted"' in text
+    assert 'value="scripted"' not in text.replace('value="scripted_agent"', "")
     assert 'value="scripted_agent"' in text
     assert "Scripted agent (fog of war)" in text
     assert "Tactical (fog of war)" in text
-    assert "Scripted baseline (full-information opponent)" in text
+    assert "Scripted baseline" not in text
     assert "you still have fog of war" in text.lower() or "You always play under fog of war" in text
 
 
-@pytest.mark.parametrize("opponent", ("tactical", "scripted", "scripted_agent"))
+@pytest.mark.parametrize("opponent", ("tactical", "scripted_agent"))
 @pytest.mark.parametrize("human_side", (0, 1))
 def test_full_game_via_api_vs_scripted_opponents_is_fog_safe(
     tmp_path: Path, opponent: str, human_side: int

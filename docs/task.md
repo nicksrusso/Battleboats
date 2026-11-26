@@ -18,9 +18,9 @@ This is a revival of an earlier MCTS idea that was shelved because there was no 
 
 Run on the order of **1,000 cheap CPU games**, primarily on **32×16** maps (the size ship stats are built for), using the map-pool turn cap described in §9.
 
-**Opponents and mix.** The current scripted baseline (`battleboats/agents/scripted.py`, PR #62) now uses a randomized per-seat build queue over all eight ship types and is a reasonable starting teacher. It is **full-information**: it reads both fleets and both home ports directly from the engine. That is useful for generating decisive, diverse games, but it is a problem for a value net that must evaluate fogged positions. Therefore:
+**Opponents and mix.** The full-information baseline in `battleboats/agents/scripted.py` (PR #62) has been removed. Harvest and eval use the fog-limited **scripted agent** (`battleboats/agents/scripted_agent.py`) and the fog-limited **tactical** agent (`battleboats/agents/tactical.py`). Passing the old name `scripted` is an error, not an alias. Therefore:
 
-- Play a mix of matchups, not only scripted vs scripted: include the fog-limited **tactical** agent (`battleboats/agents/tactical.py`) and **random-perturbed** variants (for example ε-random mix-in on legal actions, or scripted/tactical vs the uniform random agent in `battleboats/agents/random_agent.py`).
+- Play a mix of matchups: scripted agent vs itself, vs tactical, and vs the uniform random agent in `battleboats/agents/random_agent.py`.
 - Regardless of how an agent chooses its action, **record each seat's fogged observation** from `battleboats/envs/observation.py` (`build_observation(engine, player_id)`), plus the legal-action list, the action taken, the true board state (for replay), and the eventual game outcome.
 - Keep enough metadata to replay a game from seed + map + action sequence.
 
@@ -74,7 +74,7 @@ Engine combat already uses a seeded RNG, and `clone()` deep-copies it, so search
 
 - **Harvest:** decisive rate (target: comparable to the 76% 50-game check, reported with a confidence interval), even-ish win split by seat, buy diversity across all eight types, game-length distribution, and a breakdown by matchup (scripted vs scripted, scripted vs tactical, etc.).
 - **Value net:** held-out accuracy and Brier/MSE vs coin flip and the simple baseline; calibration; no large seat bias.
-- **MCTS (after the gate):** vs the scripted baseline and vs the tactical agent, on 32×16, report win rate, decisive rate, and average length. A first success is a clearly better-than-even record against scripted under fog, at a thinking budget that still runs on CPU.
+- **MCTS (after the gate):** vs the scripted agent and vs the tactical agent, on 32×16, report win rate, decisive rate, and average length. A first success is a clearly better-than-even record against the scripted agent under fog, at a thinking budget that still runs on CPU.
 
 ### 1.5 Open questions
 
@@ -91,7 +91,7 @@ Engine combat already uses a seeded RNG, and `clone()` deep-copies it, so search
 | Engine / rules | `battleboats/core/gameEngine.py` | Sole owner of rules. |
 | Ship / combat / spotting tables | `battleboats/core/config/*.csv`, `shipyard/ship_data.py` | Source of truth for numbers. |
 | Fogged observation | `battleboats/envs/observation.py` | 76-dim tokens + 8-dim globals. |
-| Scripted baseline | `battleboats/agents/scripted.py` | Full information, random build queue (PR #62). |
+| Scripted agent | `battleboats/agents/scripted_agent.py` | Fog-limited doctrine agent. The old full-information baseline was removed. |
 | Tactical baseline | `battleboats/agents/tactical.py` | Fog-limited, also a random build queue. |
 | Value transformer | `battleboats/training/transformer.py` | Encoder + value head; add globals. |
 | Policy encoder | `battleboats/training/policy.py` | Already prepends a globals token. |
@@ -356,23 +356,11 @@ Opponent cash is not present. Legal actions are **not** inside the observation; 
 
 ---
 
-## 11. Current scripted baseline (for contrast)
+## 11. Scripted agent (the former full-information baseline was removed)
 
-`scripted_action(engine, player_id, rng)` in `battleboats/agents/scripted.py`, updated in PR #62. This is the full-information teacher the harvest will start from, **not** a model of a legal fog player.
+The full-information teacher `scripted_action` in `battleboats/agents/scripted.py` (PR #62) has been deleted. It is not an alias of the scripted agent. The live fog-limited agent is `battleboats/agents/scripted_agent.py` (`ScriptedAgent` / `scripted_agent_action`), with `fog_commander` kept only as a config and import alias. Design and deviations: `docs/scripted_agent.md`.
 
-Priority, first legal match wins, sampled uniformly when several actions share a class:
-
-1. `CapturePortAction` — any capturable adjacent port, no preference for the enemy home.
-2. `AttackAction` — any legal attack (the engine already requires the attacker to be in range and in its own spotting radius).
-3. `MerchantUnloadAction`, then `MerchantLoadAction`.
-4. `BuildPortAction` — any legal builder target, no preference for proximity to home.
-5. `BuildShipAction` for the **head of a per-seat randomized queue** only. The queue is a shuffled permutation of all eight types, stored on the engine, refilled when empty, drawn with the caller's RNG so a game is deterministic given the seed. If the head is not affordable or not legal this turn, the agent **saves** and does not skip ahead to a cheaper type.
-6. A `MoveAction` that **strictly reduces** that ship's Manhattan distance to a type-specific objective: landings go to the (true) enemy home; loaded merchants go home and empty merchants go to the nearest owned satellite; builders go to the nearest empty land tile; combat ships go to the nearest live enemy ship, or to the enemy home if none exist. No water-path planning — a ship that is blocked by land just ends the turn.
-7. `EndTurnAction`.
-
-The **tactical** agent is the fog-limited counterpart: same idea of a random build queue, but enemy information comes only from sightings, landings chase the nearest *known* capturable port (or explore toward the far side of the map if none have been seen), merchants flee visible threats, and combat uses a local force-balance with softmax noise.
-
-A strong **fog-of-war** scripted agent — suitable for generating diverse, decisive training games — should obey the spotting rules in §7, should not read the true enemy fleet or an unsighted home, and should still buy a diverse mix of types rather than collapsing onto merchants.
+The **tactical** agent remains the other fog-limited opponent: a random build queue, enemy information only from sightings, landings that chase the nearest known capturable port, merchants that flee visible threats, and combat that uses a local force-balance with softmax noise.
 
 ---
 
@@ -394,6 +382,6 @@ A strong **fog-of-war** scripted agent — suitable for generating diverse, deci
 | Play-UI map presets | `battleboats/ui/maps.py` |
 | Fogged observations | `battleboats/envs/observation.py` |
 | AEC env, default cap, rewards | `battleboats/envs/base_aec.py`, `battleboats/envs/battleboats_aec.py` |
-| Scripted / tactical / random / god-mode MCTS | `battleboats/agents/scripted.py`, `tactical.py`, `random_agent.py`, `godmode_mcts.py` |
+| Scripted agent / tactical / random / god-mode MCTS | `battleboats/agents/scripted_agent.py`, `tactical.py`, `random_agent.py`, `godmode_mcts.py` |
 | Value transformer | `battleboats/training/transformer.py` |
 | Combat write-up (same numbers) | `docs/combat_and_scouting.md` |
