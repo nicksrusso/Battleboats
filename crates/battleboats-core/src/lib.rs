@@ -9,7 +9,7 @@
 pub mod action;
 pub mod canonical;
 pub mod error;
-pub mod fog;
+pub mod scripted_agent;
 pub mod jsonfmt;
 pub mod map;
 pub mod observation;

@@ -3,7 +3,7 @@
 //! Importing this fails only when the extension was not built. The pure-Python
 //! engine does not import this module.
 
-use bb_engine::fog::{CommanderRng, FogCommander as CoreFog, FogConfig};
+use bb_engine::scripted_agent::{CommanderRng, ScriptedAgent as CoreFog, ScriptedAgentConfig};
 use bb_engine::{
     canonical_json, decode_json, format_python_json_float, state_from_canonical_json, state_hash,
     tables, Action, CoreError, Engine, ShipType, SpotKey, CASH_PER_MATERIAL, MERCHANT_CAPACITY,
@@ -177,17 +177,17 @@ impl CommanderRng for PyRng<'_> {
     }
 }
 
-#[pyclass(name = "FogCommander")]
-struct FogCommander {
+#[pyclass(name = "ScriptedAgent")]
+struct ScriptedAgent {
     inner: CoreFog,
 }
 
 #[pymethods]
-impl FogCommander {
+impl ScriptedAgent {
     #[new]
     #[pyo3(signature = (doctrine = None))]
     fn new(doctrine: Option<String>) -> Self {
-        let mut config = FogConfig::default();
+        let mut config = ScriptedAgentConfig::default();
         config.doctrine = doctrine;
         Self {
             inner: CoreFog::new(config),
@@ -642,7 +642,9 @@ fn battleboats_core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     // Fail at import if the balance CSVs baked into the binary do not parse.
     let _ = tables();
     m.add_class::<Game>()?;
-    m.add_class::<FogCommander>()?;
+    m.add_class::<ScriptedAgent>()?;
+    // Deprecated export. Existing notebooks and the harvest metadata name still import it.
+    m.add("FogCommander", m.getattr("ScriptedAgent")?)?;
     m.add_class::<Batch>()?;
     m.add_function(wrap_pyfunction!(schema_version, m)?)?;
     m.add_function(wrap_pyfunction!(starting_cash, m)?)?;

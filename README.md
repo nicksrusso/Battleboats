@@ -96,7 +96,7 @@ cargo test -p battleboats-core
 
 When the extension is built, `tests/golden/` runs the same rules and replays against Rust. Rust combat uses a seeded ChaCha generator. Replay fixtures inject the recorded `combat_outcomes`, so state hashes match without a NumPy PCG64 port. Python still rolls with `numpy.random.default_rng`.
 
-Rust is the production hot path for harvest and scripted self-play when the extension imports (`--backend auto`, the default). `--backend python` forces the reference engine. The interactive play UI and PPO gradient rollouts still step the Python engine. New rules should land in both so the golden suite stays meaningful. Observation tokens and Fog Commander actions are checked against Python on the golden fixtures.
+Rust is the production hot path for harvest and scripted self-play when the extension imports (`--backend auto`, the default). `--backend python` forces the reference engine. The interactive play UI and PPO gradient rollouts still step the Python engine. New rules should land in both so the golden suite stays meaningful. Observation tokens and scripted agent actions are checked against Python on the golden fixtures.
 
 `runs/` and `**.json` are gitignored. Maps used by training and by the engine tests are generated at runtime. `pytest` writes `battleboats/core/config/map.json` only when that file is missing, so a local map is left in place.
 
@@ -186,7 +186,7 @@ poetry run python scripts/eval_agent.py \
     --checkpoint runs/selfplay/latest.pt --opponent scripted --games 40
 ```
 
-`--opponent fog_commander` (also in `scripts/play.py` and the play UI) is a fog-limited scripted agent with six sampled doctrines, built from the Gemini 4 Carbon pseudocode. It reads only its seat's information. `scripts/eval_fog_commander.py` plays it against itself, scripted, and random, and `scripts/harvest_tactical.py --labeler fog_commander` harvests its decisions. Design, fog leaks found, deviations, and results: `docs/fog_commander.md`.
+`--opponent scripted_agent` (also in `scripts/play.py` and the play UI) is a fog-limited scripted agent with six sampled doctrines, built from the Gemini 4 Carbon pseudocode. It reads only its seat's information. `scripts/eval_scripted_agent.py` plays it against itself, scripted, and random, and `scripts/harvest_tactical.py --labeler scripted_agent` harvests its decisions. Design, fog leaks found, deviations, and results: `docs/scripted_agent.md`.
 
 # Heuristic weights
 

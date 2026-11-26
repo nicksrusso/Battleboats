@@ -18,7 +18,10 @@ def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--checkpoint", type=Path, required=True)
     parser.add_argument(
-        "--opponent", choices=("random", "scripted", "tactical", "fog_commander"), default="random"
+        "--opponent",
+        choices=("random", "scripted", "tactical", "scripted_agent", "fog_commander"),
+        default="random",
+        help="fog_commander is a deprecated alias for scripted_agent",
     )
     parser.add_argument("--games", type=int, default=20)
     parser.add_argument("--width", type=int, default=8)

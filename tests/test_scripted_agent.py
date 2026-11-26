@@ -1,4 +1,4 @@
-"""Fog Commander agent: fog invariance, determinism, legality, doctrine sampling."""
+"""Scripted agent: fog invariance, determinism, legality, doctrine sampling."""
 
 from __future__ import annotations
 
@@ -10,15 +10,15 @@ from pathlib import Path
 import numpy as np
 import pytest
 
-from battleboats.agents.fog_commander import (
+from battleboats.agents.scripted_agent import (
     ALL_TYPES,
     DOCTRINE_NAMES,
-    FogCommander,
-    FogCommanderConfig,
+    ScriptedAgent,
+    ScriptedAgentConfig,
     canonical_build_action,
     engine_accepts,
-    fog_commander_action,
-    fog_commander_agent,
+    scripted_agent_action,
+    scripted_agent_on,
     init_memory,
 )
 from battleboats.agents.random_agent import random_action
@@ -130,7 +130,7 @@ def _memory_signature(mem):
 ])
 def test_fog_invariance_hidden_state_never_changes_the_action(tmp_path, preset, opponent, seed):
     engine = _engine(tmp_path, preset, seed)
-    fc = FogCommander()
+    fc = ScriptedAgent()
     rngs = {0: random.Random(seed * 2 + 1), 1: random.Random(seed * 2 + 2)}
     prng = random.Random(seed)
     checks = 0
@@ -142,7 +142,7 @@ def test_fog_invariance_hidden_state_never_changes_the_action(tmp_path, preset, 
             e1 = engine.clone()
             e2 = _perturb_hidden(engine, pid, prng)
             assert _seat_view_equal(e1, e2, pid), "perturbation leaked into the seat's view"
-            a1_agent, a2_agent = FogCommander(), FogCommander()
+            a1_agent, a2_agent = ScriptedAgent(), ScriptedAgent()
             a1_agent.memory = copy.deepcopy(fc.memory)
             a2_agent.memory = copy.deepcopy(fc.memory)
             r1, r2 = random.Random(), random.Random()
@@ -163,7 +163,7 @@ def test_fog_invariance_hidden_state_never_changes_the_action(tmp_path, preset, 
 
 def test_spawn_tile_ignores_true_enemy_home(tmp_path):
     engine = _engine(tmp_path, "32x16", 5)
-    fc = FogCommander()
+    fc = ScriptedAgent()
     rng = random.Random(1)
     for _ in range(4000):
         if engine.winner is not None:
@@ -176,7 +176,7 @@ def test_spawn_tile_ignores_true_enemy_home(tmp_path):
             moved = engine.clone()
             opp = 1 - pid
             moved.players[opp].home_port = (0, 0) if moved.players[opp].home_port != (0, 0) else (1, 1)
-            other = FogCommander()
+            other = ScriptedAgent()
             other.memory = mem
             r2 = random.Random()
             r2.setstate(state)
@@ -184,13 +184,13 @@ def test_spawn_tile_ignores_true_enemy_home(tmp_path):
             assert engine_accepts(engine, pid, a)
             return
         engine.step(a)
-    pytest.fail("fog_commander never bought a ship")
+    pytest.fail("scripted_agent never bought a ship")
 
 
 def test_unsighted_ports_are_land_not_water(tmp_path):
     engine = _engine(tmp_path, "32x16", 21)
     for pid in (0, 1):
-        mem = init_memory(engine, pid, random.Random(0), FogCommanderConfig())
+        mem = init_memory(engine, pid, random.Random(0), ScriptedAgentConfig())
         hidden_enemy_ports = [
             pos for pos, port in engine.ports.items()
             if port.owner != pid and pos not in engine.players[pid].port_sightings
@@ -211,11 +211,11 @@ def _play(tmp_path, preset, seed, kinds, max_turns=60, functional=False):
     while engine.winner is None and engine.turn < max_turns and len(log) < 20000:
         pid = engine.current_player
         legal = engine.enumerate_legal(pid)
-        if functional and kinds[pid] == "fog_commander":
-            a = fog_commander_action(engine, pid, rngs[pid])
+        if functional and kinds[pid] == "scripted_agent":
+            a = scripted_agent_action(engine, pid, rngs[pid])
         else:
             a = agents[pid].act(engine, pid, rngs[pid])
-        if kinds[pid] == "fog_commander":
+        if kinds[pid] == "scripted_agent":
             per_turn[(pid, engine.turn)] += 1
             if not engine_accepts(engine, pid, a, legal):
                 bad.append((engine.turn, a))
@@ -226,8 +226,8 @@ def _play(tmp_path, preset, seed, kinds, max_turns=60, functional=False):
     return engine, log, bad, per_turn, agents
 
 
-@pytest.mark.parametrize("kinds", [("fog_commander", "fog_commander"), ("fog_commander", "scripted"),
-                                   ("random", "fog_commander")])
+@pytest.mark.parametrize("kinds", [("scripted_agent", "scripted_agent"), ("scripted_agent", "scripted"),
+                                   ("random", "scripted_agent")])
 def test_deterministic_per_seed(tmp_path, kinds):
     _, log1, _, _, _ = _play(tmp_path / "a", "32x16", 3, kinds, max_turns=40)
     _, log2, _, _, _ = _play(tmp_path / "b", "32x16", 3, kinds, max_turns=40)
@@ -237,29 +237,29 @@ def test_deterministic_per_seed(tmp_path, kinds):
 
 
 def test_functional_wrapper_matches_class_and_resets(tmp_path):
-    kinds = ("fog_commander", "fog_commander")
+    kinds = ("scripted_agent", "scripted_agent")
     _, log1, _, _, _ = _play(tmp_path / "a", "16x8", 8, kinds, max_turns=30)
     engine, log2, _, _, _ = _play(tmp_path / "b", "16x8", 8, kinds, max_turns=30, functional=True)
     assert log1 == log2
-    agent = fog_commander_agent(engine)
+    agent = scripted_agent_on(engine)
     assert agent is not None and set(agent.memory) == {0, 1}
     engine.reset(seed=8)  # new players -> stale memory must not be reused
-    assert fog_commander_agent(engine) is None
-    assert fog_commander_agent(engine.clone()) is None
+    assert scripted_agent_on(engine) is None
+    assert scripted_agent_on(engine.clone()) is None
 
 
 GAMES = [
-    ("16x8", s, k) for s, k in zip(range(100, 112), [("fog_commander", "fog_commander"), ("fog_commander", "scripted"),
-                                                     ("scripted", "fog_commander"), ("fog_commander", "random"),
-                                                     ("random", "fog_commander"), ("tactical", "fog_commander")] * 2)
+    ("16x8", s, k) for s, k in zip(range(100, 112), [("scripted_agent", "scripted_agent"), ("scripted_agent", "scripted"),
+                                                     ("scripted", "scripted_agent"), ("scripted_agent", "random"),
+                                                     ("random", "scripted_agent"), ("tactical", "scripted_agent")] * 2)
 ] + [
-    ("open-8x8", s, ("fog_commander", "fog_commander")) for s in range(200, 206)
+    ("open-8x8", s, ("scripted_agent", "scripted_agent")) for s in range(200, 206)
 ] + [
-    ("32x16", s, k) for s, k in zip(range(300, 306), [("fog_commander", "fog_commander"), ("scripted", "fog_commander"),
-                                                     ("fog_commander", "random")] * 2)
+    ("32x16", s, k) for s, k in zip(range(300, 306), [("scripted_agent", "scripted_agent"), ("scripted", "scripted_agent"),
+                                                     ("scripted_agent", "random")] * 2)
 ] + [
-    ("48x24", 400, ("fog_commander", "fog_commander")),
-    ("24x12", 401, ("fog_commander", "scripted")),
+    ("48x24", 400, ("scripted_agent", "scripted_agent")),
+    ("24x12", 401, ("scripted_agent", "scripted")),
 ]
 
 
@@ -267,7 +267,7 @@ GAMES = [
 def test_no_illegal_actions(tmp_path, preset, seed, kinds):
     engine, log, bad, per_turn, _ = _play(tmp_path, preset, seed, kinds, max_turns=60)
     assert bad == []
-    assert max(per_turn.values()) <= FogCommanderConfig().max_steps_per_turn + 1
+    assert max(per_turn.values()) <= ScriptedAgentConfig().max_steps_per_turn + 1
     assert log, "no actions taken"
 
 
@@ -275,15 +275,15 @@ def test_doctrine_sampling_covers_all_and_is_seeded(tmp_path):
     engine = _engine(tmp_path, "16x8", 1)
     names = Counter()
     for seed in range(300):
-        m1 = init_memory(engine, 0, random.Random(seed), FogCommanderConfig())
-        m2 = init_memory(engine, 0, random.Random(seed), FogCommanderConfig())
+        m1 = init_memory(engine, 0, random.Random(seed), ScriptedAgentConfig())
+        m2 = init_memory(engine, 0, random.Random(seed), ScriptedAgentConfig())
         assert m1.doctrine == m2.doctrine and m1.jitter == m2.jitter
         assert set(m1.jitter) == set(ALL_TYPES)
         assert all(0.85 <= v <= 1.15 for v in m1.jitter.values())
         names[m1.doctrine.name] += 1
     assert set(names) == set(DOCTRINE_NAMES)
     assert min(names.values()) >= 25  # ~50 each when uniform
-    forced = init_memory(engine, 0, random.Random(0), FogCommanderConfig(doctrine="CAPITAL_ARMADA"))
+    forced = init_memory(engine, 0, random.Random(0), ScriptedAgentConfig(doctrine="CAPITAL_ARMADA"))
     assert forced.doctrine.name == "CAPITAL_ARMADA"
 
 
@@ -291,7 +291,7 @@ def test_seats_sample_doctrines_independently(tmp_path):
     pairs = Counter()
     for seed in range(40):
         engine = _engine(tmp_path, "16x8", 2)
-        fc = FogCommander()
+        fc = ScriptedAgent()
         rngs = {0: random.Random(seed * 2 + 1), 1: random.Random(seed * 2 + 2)}
         while len(fc.memory) < 2 and engine.winner is None:
             pid = engine.current_player
@@ -304,7 +304,7 @@ def test_seats_sample_doctrines_independently(tmp_path):
 def test_buys_span_many_types(tmp_path):
     buys = Counter()
     for seed in range(6):
-        _, log, _, _, _ = _play(tmp_path / str(seed), "32x16", 500 + seed, ("fog_commander", "fog_commander"),
+        _, log, _, _, _ = _play(tmp_path / str(seed), "32x16", 500 + seed, ("scripted_agent", "scripted_agent"),
                                 max_turns=60)
         buys.update(a.ship_type for a in log if isinstance(a, BuildShipAction))
     assert len(buys) >= 6, buys
@@ -327,12 +327,28 @@ def test_canonical_build_action_maps_to_legal(tmp_path):
     assert canonical_build_action(engine, 0, EndTurnAction()) == EndTurnAction()
 
 
-def test_harvest_labels_fog_commander_decisions(tmp_path):
+def test_fog_commander_alias_builds_the_scripted_agent():
+    import warnings
+
+    from battleboats.agents.registry import make_agent
+
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore", DeprecationWarning)
+        from battleboats.agents.fog_commander import FogCommander, fog_commander_action
+
+    assert FogCommander is ScriptedAgent
+    agent = make_agent("fog_commander", doctrine="RAIDER_BLITZ")
+    assert isinstance(agent, ScriptedAgent)
+    assert agent.config.doctrine == "RAIDER_BLITZ"
+    assert fog_commander_action is scripted_agent_action
+
+
+def test_harvest_labels_scripted_agent_decisions(tmp_path):
     from scripts.harvest_tactical import _play_game
 
     rm = resolve_map("16x8", seed=5, map_dir=tmp_path)
     r = _play_game(rm.path, max_turns=30, max_steps=3000, seed=5,
-                   actors={0: "fog_commander", 1: "fog_commander"})
+                   actors={0: "scripted_agent", 1: "scripted_agent"})
     assert r["n_labels"] > 0
     assert r["n_errors"] == 0, r["error_kinds"]
     assert r["verb_counts"].get("build_ship", 0) > 0

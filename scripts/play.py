@@ -2,7 +2,7 @@
 
     poetry run python scripts/play.py --map 16x8 --opponent tactical --seed 0
     poetry run python scripts/play.py --map 16x8 --opponent scripted --seed 0
-    poetry run python scripts/play.py --map 32x16 --opponent fog_commander --seed 0
+    poetry run python scripts/play.py --map 32x16 --opponent scripted_agent --seed 0
     poetry run python scripts/play.py --map 16x8 --opponent inkling --seed 0
     poetry run python scripts/play.py --map 16x8 --opponent llm --model thinkingmachines/inkling --reasoning high
     poetry run python scripts/play.py --map 16x8 --opponent inkling --reasoning max
@@ -49,9 +49,10 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--opponent",
-        choices=("tactical", "fog_commander", "scripted", "random", "checkpoint", "llm", "inkling"),
+        choices=("tactical", "scripted_agent", "fog_commander", "scripted", "random", "checkpoint", "llm", "inkling"),
         default=None,
-        help="Opponent agent (default: tactical; fog_commander is the fog-limited doctrine agent; "
+        help="Opponent agent (default: tactical; scripted_agent is the fog-limited doctrine agent; "
+        "fog_commander is a deprecated alias for scripted_agent; "
         "scripted is the full-information "
         "baseline; checkpoint if --checkpoint is set; inkling is an alias for llm + "
         "the Inkling flagship at high reasoning). You always have fog of war.",

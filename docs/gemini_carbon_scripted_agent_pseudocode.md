@@ -17,7 +17,7 @@ Generated from `docs/task.md` as a reusable design artifact. Not executed or wir
 | max_tokens | 256,000 |
 
 ---
-Below is complete, self-contained pseudocode for **`fog_commander_action(engine, player_id, rng)`**, a strictly fog-limited, rule-based Battleboats agent designed as a drop-in counterpart to `scripted_action(engine, player_id, rng)` and `tactical.py` for harvesting diverse, decisive value-network training games.
+Below is complete, self-contained pseudocode for **`scripted_agent_action(engine, player_id, rng)`**, a strictly fog-limited, rule-based Battleboats agent designed as a drop-in counterpart to `scripted_action(engine, player_id, rng)` and `tactical.py` for harvesting diverse, decisive value-network training games.
 
 ### Design Highlights (Mapped to Rules)
 1. **Hard Fog-of-War Barrier (`extract_fogged_view`, §7 & §10):** Reads only `player_id`'s own ships/ports/cash, `player_id`'s fresh and stale sightings, static coastline tokens, board dimensions, `engine.turn`, and `enumerate_legal(player_id)`. Navigable water is reconstructed strictly by flood-filling from known water seeds while treating `coastline ∪ own_ports ∪ sighted_ports` as land (any cardinal land neighbor of water is by §7/§10 either a coastline tile or a port, so inland land can never be stepped onto).
@@ -300,13 +300,13 @@ struct SeatMemory:
 
 function get_or_init_seat_memory(engine, view: FoggedView, rng) -> SeatMemory:
     """
-    Stores strictly private per-seat memory on `engine._fog_commander_mem[player_id]`,
+    Stores strictly private per-seat memory on `engine._scripted_agent_mem[player_id]`,
     auto-resetting at kickoff (`turn == 0` with no prior turns played).
     """
-    if not hasattr(engine, "_fog_commander_mem"):
-        engine._fog_commander_mem = {}
+    if not hasattr(engine, "_scripted_agent_mem"):
+        engine._scripted_agent_mem = {}
 
-    mem = engine._fog_commander_mem.get(view.player_id, None)
+    mem = engine._scripted_agent_mem.get(view.player_id, None)
     is_new_game = (
         mem is None
         or view.turn < mem.active_turn
@@ -332,7 +332,7 @@ function get_or_init_seat_memory(engine, view: FoggedView, rng) -> SeatMemory:
             sidestepped_this_turn=set(),
             builder_assignments={},
         )
-        engine._fog_commander_mem[view.player_id] = mem
+        engine._scripted_agent_mem[view.player_id] = mem
 
     # Reset intra-turn trackers whenever a new turn begins for this seat
     if mem.active_turn != view.turn:
@@ -1821,7 +1821,7 @@ function select_ship_purchase(view: FoggedView, world: TacticalWorld,
 # 7. TOP-LEVEL ATOMIC STEP ENTRY POINT
 # ==============================================================================
 
-function fog_commander_action(engine, player_id: int, rng) -> Action:
+function scripted_agent_action(engine, player_id: int, rng) -> Action:
     """
     Drop-in atomic policy for Battleboats under strict fog of war (§3, §7, §10).
     Returns exactly one legal `Action` from `engine.enumerate_legal(player_id)` per call.

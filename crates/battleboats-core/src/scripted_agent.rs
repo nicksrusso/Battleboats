@@ -1,4 +1,4 @@
-//! Fog Commander. Decision order matches `battleboats.agents.fog_commander`.
+//! scripted agent. Decision order matches `battleboats.agents.scripted_agent`.
 //!
 //! Random draws go through [`CommanderRng`] so a caller can inject CPython's
 //! `random.Random` and keep the same stream. Legal actions are normalized
@@ -176,7 +176,7 @@ struct Memory {
     sidestepped: HashSet<i64>,
 }
 
-pub struct FogConfig {
+pub struct ScriptedAgentConfig {
     pub max_steps_per_turn: i32,
     pub stale_horizon: i64,
     pub late_game_turn: i64,
@@ -187,7 +187,7 @@ pub struct FogConfig {
     pub doctrine: Option<String>,
 }
 
-impl Default for FogConfig {
+impl Default for ScriptedAgentConfig {
     fn default() -> Self {
         Self {
             max_steps_per_turn: 250,
@@ -202,13 +202,13 @@ impl Default for FogConfig {
     }
 }
 
-pub struct FogCommander {
-    config: FogConfig,
+pub struct ScriptedAgent {
+    config: ScriptedAgentConfig,
     memory: HashMap<i64, Memory>,
 }
 
-impl FogCommander {
-    pub fn new(config: FogConfig) -> Self {
+impl ScriptedAgent {
+    pub fn new(config: ScriptedAgentConfig) -> Self {
         Self {
             config,
             memory: HashMap::new(),
@@ -435,7 +435,7 @@ fn build_view(state: &GameState, pid: i64) -> View {
     }
 }
 
-fn init_memory(state: &GameState, config: &FogConfig, rng: &mut dyn CommanderRng) -> Memory {
+fn init_memory(state: &GameState, config: &ScriptedAgentConfig, rng: &mut dyn CommanderRng) -> Memory {
     let w = state.map.width;
     let h = state.map.height;
     let mut water = HashSet::new();
@@ -482,7 +482,7 @@ fn init_memory(state: &GameState, config: &FogConfig, rng: &mut dyn CommanderRng
     }
 }
 
-fn decide(view: &View, mem: &mut Memory, rng: &mut dyn CommanderRng, config: &FogConfig) -> Action {
+fn decide(view: &View, mem: &mut Memory, rng: &mut dyn CommanderRng, config: &ScriptedAgentConfig) -> Action {
     if mem.turn_key != Some(view.turn) {
         mem.turn_key = Some(view.turn);
         mem.steps_in_turn = 0;
@@ -503,7 +503,7 @@ fn decide(view: &View, mem: &mut Memory, rng: &mut dyn CommanderRng, config: &Fo
 struct Decision<'a> {
     v: &'a View,
     m: &'a mut Memory,
-    cfg: &'a FogConfig,
+    cfg: &'a ScriptedAgentConfig,
     k: f64,
     threat: HashMap<((i32, i32), u8), f64>,
     field_cache: HashMap<Vec<(i32, i32)>, Vec<i32>>,
@@ -522,7 +522,7 @@ struct Decision<'a> {
 }
 
 impl<'a> Decision<'a> {
-    fn new(v: &'a View, m: &'a mut Memory, cfg: &'a FogConfig) -> Self {
+    fn new(v: &'a View, m: &'a mut Memory, cfg: &'a ScriptedAgentConfig) -> Self {
         let mut d = Self {
             k: v.kill_k,
             threat: HashMap::new(),

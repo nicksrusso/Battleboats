@@ -1,4 +1,4 @@
-"""Observation, Fog Commander, batch, and harvest-flag checks.
+"""Observation, scripted agent, batch, and harvest-flag checks.
 
 Skipped when the extension is not built.
 """
@@ -15,7 +15,7 @@ import pytest
 
 bb = pytest.importorskip("battleboats_core")
 
-from battleboats.agents.fog_commander import FogCommander, FogCommanderConfig  # noqa: E402
+from battleboats.agents.scripted_agent import ScriptedAgent, ScriptedAgentConfig  # noqa: E402
 from battleboats.core.gameEngine import gameEngine  # noqa: E402
 from battleboats.envs.observation import TOKEN_DIM, build_observation  # noqa: E402
 from tests.golden.backend import decode_action, encode_action  # noqa: E402
@@ -55,7 +55,7 @@ def test_observation_matches_python_on_fixture_checkpoints(tmp_path: Path) -> No
             rust.step(record)
 
 
-def test_fog_commander_actions_match_on_a_fixture_game(tmp_path: Path) -> None:
+def test_scripted_agent_actions_match_on_a_fixture_game(tmp_path: Path) -> None:
     game = next(g for g in _games() if g["id"].startswith("g000_"))
     parts = game["matchup"].split("_vs_")
     map_path = tmp_path / "map.json"
@@ -66,10 +66,10 @@ def test_fog_commander_actions_match_on_a_fixture_game(tmp_path: Path) -> None:
     rust.reset(int(game["seed"]))
     rust.set_combat_outcomes(game["combat_outcomes"])
     py_agents = [
-        FogCommander(FogCommanderConfig(doctrine=parts[0])),
-        FogCommander(FogCommanderConfig(doctrine=parts[1])),
+        ScriptedAgent(ScriptedAgentConfig(doctrine=parts[0])),
+        ScriptedAgent(ScriptedAgentConfig(doctrine=parts[1])),
     ]
-    rs_agents = [bb.FogCommander(parts[0]), bb.FogCommander(parts[1])]
+    rs_agents = [bb.ScriptedAgent(parts[0]), bb.ScriptedAgent(parts[1])]
     py_rng = [random.Random(int(game["seed"]) * 101 + 1), random.Random(int(game["seed"]) * 101 + 2)]
     rs_rng = [random.Random(int(game["seed"]) * 101 + 1), random.Random(int(game["seed"]) * 101 + 2)]
     for record in game["actions"]:
@@ -102,6 +102,10 @@ def test_batch_tracks_single_games(tmp_path: Path) -> None:
         assert batch.state_hash(index) == game.state_hash()
 
 
+def test_fog_commander_export_is_the_scripted_agent() -> None:
+    assert bb.FogCommander is bb.ScriptedAgent
+
+
 def test_rust_harvest_shard(tmp_path: Path) -> None:
     from battleboats.rust_play import play_harvest_game
 
@@ -111,7 +115,7 @@ def test_rust_harvest_shard(tmp_path: Path) -> None:
             "kind": "self_play",
             "seed": 3,
             "map_spec": "16x8",
-            "actors": {0: "fog_commander", 1: "fog_commander"},
+            "actors": {0: "scripted_agent", 1: "scripted_agent"},
             "doctrines": {0: "RAIDER_BLITZ", 1: "ECONOMIC_BOOM"},
             "gamma": 0.99,
             "out_root": str(tmp_path),

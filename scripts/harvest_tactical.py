@@ -35,7 +35,8 @@ if str(_ROOT) not in sys.path:
 os.environ.setdefault("OMP_NUM_THREADS", "1")
 os.environ.setdefault("MKL_NUM_THREADS", "1")
 
-from battleboats.agents.fog_commander import FogCommander, canonical_build_action
+from battleboats.agents.registry import is_scripted_agent_kind, normalize_agent_kind
+from battleboats.agents.scripted_agent import ScriptedAgent, canonical_build_action
 from battleboats.agents.random_agent import random_action
 from battleboats.agents.tactical import tactical_scripted_action
 from battleboats.core.actions import BuildShipAction, CapturePortAction
@@ -50,7 +51,7 @@ from battleboats.training.tactical_bc import (
     write_game_npz,
 )
 
-LABEL_KINDS = ("tactical", "fog_commander")  # scripted seats whose actions are labels
+LABEL_KINDS = ("tactical", "scripted_agent")  # scripted seats whose actions are labels
 
 
 def _play_game(
@@ -69,14 +70,14 @@ def _play_game(
         env.prime_legal_actions = False
     env.reset(seed=seed)
     rngs = {0: random.Random(seed * 2 + 1), 1: random.Random(seed * 2 + 2)}
-    fog_commander = FogCommander()
+    scripted_agent = ScriptedAgent()
 
     def action_for(pid: int):
         kind = actors[pid]
         if kind == "tactical":
             return tactical_scripted_action(env.engine, pid, rngs[pid])
-        if kind == "fog_commander":
-            return fog_commander.act(env.engine, pid, rngs[pid])
+        if is_scripted_agent_kind(kind):
+            return scripted_agent.act(env.engine, pid, rngs[pid])
         if kind == "random":
             return random_action(env.engine, pid, rngs[pid])
         import torch
@@ -107,8 +108,8 @@ def _play_game(
         # build the observation or choose an action.
         engine._refresh_sightings()
         action = action_for(pid)
-        if actors[pid] in LABEL_KINDS:
-            # The policy has one buy per (port, type); fog_commander picks its own
+        if actors[pid] in LABEL_KINDS or is_scripted_agent_kind(actors[pid]):
+            # The policy has one buy per (port, type); scripted_agent picks its own
             # spawn tile, so its buys are labelled as the canonical legal buy.
             encoded = encode_tactical_action(engine, pid, canonical_build_action(engine, pid, action))
             if encoded.ok:
@@ -152,7 +153,7 @@ def _play_game(
 
     labeled_rows: List[Dict[str, Any]] = []
     for pid, rows in rows_by_pid.items():
-        if actors[pid] not in LABEL_KINDS or not rows:
+        if (actors[pid] not in LABEL_KINDS and not is_scripted_agent_kind(actors[pid])) or not rows:
             continue
         if winner is None:
             z = 0.0
@@ -313,11 +314,12 @@ def main() -> None:
     parser.add_argument("--resume", action="store_true")
     parser.add_argument(
         "--labeler",
-        choices=sorted(LABEL_KINDS),
+        choices=sorted((*LABEL_KINDS, "fog_commander")),
         default="tactical",
         help="scripted agent whose decisions become labels (default: tactical)",
     )
     args = parser.parse_args()
+    args.labeler = normalize_agent_kind(args.labeler)
 
     from battleboats.training.checkpoints import NO_CHECKPOINT_MSG, no_archived
     from battleboats.training.selfplay import load_selfplay_config
