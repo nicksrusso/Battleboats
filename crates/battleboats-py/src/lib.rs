@@ -5,7 +5,7 @@
 
 use bb_engine::{
     canonical_json, decode_json, format_python_json_float, state_from_canonical_json, state_hash,
-    tables, CoreError, Engine, ShipType, SpotKey, CASH_PER_MATERIAL, MERCHANT_CAPACITY,
+    tables, Action, CoreError, Engine, ShipType, SpotKey, CASH_PER_MATERIAL, MERCHANT_CAPACITY,
     PORT_PRODUCTION, SCHEMA_VERSION, STARTING_CASH,
 };
 use pyo3::exceptions::{PyIndexError, PyValueError};
@@ -23,6 +23,116 @@ fn core_err(err: CoreError) -> PyErr {
 fn py_dumps(obj: &Bound<'_, PyAny>) -> PyResult<String> {
     let dumps = obj.py().import("json")?.getattr("dumps")?;
     dumps.call1((obj,))?.extract()
+}
+
+fn pos_pair<'py>(py: Python<'py>, pos: (i32, i32)) -> PyResult<Bound<'py, PyList>> {
+    let pair = PyList::empty(py);
+    pair.append(pos.0)?;
+    pair.append(pos.1)?;
+    Ok(pair)
+}
+
+fn action_list<'py>(py: Python<'py>, action: &Action) -> PyResult<Bound<'py, PyList>> {
+    let list = PyList::empty(py);
+    match *action {
+        Action::Move { ship_id, x, y } => {
+            list.append("m")?;
+            list.append(ship_id)?;
+            list.append(x)?;
+            list.append(y)?;
+        }
+        Action::Attack {
+            attacker_id,
+            target_id,
+        } => {
+            list.append("a")?;
+            list.append(attacker_id)?;
+            list.append(target_id)?;
+        }
+        Action::BuildShip {
+            port_x,
+            port_y,
+            spawn_x,
+            spawn_y,
+            ship_type,
+        } => {
+            list.append("b")?;
+            list.append(port_x)?;
+            list.append(port_y)?;
+            list.append(spawn_x)?;
+            list.append(spawn_y)?;
+            list.append(ship_type.value())?;
+        }
+        Action::BuildPort {
+            builder_ship_id,
+            x,
+            y,
+        } => {
+            list.append("p")?;
+            list.append(builder_ship_id)?;
+            list.append(x)?;
+            list.append(y)?;
+        }
+        Action::CapturePort {
+            landing_ship_id,
+            x,
+            y,
+        } => {
+            list.append("c")?;
+            list.append(landing_ship_id)?;
+            list.append(x)?;
+            list.append(y)?;
+        }
+        Action::MerchantLoad { merchant_id, x, y } => {
+            list.append("l")?;
+            list.append(merchant_id)?;
+            list.append(x)?;
+            list.append(y)?;
+        }
+        Action::MerchantUnload { merchant_id, x, y } => {
+            list.append("u")?;
+            list.append(merchant_id)?;
+            list.append(x)?;
+            list.append(y)?;
+        }
+        Action::EndTurn => list.append("e")?,
+    }
+    Ok(list)
+}
+
+fn player_or_err(
+    state: &bb_engine::GameState,
+    player_id: i64,
+) -> PyResult<&bb_engine::state::Player> {
+    state
+        .players
+        .iter()
+        .find(|player| player.id == player_id)
+        .ok_or_else(|| PyValueError::new_err(format!("no player {player_id}")))
+}
+
+fn port_views<'py>(
+    engine: &Engine,
+    py: Python<'py>,
+    player_id: i64,
+    fresh_only: bool,
+) -> PyResult<Bound<'py, PyList>> {
+    let state = engine.require().map_err(core_err)?;
+    let player = player_or_err(state, player_id)?;
+    let list = PyList::empty(py);
+    for sighting in player.port_sightings.values() {
+        if fresh_only && !sighting.fresh {
+            continue;
+        }
+        let dict = PyDict::new(py);
+        dict.set_item("position", pos_pair(py, sighting.position)?)?;
+        dict.set_item("last_known_owner", sighting.last_known_owner)?;
+        dict.set_item("is_home", sighting.is_home)?;
+        dict.set_item("turn_seen", sighting.turn_seen)?;
+        dict.set_item("fresh", sighting.fresh)?;
+        list.append(dict)?;
+    }
+    Ok(list)
 }
 
 fn pos_list<'py>(py: Python<'py>, cells: &[(i32, i32)]) -> PyResult<Bound<'py, PyList>> {
@@ -80,6 +190,113 @@ impl Game {
             .reset_from_scenario_json(&text)
             .map_err(core_err)?;
         Ok(())
+    }
+
+    fn step(&mut self, action: &Bound<'_, PyAny>) -> PyResult<()> {
+        let text = py_dumps(action)?;
+        let decoded = decode_json(&text).map_err(core_err)?;
+        self.inner.step(&decoded).map_err(core_err)
+    }
+
+    fn enumerate_legal<'py>(
+        &self,
+        py: Python<'py>,
+        player_id: i64,
+    ) -> PyResult<Bound<'py, PyList>> {
+        let actions = self.inner.enumerate_legal(player_id).map_err(core_err)?;
+        let list = PyList::empty(py);
+        for action in actions {
+            list.append(action_list(py, &action)?)?;
+        }
+        Ok(list)
+    }
+
+    fn is_terminal(&self) -> PyResult<bool> {
+        self.inner.is_terminal().map_err(core_err)
+    }
+
+    #[pyo3(name = "clone")]
+    fn clone_game(&self) -> Self {
+        Self {
+            inner: self.inner.clone(),
+        }
+    }
+
+    fn set_combat_outcomes(&mut self, pairs: &Bound<'_, PyAny>) -> PyResult<()> {
+        let text = py_dumps(pairs)?;
+        let raw: Vec<Vec<serde_json::Value>> =
+            serde_json::from_str(&text).map_err(|err| PyValueError::new_err(err.to_string()))?;
+        let mut outcomes = Vec::with_capacity(raw.len());
+        for item in raw {
+            let step = item
+                .first()
+                .and_then(serde_json::Value::as_i64)
+                .ok_or_else(|| PyValueError::new_err("combat outcome step is not an int"))?;
+            let killed = item
+                .get(1)
+                .and_then(serde_json::Value::as_bool)
+                .ok_or_else(|| PyValueError::new_err("combat outcome killed is not a bool"))?;
+            outcomes.push((step, killed));
+        }
+        self.inner.set_combat_outcomes(outcomes);
+        Ok(())
+    }
+
+    fn visible_enemy_ships<'py>(
+        &self,
+        py: Python<'py>,
+        player_id: i64,
+    ) -> PyResult<Bound<'py, PyList>> {
+        let state = self.inner.require().map_err(core_err)?;
+        let player = player_or_err(state, player_id)?;
+        let list = PyList::empty(py);
+        for sighting in player.sightings.values() {
+            if !sighting.fresh || !state.ships.contains_key(&sighting.ship_id) {
+                continue;
+            }
+            let dict = PyDict::new(py);
+            dict.set_item("id", sighting.ship_id)?;
+            dict.set_item("type", sighting.ship_type.value())?;
+            dict.set_item("position", pos_pair(py, sighting.position)?)?;
+            list.append(dict)?;
+        }
+        Ok(list)
+    }
+
+    fn known_enemy_ships<'py>(
+        &self,
+        py: Python<'py>,
+        player_id: i64,
+    ) -> PyResult<Bound<'py, PyList>> {
+        let state = self.inner.require().map_err(core_err)?;
+        let player = player_or_err(state, player_id)?;
+        let list = PyList::empty(py);
+        for sighting in player.sightings.values() {
+            let dict = PyDict::new(py);
+            dict.set_item("ship_id", sighting.ship_id)?;
+            dict.set_item("type", sighting.ship_type.value())?;
+            dict.set_item("position", pos_pair(py, sighting.position)?)?;
+            dict.set_item("turn_seen", sighting.turn_seen)?;
+            dict.set_item("fresh", sighting.fresh)?;
+            list.append(dict)?;
+        }
+        Ok(list)
+    }
+
+    fn visible_enemy_ports<'py>(
+        &self,
+        py: Python<'py>,
+        player_id: i64,
+    ) -> PyResult<Bound<'py, PyList>> {
+        port_views(&self.inner, py, player_id, true)
+    }
+
+    fn known_enemy_ports<'py>(
+        &self,
+        py: Python<'py>,
+        player_id: i64,
+    ) -> PyResult<Bound<'py, PyList>> {
+        port_views(&self.inner, py, player_id, false)
     }
 
     fn canonical_json(&self) -> PyResult<String> {

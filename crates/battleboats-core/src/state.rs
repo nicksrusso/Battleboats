@@ -6,7 +6,11 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::path::Path;
 
+use rand::rngs::StdRng;
+use rand::SeedableRng;
 use serde::Deserialize;
+
+use crate::action::Action;
 
 use crate::error::{CoreError, CoreResult};
 use crate::map::Map;
@@ -116,6 +120,28 @@ pub struct Engine {
     /// Accepted for API compatibility. Not part of canonical state.
     pub rng_seed: Option<i64>,
     pub state: Option<GameState>,
+    /// Seeded ChaCha. Not part of canonical state. Golden replays override
+    /// combat with `combat_script` instead of matching NumPy PCG64.
+    rng: StdRng,
+    step_index: i64,
+    combat_script: BTreeMap<i64, bool>,
+}
+
+fn idle_rng() -> StdRng {
+    StdRng::seed_from_u64(0)
+}
+
+fn rng_from_seed(seed: Option<i64>) -> StdRng {
+    match seed {
+        Some(value) => {
+            let mut bytes = [0u8; 32];
+            let mixed = (value as u64).wrapping_mul(0x9E37_79B9_7F4A_7C15);
+            bytes[..8].copy_from_slice(&mixed.to_le_bytes());
+            bytes[8..16].copy_from_slice(&(value as u64).to_le_bytes());
+            StdRng::from_seed(bytes)
+        }
+        None => StdRng::seed_from_u64(0x00C0_FFEE),
+    }
 }
 
 impl Engine {
@@ -125,6 +151,9 @@ impl Engine {
             kill_curve_k,
             rng_seed: None,
             state: None,
+            rng: idle_rng(),
+            step_index: 0,
+            combat_script: BTreeMap::new(),
         }
     }
 
@@ -134,6 +163,9 @@ impl Engine {
             kill_curve_k,
             rng_seed: None,
             state: Some(state),
+            rng: idle_rng(),
+            step_index: 0,
+            combat_script: BTreeMap::new(),
         }
     }
 
@@ -143,14 +175,44 @@ impl Engine {
             kill_curve_k,
             rng_seed: None,
             state: None,
+            rng: idle_rng(),
+            step_index: 0,
+            combat_script: BTreeMap::new(),
         }
     }
 
     pub fn reset(&mut self, seed: Option<i64>) -> CoreResult<&GameState> {
         self.rng_seed = seed;
+        self.rng = rng_from_seed(seed);
+        self.step_index = 0;
+        self.combat_script.clear();
         let map = self.load_map()?;
         self.state = Some(GameState::reset_from_map(map, self.kill_curve_k)?);
         Ok(self.state.as_ref().unwrap())
+    }
+
+    pub fn set_combat_outcomes(&mut self, outcomes: impl IntoIterator<Item = (i64, bool)>) {
+        self.combat_script = outcomes.into_iter().collect();
+    }
+
+    pub fn step(&mut self, action: &Action) -> CoreResult<()> {
+        if self.state.is_none() {
+            return Err(CoreError::new("engine has not been reset"));
+        }
+        let scripted = self.combat_script.get(&self.step_index).copied();
+        let mut state = self.state.take().unwrap();
+        let result = state.apply(action, &mut self.rng, scripted);
+        self.state = Some(state);
+        self.step_index += 1;
+        result
+    }
+
+    pub fn enumerate_legal(&self, player_id: i64) -> CoreResult<Vec<Action>> {
+        Ok(self.require()?.enumerate_legal(player_id))
+    }
+
+    pub fn is_terminal(&self) -> CoreResult<bool> {
+        Ok(self.require()?.winner.is_some())
     }
 
     pub fn reset_from_scenario_json(&mut self, text: &str) -> CoreResult<&GameState> {

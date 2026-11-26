@@ -2,14 +2,16 @@
 //!
 //! Python (`battleboats.core.gameEngine`) is the reference implementation.
 //! This crate owns the schema_version 1 state, its canonical JSON / SHA-256,
-//! compact actions, and map / coastline queries. Rule steps (movement, combat,
-//! economy) land in later issues and must keep this hash stable.
+//! compact actions, map / coastline queries, and the rules used by `step`.
+//! Combat rolls use a seeded ChaCha RNG. Golden replays inject recorded
+//! `combat_outcomes` instead of matching NumPy's PCG64 bit stream.
 
 pub mod action;
 pub mod canonical;
 pub mod error;
 pub mod jsonfmt;
 pub mod map;
+pub mod rules;
 pub mod ship;
 pub mod state;
 pub mod tables;

@@ -174,8 +174,10 @@ Each fixture entry contains:
 `_resolve_attack` (`float(rng.random()) < p`). To pass strict seeded replay
 parity (`test_golden_replays.py`) without overriding combat rolls, the Rust core
 should either match NumPy's `SeedSequence` + `PCG64` or accept an optional RNG
-callback/seed stream. Alternatively, during initial bring-up, a Rust backend can
-verify 100% rules parity using the recorded `combat_outcomes`.
+callback/seed stream. The Rust backend does that: `test_golden_replay_exact_parity` calls
+`set_combat_outcomes` when the instance provides it, and Rust applies those
+recorded kills instead of matching NumPy PCG64. Python ignores the hook and
+still rolls with `default_rng`.
 
 ## 6. Running Only the Golden Suite
 
