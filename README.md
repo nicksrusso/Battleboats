@@ -94,7 +94,7 @@ poetry run pytest tests/test_rust_parity.py tests/golden/ -q
 cargo test -p battleboats-core
 ```
 
-This phase covers canonical state JSON / SHA-256 and map loading (including coastline). It does not step the game. Combat RNG is still NumPy PCG64 on the Python side; strict SeedSequence parity is tracked separately.
+When the extension is built, `tests/golden/` runs the same rules and replays against Rust. Rust combat uses a seeded ChaCha generator. Replay fixtures inject the recorded `combat_outcomes`, so state hashes match without a NumPy PCG64 port. Python still rolls with `numpy.random.default_rng`.
 
 `runs/` and `**.json` are gitignored. Maps used by training and by the engine tests are generated at runtime. `pytest` writes `battleboats/core/config/map.json` only when that file is missing, so a local map is left in place.
 

@@ -439,4 +439,12 @@ class PythonEngineBackend:
 
 def available_backends() -> List[EngineBackend]:
     """Return all registered engine backends available in this environment."""
-    return [PythonEngineBackend()]
+    backends: List[EngineBackend] = [PythonEngineBackend()]
+    try:
+        import battleboats_core  # noqa: F401
+    except ImportError:
+        return backends
+    from tests.golden.rust_backend import RustEngineBackend
+
+    backends.append(RustEngineBackend())
+    return backends

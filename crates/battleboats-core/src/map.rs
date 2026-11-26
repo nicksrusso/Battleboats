@@ -161,6 +161,31 @@ impl Map {
         Ok(())
     }
 
+    pub fn remove_ship(&mut self, x: i32, y: i32) -> CoreResult<()> {
+        let idx = self.index(x, y)?;
+        self.ship_at[idx] = NO_SHIP;
+        Ok(())
+    }
+
+    pub fn relocate_ship(
+        &mut self,
+        ship_id: i64,
+        src: (i32, i32),
+        dst: (i32, i32),
+    ) -> CoreResult<()> {
+        self.remove_ship(src.0, src.1)?;
+        self.place_ship(ship_id, dst.0, dst.1)
+    }
+
+    /// `Map.add_port`: the tile becomes land, owned by `owner`. Clears the
+    /// coastline cache because terrain changed.
+    pub fn add_port(&mut self, x: i32, y: i32, owner: i8) -> CoreResult<()> {
+        self.set_terrain(x, y, LAND)?;
+        self.set_port_owner(x, y, owner)?;
+        self.port_positions.push((x, y));
+        Ok(())
+    }
+
     pub fn manhattan(a: (i32, i32), b: (i32, i32)) -> i32 {
         (a.0 - b.0).abs() + (a.1 - b.1).abs()
     }
