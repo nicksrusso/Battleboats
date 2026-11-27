@@ -1,9 +1,12 @@
 """HarvestDataset — PyTorch Dataset over harvest output.
 
 Reads harvest data produced by `scripts/harvest.py` and exposes
-(phi_vector | tokens, target) pairs as torch tensors. Feature ordering is
-taken from `FEATURE_KEYS` in heuristics.py, so the column layout always
-matches the regression baseline — drop-in comparable.
+(phi_vector | tokens, target) pairs as torch tensors.
+
+``FEATURE_KEYS`` is a frozen historical column order for older harvests
+that still carry a ``phi`` dict. New harvests are token-only; ``phi`` is
+optional. Phi-only mode (``load_tokens=False``, not BC) keeps rows that
+have a complete ``phi``; token/BC mode ignores missing ``phi``.
 
 Accepts either form of harvest output:
   - a DIRECTORY of per-game shards (`game_<idx>.jsonl`, current format) —
@@ -31,8 +34,17 @@ import numpy as np
 import torch
 from torch.utils.data import Dataset
 
-from battleboats.agents.heuristics import FEATURE_KEYS
-
+# Frozen historical φ column order from the retired hand-coded heuristic.
+# Kept so older harvest shards still load; new harvests may omit phi.
+FEATURE_KEYS: Tuple[str, ...] = (
+    "material_diff",
+    "home_pressure_diff",
+    "combat_balance",
+    "econ_value_self",
+    "merchant_count_value_self",
+    "has_landing_self",
+    "landing_pressure_self",
+)
 
 def _shard_game_idx(path: Path) -> Optional[int]:
     """Parse the game index out of a `game_<idx>.jsonl` shard filename, so a
@@ -160,10 +172,20 @@ class HarvestDataset(Dataset):
                 if token_dim is None:
                     token_dim = len(tok[0])
                 token_index.append((shard_str, offset))
-            phi = row["phi"]
-            # Force canonical feature order; missing keys would silently shift
-            # columns otherwise — the nastiest possible data bug.
-            phi_rows.append([phi[k] for k in FEATURE_KEYS])
+                # phi is optional in token mode; do not require it.
+                targets.append(target_val)
+                game_ids.append(gid)
+                steps.append(row["step"])
+                return
+            phi = row.get("phi")
+            if not phi:
+                return  # new token-only harvests have no phi; skip in phi-only mode
+            try:
+                # Force canonical feature order; missing keys would silently shift
+                # columns otherwise — the nastiest possible data bug.
+                phi_rows.append([phi[k] for k in FEATURE_KEYS])
+            except KeyError:
+                return
             targets.append(target_val)
             game_ids.append(gid)
             steps.append(row["step"])

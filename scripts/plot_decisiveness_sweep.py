@@ -107,7 +107,7 @@ def main() -> None:
 
     fig.suptitle("Decisiveness & Aggression Across Board Size × Search Depth", fontsize=15, fontweight="bold")
     fig.text(0.5, 0.005,
-             "Self-play MCTS · v5 heuristic · cash=500 · max_turns=100 · 30 games/cell.",
+             "Self-play MCTS · value-net leaf · cash=500 · max_turns=100 · 30 games/cell.",
              ha="center", fontsize=8, color="0.4")
     fig.tight_layout(rect=(0, 0.03, 1, 0.95))
     args.out.parent.mkdir(parents=True, exist_ok=True)

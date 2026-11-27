@@ -23,7 +23,7 @@ from collections import deque
 from pathlib import Path
 from typing import Callable, Dict, List, Optional, Tuple
 
-from battleboats.agents.heuristics import pk
+from battleboats.core.combat import pk
 from battleboats.agents.random_agent import random_action
 from battleboats.agents.registry import normalize_agent_kind, reject_removed_scripted
 from battleboats.agents.scripted_agent import scripted_agent_action

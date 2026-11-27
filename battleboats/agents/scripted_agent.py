@@ -71,6 +71,7 @@ from battleboats.core.actions import (
 )
 from battleboats.core.gameEngine import MERCHANT_CAPACITY, PORT_PRODUCTION
 from battleboats.core.map.Map import LAND
+from battleboats.core.combat import COMBAT_TYPES
 from battleboats.core.shipyard.ship_data import BASE_STATS, PORT, attack_modifier, spot_distance
 from battleboats.core.shipyard.ship_type import ShipType
 
@@ -88,9 +89,6 @@ LANDING = ShipType.LANDING
 BUILDER = ShipType.BUILDER
 
 ALL_TYPES: Tuple[ShipType, ...] = tuple(t for t in ShipType if t in BASE_STATS)
-COMBAT_TYPES: FrozenSet[ShipType] = frozenset(
-    t for t in ALL_TYPES if BASE_STATS[t].attack_range > 0 and BASE_STATS[t].strength > 0
-)
 NON_COMBAT_TYPES: FrozenSet[ShipType] = frozenset(ALL_TYPES) - COMBAT_TYPES
 _TYPE_ORDER = {t: i for i, t in enumerate(ALL_TYPES)}
 

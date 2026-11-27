@@ -105,9 +105,46 @@ def load_value_checkpoint(path, map_location="cpu") -> Tuple[ValueNet, Dict[str,
 
 
 @torch.no_grad()
+def value_of_observations(model: ValueNet, entity_tokens_list, globals_list) -> list:
+    """Batched V(s) for ``build_observation`` outputs (MCTS leaves).
+
+    Pads variable-length token sets to the batch max. Tensors are placed on
+    the model's device. A one-observation call is just a batch of size 1;
+    vanilla UCT evaluates one leaf per iteration, but the batched path is
+    here so a later parallel/batch search can amortize the forward.
+    """
+    if len(entity_tokens_list) != len(globals_list):
+        raise ValueError("entity_tokens_list and globals_list must have the same length")
+    if not entity_tokens_list:
+        return []
+    device = next(model.parameters()).device
+    tok_arrays = [
+        torch.as_tensor(tok, dtype=torch.float32, device=device) for tok in entity_tokens_list
+    ]
+    for i, arr in enumerate(tok_arrays):
+        if arr.ndim != 2:
+            raise ValueError(f"entity tokens[{i}] must have shape (N, TOKEN_DIM), got {tuple(arr.shape)}")
+    max_n = max(arr.shape[0] for arr in tok_arrays)
+    if max_n == 0:
+        max_n = 1
+    token_dim = tok_arrays[0].shape[1]
+    B = len(tok_arrays)
+    tokens = torch.zeros(B, max_n, token_dim, dtype=torch.float32, device=device)
+    mask = torch.zeros(B, max_n, dtype=torch.bool, device=device)
+    for i, arr in enumerate(tok_arrays):
+        n = arr.shape[0]
+        if n == 0:
+            continue
+        tokens[i, :n] = arr
+        mask[i, :n] = True
+    globals_t = torch.stack(
+        [torch.as_tensor(g, dtype=torch.float32, device=device) for g in globals_list],
+        dim=0,
+    )
+    return model(tokens, mask, globals_t).detach().cpu().tolist()
+
+
+@torch.no_grad()
 def value_of_observation(model: ValueNet, entity_tokens, globals_vec) -> float:
     """Single-position V(s) for a ``build_observation`` output (MCTS leaf)."""
-    t = torch.as_tensor(entity_tokens, dtype=torch.float32).unsqueeze(0)
-    g = torch.as_tensor(globals_vec, dtype=torch.float32).unsqueeze(0)
-    mask = torch.ones(t.shape[:2], dtype=torch.bool)
-    return float(model(t, mask, g)[0])
+    return float(value_of_observations(model, [entity_tokens], [globals_vec])[0])

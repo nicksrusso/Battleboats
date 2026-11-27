@@ -63,7 +63,7 @@ Report accuracy, MSE or Brier score, and a calibration curve. If it cannot beat 
 
 Only after the gate in §1.2.
 
-The repo already has **perfect-information** UCT in `battleboats/agents/godmode_mcts.py` (clone the engine, UCB1, expand, rollout or heuristic eval, negamax backup). That search is not usable as a fog-of-war player: it sees the true board, and its random rollouts rarely finish a game. The new search should reuse the tree / UCT / `engine.clone()` machinery where it helps, but change two things:
+The repo already has **perfect-information** UCT in `battleboats/agents/godmode_mcts.py` (clone the engine, UCB1, expand, value-net leaf on the fogged observation of the side at the leaf, negamax backup). That search is not usable as a fog-of-war player: it sees the true board, and its random rollouts rarely finish a game. The new search should reuse the tree / UCT / `engine.clone()` machinery where it helps, but change two things:
 
 1. **Leaf evaluation** comes from the value net, not from a long random rollout. Evaluate the leaf's fogged observation (or an observation consistent with the current determinization) and back up that scalar in `[-1, 1]`.
 2. **Determinization for fog.** The searcher does not know where unseen enemy ships are, and stale sightings may be wrong. At the root, sample one or more complete worlds consistent with what the acting seat has actually seen: place unseen enemy ships in unobserved water, and treat stale last-known positions as noisy rather than certain. Run UCT in each sampled world (or average root values / visits across worlds) and pick an action that is legal in the real, fogged state. Do not let the search take an action that requires knowledge the player does not have.

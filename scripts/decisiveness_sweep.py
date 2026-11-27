@@ -1,7 +1,7 @@
 """Decisiveness sweep: does shrinking the board (or adding search) reduce draws?
 
 Isolates board size x MCTS iterations on game decisiveness, holding everything
-else fixed (per-player cash budget, max_turns, heuristic weights, self-play,
+else fixed (per-player cash budget, max_turns, value-net checkpoint, self-play,
 seeds). This is the controlled experiment for the thesis point that shrinking
 160x80 -> 64x32 -> 24x12 made games LESS decisive.
 
@@ -13,8 +13,7 @@ Design:
     changes (clean isolation). Density is a MEASURED covariate (fixed budget on
     a smaller board => higher ships/tile — reported, not controlled, because the
     44x area range makes density-constant degenerate; see docs/bc_findings.md).
-  - Self-play MCTS vs MCTS with the CURRENT heuristic weights (point the
-    heuristic at v5 before running — NOT v6_handfit).
+  - Self-play MCTS vs MCTS with the value-net leaf (required --checkpoint).
   - max_turns scaled? No: a single flat max_turns is used (per the run spec).
     Note in the writeup that turn budget is constant in absolute terms, not
     scaled to traversal — a smaller board gets proportionally more turns.
@@ -33,7 +32,7 @@ import random
 import statistics
 import sys
 import time
-from multiprocessing import Pool
+import multiprocessing as mp
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))  # scripts/ for sibling imports
@@ -80,7 +79,7 @@ def build_scenarios(w: int, h: int) -> tuple[list[dict], float]:
     return scns, statistics.mean(fleet) / 2.0
 
 
-def run_cell(scns: list[dict], iters: int, workers: int) -> list[dict]:
+def run_cell(scns: list[dict], iters: int, workers: int, checkpoint: str, device: str) -> list[dict]:
     """Run one (board, iters) cell: one self-play game per scenario."""
     items = [{
         "game_idx": i,
@@ -97,8 +96,12 @@ def run_cell(scns: list[dict], iters: int, workers: int) -> list[dict]:
         "emit_tokens": False,       # outcomes only — keep it light/fast
         "debug_mcts": False,
         "shard_path": None,
+        "checkpoint": checkpoint,
+        "device": device,
     } for i, scn in enumerate(scns)]
-    with Pool(workers) as pool:
+    choice = (device or "auto").strip().lower()
+    ctx = mp.get_context("fork" if choice == "cpu" else "spawn")
+    with ctx.Pool(workers) as pool:
         return list(pool.imap_unordered(_worker_run_game, items))
 
 
@@ -128,6 +131,8 @@ def main() -> None:
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     p.add_argument("--workers", type=int, default=min((os.cpu_count() or 2) - 1, 8))
     p.add_argument("--out", type=Path, default=SWEEP_DIR / "decisiveness_results.json")
+    p.add_argument("--checkpoint", type=Path, required=True, help="Value-net checkpoint for MCTS leaves.")
+    p.add_argument("--device", type=str, default="auto", help="cpu, cuda, cuda:N, or auto.")
     args = p.parse_args()
 
     SWEEP_DIR.mkdir(parents=True, exist_ok=True)
@@ -135,7 +140,8 @@ def main() -> None:
           f"scenarios/board={N_SCEN} workers={args.workers}\n")
 
     results = {"config": {"boards": BOARDS, "iters": ITERS, "cash": CASH, "max_turns": MAX_TURNS,
-                          "n_scenarios": N_SCEN, "land_fraction": LAND_FRACTION, "num_ports": NUM_PORTS},
+                          "n_scenarios": N_SCEN, "land_fraction": LAND_FRACTION, "num_ports": NUM_PORTS,
+                          "checkpoint": str(args.checkpoint), "device": args.device},
                "cells": {}, "density": {}}
     t0 = time.perf_counter()
     for (w, h) in BOARDS:
@@ -149,7 +155,7 @@ def main() -> None:
         print(f"[{w}x{h}] {ships_per_player:.1f} ships/player  ({density_k:.2f} ships/1000 tiles)")
         for iters in ITERS:
             ct = time.perf_counter()
-            recs = run_cell(scns, iters, args.workers)
+            recs = run_cell(scns, iters, args.workers, str(args.checkpoint), args.device)
             s = summarize(recs)
             results["cells"][f"{w}x{h}|{iters}"] = s
             print(f"    iters={iters:4d}  decisive={s['decisive_rate']:.2f} "

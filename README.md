@@ -188,8 +188,8 @@ poetry run python scripts/eval_agent.py \
 
 `--opponent scripted_agent` (also in `scripts/play.py` and the play UI) is a fog-limited scripted agent with six sampled doctrines, built from the Gemini 4 Carbon pseudocode. It reads only its seat's information. `scripts/eval_scripted_agent.py` plays it against itself, the tactical agent, and random, and `scripts/harvest_tactical.py --labeler scripted_agent` harvests its decisions. The old full-information baseline named `scripted` has been removed; that name is rejected and is not an alias. Design, fog leaks found, deviations, and results: `docs/scripted_agent.md`.
 
-# Heuristic weights
+# God-mode MCTS leaf
 
-`battleboats/agents/heuristics.py` loads `runs/weights/v5.json` when that file exists (also the old absolute path on Nick's machine). After `runs/` was deleted, import falls back to a seven-key hand prior with intercept 0 and `econ_value_self` weight 0, which keeps the symmetric-start zero-sum check and the columns in `scripts/play_human_vs_random.py`. Put `v5.json` back at `runs/weights/v5.json` to restore the fitted weights.
+`battleboats/agents/godmode_mcts.py` evaluates leaves with the trained value net only (no hand-coded heuristic). Pass a checkpoint to `load_mcts_value_net` or to `scripts/benchmark_godmode_mcts.py --checkpoint` / `scripts/harvest.py --checkpoint`. The net scores the fogged observation of the side to move; terminal positions short-circuit to ±1 or 0.
 
 Older trainers (`scripts/train_ppo.py`, `train_landing.py`, `train_bc.py`, and the rest) still default to `--device cpu`. They accept `auto` and `cuda` as well. ROCm is `cuda`, not a separate device name.

@@ -113,7 +113,7 @@ def check_engine_perf() -> None:
 
     print(f"  step-capped rollout avg:             {avg_ms:7.1f} ms  ({avg_steps:.0f} steps avg, cap={ROLLOUT_STEP_BUDGET})")
     print(f"  per env step:                        {us_per_step:7.1f} us")
-    print(f"  terminated by step {ROLLOUT_STEP_BUDGET}:           {terminated}/{N_ROLLOUTS}  (rest need heuristic eval at depth-out)")
+    print(f"  terminated by step {ROLLOUT_STEP_BUDGET}:           {terminated}/{N_ROLLOUTS}  (rest need the value-net leaf at depth-out)")
     print(f"  hit step cap:                        {truncated}/{N_ROLLOUTS}")
 
     print()
@@ -123,7 +123,7 @@ def check_engine_perf() -> None:
         print(f"    {iters:>5} iterations  ~=  {projected_s:7.1f} s / move")
     print()
     print(f"  If terminated/{N_ROLLOUTS} is low (say <3), random play rarely produces a")
-    print("  decisive ending within the step budget — MCTS will lean on the heuristic")
+    print("  decisive ending within the step budget — MCTS will lean on the value-net leaf")
     print("  eval at depth-out for most leaf values. That's fine, just informative.")
 
 
