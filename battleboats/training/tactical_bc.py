@@ -373,3 +373,174 @@ def write_split(
     path = harvest_dir / "split.json"
     path.write_text(json.dumps(payload, indent=2))
     return payload
+
+
+class CompactBCDataset(Dataset):
+    """Memory-lean BC dataset: a selected subset of rows, memory-mapped from disk.
+
+    ``TacticalBCDataset(preload=True)`` holds every row of every game, which
+    does not fit for 48x24 harvests (~87 tokens/row, millions of rows). This
+    reads each game's ``verbs`` / ``row_splits`` first, picks rows, then copies
+    only those rows into flat ``.npy`` files under ``cache_dir`` and opens them
+    with ``mmap_mode="r"``. Resident memory stays small (the OS page cache holds
+    the tokens and can drop them), and DataLoader workers share the mapping.
+    Without ``cache_dir`` the arrays are built in RAM (preallocated, no concat).
+
+    ``mode="stratified"`` uses the ``stratified_row_indices`` rule (rare verbs
+    kept in full, move / endturn downsampled to ``max_rows``). ``mode="natural"``
+    takes a uniform random sample of ``max_rows`` rows (natural verb mix), for
+    honest held-out agreement.
+    """
+
+    _FILES = ("tokens", "splits", "globals", "actions", "returns", "verbs")
+
+    def __init__(
+        self,
+        harvest_dir: str | Path,
+        game_idxs: Optional[Set[int]],
+        max_rows: Optional[int],
+        seed: int,
+        mode: str = "stratified",
+        keep_all: Optional[Set[str]] = None,
+        cache_dir: Optional[str | Path] = None,
+    ):
+        if mode not in ("stratified", "natural"):
+            raise ValueError(f"mode must be stratified or natural, got {mode!r}")
+        root = Path(harvest_dir)
+        manifest = json.loads((root / "manifest.json").read_text())
+        games = []
+        for rec in manifest["games"]:
+            gid = int(rec["game_idx"])
+            if game_idxs is not None and gid not in game_idxs:
+                continue
+            path = root / rec["path"]
+            if path.is_file() and int(rec["n_labels"]) > 0:
+                games.append((gid, path))
+        games.sort()
+        key = {
+            "games": [g for g, _ in games],
+            "max_rows": max_rows,
+            "seed": seed,
+            "mode": mode,
+            "keep_all": sorted(keep_all) if keep_all is not None else None,
+        }
+        cache = Path(cache_dir) if cache_dir is not None else None
+        if cache is not None and (cache / "key.json").is_file():
+            meta = json.loads((cache / "key.json").read_text())
+            if meta.get("key") == key:
+                self._open(cache, meta)
+                return
+        verbs_per_game: List[np.ndarray] = []
+        lens_per_game: List[np.ndarray] = []
+        for _gid, path in games:
+            with np.load(path, allow_pickle=False) as z:
+                verbs_per_game.append(np.asarray(z["verbs"], dtype=np.int64))
+                lens_per_game.append(np.diff(np.asarray(z["row_splits"], dtype=np.int64)))
+        offsets = np.zeros(len(games) + 1, dtype=np.int64)
+        offsets[1:] = np.cumsum([len(v) for v in verbs_per_game])
+        all_verbs = np.concatenate(verbs_per_game) if verbs_per_game else np.zeros((0,), dtype=np.int64)
+        all_lens = np.concatenate(lens_per_game) if lens_per_game else np.zeros((0,), dtype=np.int64)
+        del verbs_per_game, lens_per_game
+        n = int(all_verbs.shape[0])
+        rng = np.random.RandomState(seed)
+        if max_rows is None or max_rows <= 0 or n <= max_rows:
+            chosen = np.arange(n)
+        elif mode == "natural":
+            chosen = np.sort(rng.choice(n, size=max_rows, replace=False))
+        else:
+            chosen = np.asarray(sorted(_stratified_from_verbs(all_verbs, max_rows, rng, keep_all)), dtype=np.int64)
+        m = int(chosen.shape[0])
+        splits = np.zeros(m + 1, dtype=np.int64)
+        splits[1:] = np.cumsum(all_lens[chosen])
+        n_tok = int(splits[-1])
+
+        def alloc(name, shape, dtype):
+            if cache is None:
+                return np.zeros(shape, dtype=dtype)
+            cache.mkdir(parents=True, exist_ok=True)
+            return np.lib.format.open_memmap(cache / f"{name}.npy", mode="w+", dtype=dtype, shape=shape)
+
+        tokens = alloc("tokens", (n_tok, TOKEN_DIM), np.float16)
+        globals_arr = alloc("globals", (m, GLOBALS_DIM), np.float32)
+        actions = alloc("actions", (m, 3), np.int64)
+        returns = alloc("returns", (m,), np.float32)
+        verbs = alloc("verbs", (m,), np.int64)
+        gi = np.searchsorted(offsets, chosen, side="right") - 1
+        out = 0
+        for g in np.unique(gi):
+            rows = chosen[gi == g] - offsets[g]
+            k = len(rows)
+            with np.load(games[g][1], allow_pickle=False) as z:
+                gsplits = z["row_splits"]
+                tok = z["tokens_data"]
+                for j, r in enumerate(rows):
+                    lo, hi = int(gsplits[r]), int(gsplits[r + 1])
+                    dst = int(splits[out + j])
+                    tokens[dst : dst + (hi - lo)] = tok[lo:hi]
+                globals_arr[out : out + k] = z["globals"][rows]
+                actions[out : out + k] = z["actions"][rows]
+                returns[out : out + k] = z["returns"][rows]
+                verbs[out : out + k] = z["verbs"][rows]
+            out += k
+        meta = {"key": key, "n_rows_full": n, "n_games": len(games)}
+        if cache is not None:
+            for arr in (tokens, globals_arr, actions, returns, verbs):
+                arr.flush()
+            np.save(cache / "splits.npy", splits)
+            (cache / "key.json").write_text(json.dumps(meta))
+            del tokens, globals_arr, actions, returns, verbs
+            self._open(cache, meta)
+            return
+        self.n_rows_full, self.n_games = n, len(games)
+        self.tokens, self.splits, self.globals = tokens, splits, globals_arr
+        self.actions, self.returns, self.verbs = actions, returns, verbs
+
+    def _open(self, cache: Path, meta: Dict[str, Any]) -> None:
+        self.n_rows_full = int(meta["n_rows_full"])
+        self.n_games = int(meta["n_games"])
+        for name in self._FILES:
+            setattr(self, name, np.load(cache / f"{name}.npy", mmap_mode="r"))
+
+    def __len__(self) -> int:
+        return int(self.actions.shape[0])
+
+    def verb_name(self, idx: int) -> str:
+        return VERB_NAMES[int(self.verbs[idx])]
+
+    def __getitem__(self, idx: int):
+        lo, hi = int(self.splits[idx]), int(self.splits[idx + 1])
+        return (
+            torch.from_numpy(np.asarray(self.tokens[lo:hi], dtype=np.float32)),
+            torch.from_numpy(np.array(self.globals[idx], dtype=np.float32)),
+            torch.from_numpy(np.array(self.actions[idx], dtype=np.int64)),
+            torch.tensor(float(self.returns[idx]), dtype=torch.float32),
+        )
+
+
+def _stratified_from_verbs(
+    verbs: np.ndarray, max_rows: int, rng: np.random.RandomState, keep_all: Optional[Set[str]] = None
+) -> List[int]:
+    """``stratified_row_indices`` on a flat verb-index array."""
+    keep = set(keep_all) if keep_all is not None else set(KEEP_ALL_VERBS)
+    by_verb: Dict[str, List[int]] = {}
+    for i, v in enumerate(verbs.tolist()):
+        by_verb.setdefault(VERB_NAMES[int(v)], []).append(i)
+    reserved: List[int] = []
+    rest: Dict[str, List[int]] = {}
+    for verb, idxs in by_verb.items():
+        shuffled = list(idxs)
+        rng.shuffle(shuffled)
+        (reserved.extend(shuffled) if verb in keep else rest.__setitem__(verb, shuffled))
+    budget = max_rows - len(reserved)
+    if budget <= 0:
+        budget = min(8192, max(512, max_rows // 8))
+    chosen = list(reserved)
+    total = sum(len(v) for v in rest.values())
+    used = 0
+    items = list(rest.items())
+    for i, (verb, idxs) in enumerate(items):
+        take = budget - used if i == len(items) - 1 else int(round(budget * len(idxs) / total))
+        take = max(0, min(len(idxs), take))
+        chosen.extend(idxs[:take])
+        used += take
+    return chosen
