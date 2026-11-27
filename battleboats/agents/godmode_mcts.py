@@ -2,15 +2,16 @@
 
 Used as a fixed benchmark opponent, not as a trainable agent. "God mode"
 means the search operates on the true game state with no fog-of-war
-filtering on either side. Leaf evaluation is the value net applied to the
-fogged observation of ``side_at_leaf`` (the training distribution). Search
-expansion still sees the true board.
+filtering on either side. Leaf evaluation is a short tactical rollout
+followed by the value net on the fogged observation of ``side_at_leaf``
+(the training distribution). Search expansion still sees the true board.
 
-Vanilla UCT (Kocsis & Szepesvári 2006):
-    Each iteration walks the tree from the root via UCB1, expands one
-    untried action at the reached leaf, evaluates the leaf with the value
-    net (or a short optional random rollout first), and backpropagates
-    the value. Final move = child of root with the most visits.
+Vanilla UCT (Kocsis & Szepesvári 2006) with leaf-parallel batches:
+    Each batch walks the tree from the root via UCB1 (virtual loss keeps
+    in-flight simulations from collapsing onto one path), expands one
+    untried action at each reached leaf, runs a short tactical rollout,
+    scores remaining leaves in one value-net forward, and backpropagates.
+    Final move = child of root with the most visits.
 
 Negamax backup convention:
     Node.total_value is stored from the perspective of node.side_to_move.
@@ -30,11 +31,16 @@ if TYPE_CHECKING:
     from battleboats.core.gameEngine import gameEngine
     from battleboats.training.value_net import ValueNet
 
-from battleboats.agents.random_agent import random_action
+from battleboats.agents.rust_mcts_engine import current_player_of, observation_of, winner_of, wrap_engine
+from battleboats.agents.tactical_rollout import apply_tactical_rollout
 
 DEFAULT_C = math.sqrt(2)
 DEFAULT_ITERATIONS = 10000
-ROLLOUT_STEP_BUDGET = 0  # engine steps before the value-net leaf; 0 = evaluate immediately
+DEFAULT_LEAF_BATCH = 32
+DEFAULT_VIRTUAL_LOSS = 1.0
+# Engine steps of the tactical policy before the value-net leaf.
+# 0 = evaluate immediately. The requested default is a short 20–40 step burst.
+ROLLOUT_STEP_BUDGET = 32
 
 # Cache loaded nets per process so harvest/benchmark workers load once.
 _NET_CACHE: dict[tuple[str, str], "ValueNet"] = {}
@@ -84,24 +90,52 @@ def _run_search(
     iterations: int,
     c: float,
     value_net: "ValueNet",
+    leaf_batch: int = DEFAULT_LEAF_BATCH,
+    rollout_steps: int = ROLLOUT_STEP_BUDGET,
+    virtual_loss: float = DEFAULT_VIRTUAL_LOSS,
 ) -> Node:
     """Run UCT for `iterations` and return the populated root node.
 
     Shared core of `godmode_mcts_action` and `godmode_mcts_search`. Returning
     the root lets callers extract either the best action, the mean root value
     (negamax-corrected to root's POV), the visit distribution, or all three.
+
+    Simulations are collected in leaf-parallel batches of ``leaf_batch``.
+    Virtual loss is applied along each in-flight path so the next selection
+    in the same batch diversifies; one GPU forward scores the non-terminal
+    leaves, then virtual loss is undone and the real values backpropagate.
     """
+    engine = wrap_engine(engine)
     root = Node(
-        parent=None, action_in=None, side_to_move=player_id, untried_actions=list(engine.enumerate_legal(player_id=player_id))
+        parent=None,
+        action_in=None,
+        side_to_move=player_id,
+        untried_actions=list(engine.enumerate_legal(player_id=player_id)),
     )
 
-    for _ in range(iterations):
-        sim = engine.clone()
-        leaf = _select(root, sim, c)
-        if not sim.is_terminal() and leaf.untried_actions:
-            leaf = _expand(leaf, sim, rng)
-        value = _evaluate(sim, leaf.side_to_move, rng, value_net)
-        _backprop(leaf, value)
+    batch_size = max(1, int(leaf_batch))
+    remaining = max(0, int(iterations))
+    while remaining > 0:
+        take = min(batch_size, remaining)
+        remaining -= take
+        jobs: list[tuple[Node, object, list[Node]]] = []
+        for _ in range(take):
+            sim = engine.clone()
+            leaf = _select(root, sim, c)
+            if not sim.is_terminal() and leaf.untried_actions:
+                leaf = _expand(leaf, sim, rng)
+            path = _path_to(leaf)
+            _apply_virtual_loss(path, virtual_loss)
+            jobs.append((leaf, sim, path))
+        values = _evaluate_batch(
+            [sim for _, sim, _ in jobs],
+            [leaf.side_to_move for leaf, _, _ in jobs],
+            value_net,
+            rollout_steps,
+        )
+        for (leaf, _, path), value in zip(jobs, values):
+            _undo_virtual_loss(path, virtual_loss)
+            _backprop(leaf, value)
 
     return root
 
@@ -114,6 +148,9 @@ def godmode_mcts_action(
     *,
     iterations: int = DEFAULT_ITERATIONS,
     c: float = DEFAULT_C,
+    leaf_batch: int = DEFAULT_LEAF_BATCH,
+    rollout_steps: int = ROLLOUT_STEP_BUDGET,
+    virtual_loss: float = DEFAULT_VIRTUAL_LOSS,
 ) -> "Action":
     """Run UCT from `engine`'s current state and return the best action for `player_id`.
 
@@ -127,7 +164,17 @@ def godmode_mcts_action(
         - rng is used for optional rollout action selection and tie-breaking.
         - value_net is the only leaf evaluator (load with load_mcts_value_net).
     """
-    root = _run_search(engine, player_id, rng, iterations, c, value_net)
+    root = _run_search(
+        engine,
+        player_id,
+        rng,
+        iterations,
+        c,
+        value_net,
+        leaf_batch=leaf_batch,
+        rollout_steps=rollout_steps,
+        virtual_loss=virtual_loss,
+    )
     return _best_child_by_visits(root, rng).action_in
 
 
@@ -139,6 +186,9 @@ def godmode_mcts_search(
     *,
     iterations: int = DEFAULT_ITERATIONS,
     c: float = DEFAULT_C,
+    leaf_batch: int = DEFAULT_LEAF_BATCH,
+    rollout_steps: int = ROLLOUT_STEP_BUDGET,
+    virtual_loss: float = DEFAULT_VIRTUAL_LOSS,
 ) -> tuple["Action", float]:
     """Run UCT and return (best_action, root_value).
 
@@ -149,7 +199,17 @@ def godmode_mcts_search(
     label for value-function regression compared to the terminal MC return,
     bounded by current MCTS strength.
     """
-    root = _run_search(engine, player_id, rng, iterations, c, value_net)
+    root = _run_search(
+        engine,
+        player_id,
+        rng,
+        iterations,
+        c,
+        value_net,
+        leaf_batch=leaf_batch,
+        rollout_steps=rollout_steps,
+        virtual_loss=virtual_loss,
+    )
     root_value = root.total_value / root.visits if root.visits > 0 else 0.0
     return _best_child_by_visits(root, rng).action_in, root_value
 
@@ -162,6 +222,9 @@ def godmode_mcts_search_debug(
     *,
     iterations: int = DEFAULT_ITERATIONS,
     c: float = DEFAULT_C,
+    leaf_batch: int = DEFAULT_LEAF_BATCH,
+    rollout_steps: int = ROLLOUT_STEP_BUDGET,
+    virtual_loss: float = DEFAULT_VIRTUAL_LOSS,
 ) -> tuple["Action", float, List[dict]]:
     """Like `godmode_mcts_search`, but also returns the root child stats.
 
@@ -170,7 +233,17 @@ def godmode_mcts_search_debug(
     chosen action still equals the argmax-visits row. Only call this on the
     flag-gated debug path; building the table is cheap but logging it is not.
     """
-    root = _run_search(engine, player_id, rng, iterations, c, value_net)
+    root = _run_search(
+        engine,
+        player_id,
+        rng,
+        iterations,
+        c,
+        value_net,
+        leaf_batch=leaf_batch,
+        rollout_steps=rollout_steps,
+        virtual_loss=virtual_loss,
+    )
     root_value = root.total_value / root.visits if root.visits > 0 else 0.0
     return _best_child_by_visits(root, rng).action_in, root_value, root_child_stats(root)
 
@@ -212,6 +285,28 @@ def _debug_print_root(root: Node) -> None:
         print(f"    [mcts root]   visits={s['visits']:4d}  Q={s['q_root_pov']:+.3f}  {s['action']}")
 
 
+def _path_to(node: Node) -> list[Node]:
+    path: list[Node] = []
+    cur: Optional[Node] = node
+    while cur is not None:
+        path.append(cur)
+        cur = cur.parent
+    path.reverse()
+    return path
+
+
+def _apply_virtual_loss(path: list[Node], amount: float) -> None:
+    for node in path:
+        node.visits += 1
+        node.total_value -= amount
+
+
+def _undo_virtual_loss(path: list[Node], amount: float) -> None:
+    for node in path:
+        node.visits -= 1
+        node.total_value += amount
+
+
 def _select(node: Node, engine: "gameEngine", c: float) -> Node:
     """Descend the tree via UCB1, applying actions to `engine` as we go.
 
@@ -236,43 +331,73 @@ def _expand(node: Node, engine: "gameEngine", rng: random.Random) -> Node:
 
     act = node.untried_actions.pop()
     engine.step(action=act)
-    untried_actions = engine.enumerate_legal(engine.current_player) if not engine.is_terminal() else []
+    untried_actions = engine.enumerate_legal(current_player_of(engine)) if not engine.is_terminal() else []
     new_child = Node(
         parent=node,
         action_in=act,
-        side_to_move=engine.current_player,
+        side_to_move=current_player_of(engine),
         untried_actions=untried_actions,
     )
     node.children.append(new_child)
     return new_child
 
 
-def _evaluate(engine: "gameEngine", side_at_leaf: int, rng: random.Random, value_net: "ValueNet") -> float:
-    """Optional step-capped random rollout, then the value-net leaf.
+def _evaluate(
+    engine: "gameEngine",
+    side_at_leaf: int,
+    rng: random.Random,
+    value_net: "ValueNet",
+    rollout_steps: int = ROLLOUT_STEP_BUDGET,
+) -> float:
+    """Tactical rollout (optional), then the value-net leaf.
 
-    Plays uniform-random actions for up to ROLLOUT_STEP_BUDGET engine
+    Plays the short tactical policy for up to ``rollout_steps`` engine
     steps or until terminal. Terminal positions short-circuit to ±1 / 0
     from ``side_at_leaf``'s point of view and never call the net.
     Otherwise the leaf is the value net on the fogged observation of
-    ``side_at_leaf``.
+    ``side_at_leaf`` at the rollout end.
 
     Mutates `engine`; caller must already hold the clone they care about.
     """
-    from battleboats.envs.observation import build_observation
-    from battleboats.training.value_net import value_of_observation
+    del rng  # kept for call-site compatibility; the tactical policy is deterministic
+    return _evaluate_batch([engine], [side_at_leaf], value_net, rollout_steps)[0]
 
-    step_count = 0
-    while not engine.is_terminal() and step_count < ROLLOUT_STEP_BUDGET:
-        act = random_action(engine=engine, player_id=engine.current_player, rng=rng)
-        engine.step(act)
-        step_count += 1
-    if engine.is_terminal():
-        winner = engine.winner
-        if winner is None:
-            return 0.0
-        return 1.0 if winner == side_at_leaf else -1.0
-    obs = build_observation(engine, side_at_leaf)
-    return value_of_observation(value_net, obs["entity_tokens"], obs["globals"])
+
+def _evaluate_batch(
+    engines: list,
+    sides: list[int],
+    value_net: "ValueNet",
+    rollout_steps: int,
+) -> list[float]:
+    """Score a batch of leaves with at most one value-net forward."""
+    from battleboats.training.value_net import value_of_observations
+
+    if len(engines) != len(sides):
+        raise ValueError("engines and sides must have the same length")
+    values = [0.0] * len(engines)
+    pending_idx: list[int] = []
+    tokens_list = []
+    globals_list = []
+    budget = max(0, int(rollout_steps))
+    for i, (engine, side) in enumerate(zip(engines, sides)):
+        if budget and not engine.is_terminal():
+            apply_tactical_rollout(engine, budget)
+        if engine.is_terminal():
+            winner = winner_of(engine)
+            if winner is None:
+                values[i] = 0.0
+            else:
+                values[i] = 1.0 if winner == side else -1.0
+            continue
+        tokens, globs = observation_of(engine, side)
+        pending_idx.append(i)
+        tokens_list.append(tokens)
+        globals_list.append(globs)
+    if pending_idx:
+        scored = value_of_observations(value_net, tokens_list, globals_list)
+        for i, value in zip(pending_idx, scored):
+            values[i] = float(value)
+    return values
 
 
 def _backprop(leaf: Node, value_at_leaf: float) -> None:

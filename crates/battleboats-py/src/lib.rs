@@ -555,6 +555,59 @@ impl Game {
         let cells = state.coastline_tiles(player_id).map_err(core_err)?;
         pos_list(py, &cells)
     }
+
+    /// God-mode fleet snapshot for MCTS rollouts (not a fogged or heuristic view).
+    fn ships<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyList>> {
+        let state = self.inner.require().map_err(core_err)?;
+        let mut ids: Vec<i64> = state.ships.keys().copied().collect();
+        ids.sort();
+        let list = PyList::empty(py);
+        for id in ids {
+            let ship = &state.ships[&id];
+            let dict = PyDict::new(py);
+            dict.set_item("id", ship.id)?;
+            dict.set_item("type", ship.ship_type.value())?;
+            dict.set_item("owner", ship.owner)?;
+            dict.set_item("position", pos_pair(py, ship.position)?)?;
+            dict.set_item("cargo", ship.cargo)?;
+            dict.set_item("has_attacked", ship.has_attacked)?;
+            dict.set_item("tiles_moved_this_turn", ship.tiles_moved_this_turn)?;
+            dict.set_item("bought_this_turn", ship.bought_this_turn)?;
+            list.append(dict)?;
+        }
+        Ok(list)
+    }
+
+    fn ports<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyList>> {
+        let state = self.inner.require().map_err(core_err)?;
+        let mut positions: Vec<(i32, i32)> = state.ports.keys().copied().collect();
+        positions.sort();
+        let list = PyList::empty(py);
+        for pos in positions {
+            let port = &state.ports[&pos];
+            let dict = PyDict::new(py);
+            dict.set_item("position", pos_pair(py, port.position)?)?;
+            dict.set_item("owner", port.owner)?;
+            dict.set_item("is_home", port.is_home)?;
+            dict.set_item("stockpile", port.stockpile)?;
+            dict.set_item("locked_this_turn", port.locked_this_turn)?;
+            list.append(dict)?;
+        }
+        Ok(list)
+    }
+
+    fn players<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyList>> {
+        let state = self.inner.require().map_err(core_err)?;
+        let list = PyList::empty(py);
+        for player in &state.players {
+            let dict = PyDict::new(py);
+            dict.set_item("id", player.id)?;
+            dict.set_item("home_port", pos_pair(py, player.home_port)?)?;
+            dict.set_item("cash", player.cash)?;
+            list.append(dict)?;
+        }
+        Ok(list)
+    }
 }
 
 #[pyfunction]
