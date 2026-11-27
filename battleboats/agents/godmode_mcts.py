@@ -2,56 +2,79 @@
 
 Used as a fixed benchmark opponent, not as a trainable agent. "God mode"
 means the search operates on the true game state with no fog-of-war
-filtering on either side. This is appropriate because the agent under
-test still plays under its own fog; this opponent's job is to be a
-strong, fixed yardstick whose quality depends only on its iteration
-budget. See docs/sota_research_2026-05-20.md for the design rationale.
+filtering on either side. Leaf evaluation is the value net applied to the
+fogged observation of ``side_at_leaf`` (the training distribution). Search
+expansion still sees the true board.
 
 Vanilla UCT (Kocsis & Szepesvári 2006):
     Each iteration walks the tree from the root via UCB1, expands one
-    untried action at the reached leaf, rolls out to terminal with a
-    uniform-random default policy, and backpropagates the outcome.
-    Final move = child of root with the most visits.
+    untried action at the reached leaf, evaluates the leaf with the value
+    net (or a short optional random rollout first), and backpropagates
+    the value. Final move = child of root with the most visits.
 
 Negamax backup convention:
     Node.total_value is stored from the perspective of node.side_to_move.
     When backpropagating, sign-flip at each step up the tree.
 """
 
+from __future__ import annotations
+
 import math
 import random
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import TYPE_CHECKING, List, Optional
 
 if TYPE_CHECKING:
     from battleboats.core.actions import Action
     from battleboats.core.gameEngine import gameEngine
+    from battleboats.training.value_net import ValueNet
 
-from battleboats.agents.heuristics import heuristic_eval
 from battleboats.agents.random_agent import random_action
 
 DEFAULT_C = math.sqrt(2)
 DEFAULT_ITERATIONS = 10000
-ROLLOUT_STEP_BUDGET = 0  # engine steps; random play rarely terminates in battleboats
+ROLLOUT_STEP_BUDGET = 0  # engine steps before the value-net leaf; 0 = evaluate immediately
+
+# Cache loaded nets per process so harvest/benchmark workers load once.
+_NET_CACHE: dict[tuple[str, str], "ValueNet"] = {}
 
 
 @dataclass
 class Node:
-    """One node in the MCTS search tree.
-
-    Tree state only — no game state. The engine state corresponding to
-    this node is reconstructed at iteration time by cloning the root
-    engine and replaying actions down the path. We never store engines
-    on nodes (would balloon memory).
-    """
+    """One node in the MCTS search tree."""
 
     parent: Optional["Node"]
-    action_in: Optional["Action"]  # action that produced this node from parent; None at root
+    action_in: Optional["Action"]  # action that led to this node from parent
     side_to_move: int  # whose turn it is AT this node
     untried_actions: List["Action"]  # legal actions not yet expanded into children
     children: List["Node"] = field(default_factory=list)
     visits: int = 0
     total_value: float = 0.0  # from the perspective of side_to_move (negamax)
+
+
+def load_mcts_value_net(checkpoint: str | Path, device: str = "auto") -> "ValueNet":
+    """Load a value-net checkpoint once per (path, device) in this process.
+
+    ``device`` is ``cpu``, ``cuda``, ``cuda:N``, or ``auto`` (see
+    ``battleboats.training.device.resolve_device``). The model is returned
+    in eval mode on that device.
+    """
+    from battleboats.training.device import resolve_device
+    from battleboats.training.value_net import load_value_checkpoint
+
+    path = str(Path(checkpoint).expanduser().resolve())
+    if not Path(path).is_file():
+        raise FileNotFoundError(f"value-net checkpoint not found: {path}")
+    dev = resolve_device(device)
+    key = (path, str(dev))
+    model = _NET_CACHE.get(key)
+    if model is None:
+        model, _ = load_value_checkpoint(path, map_location=dev)
+        model.to(dev)
+        model.eval()
+        _NET_CACHE[key] = model
+    return model
 
 
 def _run_search(
@@ -60,6 +83,7 @@ def _run_search(
     rng: random.Random,
     iterations: int,
     c: float,
+    value_net: "ValueNet",
 ) -> Node:
     """Run UCT for `iterations` and return the populated root node.
 
@@ -76,7 +100,7 @@ def _run_search(
         leaf = _select(root, sim, c)
         if not sim.is_terminal() and leaf.untried_actions:
             leaf = _expand(leaf, sim, rng)
-        value = _evaluate(sim, leaf.side_to_move, rng)
+        value = _evaluate(sim, leaf.side_to_move, rng, value_net)
         _backprop(leaf, value)
 
     return root
@@ -86,6 +110,7 @@ def godmode_mcts_action(
     engine: "gameEngine",
     player_id: int,
     rng: random.Random,
+    value_net: "ValueNet",
     *,
     iterations: int = DEFAULT_ITERATIONS,
     c: float = DEFAULT_C,
@@ -99,9 +124,10 @@ def godmode_mcts_action(
 
     Notes:
         - Tree is discarded after each call (no subtree reuse in v1).
-        - rng is used for rollout action selection and tie-breaking.
+        - rng is used for optional rollout action selection and tie-breaking.
+        - value_net is the only leaf evaluator (load with load_mcts_value_net).
     """
-    root = _run_search(engine, player_id, rng, iterations, c)
+    root = _run_search(engine, player_id, rng, iterations, c, value_net)
     return _best_child_by_visits(root, rng).action_in
 
 
@@ -109,6 +135,7 @@ def godmode_mcts_search(
     engine: "gameEngine",
     player_id: int,
     rng: random.Random,
+    value_net: "ValueNet",
     *,
     iterations: int = DEFAULT_ITERATIONS,
     c: float = DEFAULT_C,
@@ -122,7 +149,7 @@ def godmode_mcts_search(
     label for value-function regression compared to the terminal MC return,
     bounded by current MCTS strength.
     """
-    root = _run_search(engine, player_id, rng, iterations, c)
+    root = _run_search(engine, player_id, rng, iterations, c, value_net)
     root_value = root.total_value / root.visits if root.visits > 0 else 0.0
     return _best_child_by_visits(root, rng).action_in, root_value
 
@@ -131,6 +158,7 @@ def godmode_mcts_search_debug(
     engine: "gameEngine",
     player_id: int,
     rng: random.Random,
+    value_net: "ValueNet",
     *,
     iterations: int = DEFAULT_ITERATIONS,
     c: float = DEFAULT_C,
@@ -142,7 +170,7 @@ def godmode_mcts_search_debug(
     chosen action still equals the argmax-visits row. Only call this on the
     flag-gated debug path; building the table is cheap but logging it is not.
     """
-    root = _run_search(engine, player_id, rng, iterations, c)
+    root = _run_search(engine, player_id, rng, iterations, c, value_net)
     root_value = root.total_value / root.visits if root.visits > 0 else 0.0
     return _best_child_by_visits(root, rng).action_in, root_value, root_child_stats(root)
 
@@ -172,10 +200,9 @@ def root_child_stats(root: Node) -> List[dict]:
 def _debug_print_root(root: Node) -> None:
     """Print top-10 root children by visit count, with Q from root's POV.
 
-    Used to diagnose MCTS-vs-heuristic disagreement at the root. If a class
-    of actions (e.g., all BuildLanding spawn variants) gets fragmented across
-    many children, per-child visits stay low even when the class collectively
-    dominates.
+    Used to diagnose the search at the root. If a class of actions (e.g.,
+    all BuildLanding spawn variants) gets fragmented across many children,
+    per-child visits stay low even when the class collectively dominates.
     """
     if not root.children:
         return
@@ -220,22 +247,32 @@ def _expand(node: Node, engine: "gameEngine", rng: random.Random) -> Node:
     return new_child
 
 
-def _evaluate(engine: "gameEngine", side_at_leaf: int, rng: random.Random) -> float:
-    """Step-capped random rollout then heuristic eval at depth-out.
+def _evaluate(engine: "gameEngine", side_at_leaf: int, rng: random.Random, value_net: "ValueNet") -> float:
+    """Optional step-capped random rollout, then the value-net leaf.
 
     Plays uniform-random actions for up to ROLLOUT_STEP_BUDGET engine
-    steps or until terminal, then returns heuristic_eval from
-    side_at_leaf's perspective. The hybrid signal is automatic because
-    heuristic_eval short-circuits to ±1 for terminal states.
+    steps or until terminal. Terminal positions short-circuit to ±1 / 0
+    from ``side_at_leaf``'s point of view and never call the net.
+    Otherwise the leaf is the value net on the fogged observation of
+    ``side_at_leaf``.
 
     Mutates `engine`; caller must already hold the clone they care about.
     """
+    from battleboats.envs.observation import build_observation
+    from battleboats.training.value_net import value_of_observation
+
     step_count = 0
     while not engine.is_terminal() and step_count < ROLLOUT_STEP_BUDGET:
         act = random_action(engine=engine, player_id=engine.current_player, rng=rng)
         engine.step(act)
         step_count += 1
-    return heuristic_eval(engine=engine, me=side_at_leaf)
+    if engine.is_terminal():
+        winner = engine.winner
+        if winner is None:
+            return 0.0
+        return 1.0 if winner == side_at_leaf else -1.0
+    obs = build_observation(engine, side_at_leaf)
+    return value_of_observation(value_net, obs["entity_tokens"], obs["globals"])
 
 
 def _backprop(leaf: Node, value_at_leaf: float) -> None:
@@ -249,14 +286,11 @@ def _backprop(leaf: Node, value_at_leaf: float) -> None:
     Sides only flip across EndTurn boundaries, so the per-node `==` check
     correctly handles multi-action turns.
     """
-
-    node = leaf
+    node: Optional[Node] = leaf
     while node is not None:
         node.visits += 1
-        if node.side_to_move == leaf.side_to_move:
-            node.total_value += value_at_leaf
-        else:
-            node.total_value -= value_at_leaf
+        sign = 1.0 if node.side_to_move == leaf.side_to_move else -1.0
+        node.total_value += sign * value_at_leaf
         node = node.parent
 
 
@@ -282,7 +316,7 @@ def _best_child_by_visits(node: Node, rng: random.Random) -> Node:
     action space is large enough that vanilla UCT can't break ties via
     exploration (i.e. branching factor ≥ iteration budget so every child
     gets the same number of visits), falling back to mean Q lets the
-    heuristic's leaf signal decide instead of a coin flip.
+    value net's leaf signal decide instead of a coin flip.
     """
     max_visits = max(child.visits for child in node.children)
     top = [child for child in node.children if child.visits == max_visits]

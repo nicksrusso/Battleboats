@@ -63,7 +63,7 @@ Combat ships (and other non-landing hulls' fight-or-run)
     if ``ours > theirs * margin``; otherwise retreat away from the
     known enemy center of mass and toward friendlies or home. Attack
     targeting reuses ``pk`` and material value from
-    ``battleboats.agents.heuristics`` on the sighted type, not the
+    ``battleboats.core.combat`` on the sighted type, not the
     live hidden ship.
 """
 
@@ -75,7 +75,7 @@ from collections import deque
 from dataclasses import dataclass
 from typing import Dict, Iterable, List, Optional, Sequence, Tuple
 
-from battleboats.agents.heuristics import COMBAT_TYPES, _ship_value, pk
+from battleboats.core.combat import COMBAT_TYPES, pk, ship_value
 from battleboats.core.actions import (
     Action,
     AttackAction,
@@ -251,7 +251,7 @@ def _local_combat_power_known(
 
 
 class _TypeShip:
-    """Public type-stats stand-in so pk / _ship_value never touch a live enemy."""
+    """Public type-stats stand-in so pk / ship_value never touch a live enemy."""
 
     __slots__ = ("type", "stats")
 
@@ -575,7 +575,7 @@ def _best_attack(engine, player_id: int, attacks: Sequence[Action]) -> Action:
         if attacker is None or def_type is None:
             return 0.0
         defender = _TypeShip(def_type)
-        return pk(attacker, defender, engine.kill_curve_k) * _ship_value(defender)
+        return pk(attacker, defender, engine.kill_curve_k) * ship_value(defender)
 
     return max(attacks, key=score)
 

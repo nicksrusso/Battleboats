@@ -9,12 +9,13 @@ flat and prevents the OOM that token-heavy trajectories caused.
 Output layout: a directory `harvest_<ts>/` of per-game shards. Each shard is
 JSONL with two row types:
     data rows (2 per kept step, one per perspective):
-        phi:             feature vector (one entry per FEATURE_KEYS), that POV
         tokens:          variable-length (N, TOKEN_DIM) entity-token set
         mcts_root_value: search value at that state from the acting POV
                          (null on the non-acting perspective)
         game_idx, seed, iterations, mcts_player_id, step, turn, actor, perspective
     one footer row (`_type=game_footer`) carrying `winner` (0/1/None).
+
+MCTS leaves are evaluated by a required value-net checkpoint (``--checkpoint``).
 
 NOTE: the flat terminal ±1 target is NOT written per-row (the winner is only
 known at game end). HarvestDataset derives it from the footer's `winner` at
@@ -71,8 +72,16 @@ def _shard_complete(path: Path) -> bool:
         return False  # truncated final line -> partial shard
 
 
+def _mp_context(device: str):
+    """Use spawn whenever the value net may touch a GPU. Fork is ok on cpu."""
+    choice = (device or "auto").strip().lower()
+    if choice == "cpu":
+        return mp.get_context("fork")
+    return mp.get_context("spawn")
+
+
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Harvest (phi, MC-return) data for V_theta regression.")
+    parser = argparse.ArgumentParser(description="Harvest (tokens, MCTS-root-value) data for value-net / BC work.")
     parser.add_argument("--num-games", type=int, default=DEFAULT_NUM_GAMES, help="Total games to run.")
     parser.add_argument("--iterations", type=int, default=DEFAULT_ITERATIONS, help="MCTS iterations per move.")
     parser.add_argument(
@@ -109,7 +118,7 @@ def main() -> None:
     parser.add_argument(
         "--self-play",
         action="store_true",
-        help="Both players use MCTS with the current heuristic weights "
+        help="Both players use MCTS with the value-net leaf "
         "(symmetric self-play). When unset, MCTS plays vs. random_agent.",
     )
     parser.add_argument(
@@ -119,6 +128,18 @@ def main() -> None:
         "`mcts_root` field, for offline search inspection. Off by default — the "
         "full table per step would bloat a normal harvest. Re-run the specific "
         "game/seed you want to inspect with this flag set.",
+    )
+    parser.add_argument(
+        "--checkpoint",
+        type=Path,
+        required=True,
+        help="Value-net checkpoint used as the MCTS leaf evaluator.",
+    )
+    parser.add_argument(
+        "--device",
+        type=str,
+        default="auto",
+        help="Torch device for the value net: cpu, cuda, cuda:N, or auto.",
     )
     args = parser.parse_args()
 
@@ -172,6 +193,8 @@ def main() -> None:
                     "num_games": args.num_games,
                     "iterations": args.iterations,
                     "self_play": args.self_play,
+                    "checkpoint": str(args.checkpoint),
+                    "device": args.device,
                     "max_turns": args.max_turns,
                     "step_budget": args.step_budget,
                     "seed": args.seed,
@@ -209,6 +232,8 @@ def main() -> None:
                 "emit_tokens": True,
                 "debug_mcts": args.debug_mcts,
                 "shard_path": str(shard_path),
+                "checkpoint": str(args.checkpoint),
+                "device": args.device,
             }
         )
     if resuming:
@@ -243,7 +268,8 @@ def main() -> None:
     # Workers stream each game's rows to its own shard file; the parent never
     # holds rows — it only tallies the lean records they return. This is what
     # keeps memory flat regardless of corpus size or worker count.
-    with mp.Pool(processes=workers) as pool:
+    ctx = _mp_context(args.device)
+    with ctx.Pool(processes=workers) as pool:
         for record in pool.imap_unordered(_worker_run_game, work_items):
             completed += 1
             kept = record.get("kept_rows", 0)

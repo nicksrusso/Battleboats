@@ -6,7 +6,10 @@ and its stdout / log files are clean.
 
 Per-game telemetry is collected in memory and dumped to a timestamped JSON
 file under runs/benchmarks/. Live stdout prints one line per MCTS move
-showing turn, wall time, heuristic value, and the action type.
+showing turn, wall time, MCTS root value, and the action type.
+
+
+Requires a value-net checkpoint for MCTS leaves (`--checkpoint`).
 
 Usage:
     poetry run python scripts/benchmark_godmode_mcts.py
@@ -27,8 +30,11 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 from battleboats.agents.debug_plot import plot_state
-from battleboats.agents.godmode_mcts import godmode_mcts_action, godmode_mcts_search, godmode_mcts_search_debug
-from battleboats.agents.heuristics import decompose, heuristic_eval
+from battleboats.agents.godmode_mcts import (
+    godmode_mcts_search,
+    godmode_mcts_search_debug,
+    load_mcts_value_net,
+)
 from battleboats.agents.random_agent import random_action
 from battleboats.core.actions import MoveAction
 from battleboats.core.shipyard.ship_type import ShipType
@@ -44,7 +50,7 @@ def _describe_action(action, engine) -> str:
     """Return a short, human-readable label for an action.
 
     For MoveActions, includes the ship type so we can spot when MCTS is
-    bouncing Merchants / Builders around (which produce zero heuristic
+    bouncing Merchants / Builders around (which often produce little
     signal). For other action types, just returns the class name.
     """
     if action is None:
@@ -130,6 +136,9 @@ def _play_one_game(
     emit_tokens: bool = False,
     debug_mcts: bool = False,
     shard_path: Optional[str] = None,
+    checkpoint: Optional[str] = None,
+    device: str = "auto",
+    value_net=None,
 ) -> Dict[str, Any]:
     """Play one game; return a record with trajectory + outcome + timing.
 
@@ -150,11 +159,18 @@ def _play_one_game(
     debugging, off in parallel benchmark runs where 8 workers interleaving
     step prints is unreadable.
 
-    When `self_play=True`, BOTH players use `godmode_mcts_action` (with the
-    current `DEFAULT_WEIGHTS` baked into `heuristic_eval`). `mcts_player_id`
-    in that mode just selects whose POV the diagnostic `value` field is
-    computed from — gameplay is symmetric.
+    When `self_play=True`, BOTH players use MCTS with the same value-net
+    leaf. `mcts_player_id` in that mode just selects whose POV the
+    diagnostic `value` field is computed from -- gameplay is symmetric.
+
+    ``checkpoint`` (path) or a preloaded ``value_net`` is required. Workers
+    should pass the path and load inside the process (cached per process).
     """
+    if value_net is None:
+        if not checkpoint:
+            raise ValueError("god-mode MCTS requires a value-net checkpoint")
+        value_net = load_mcts_value_net(checkpoint, device)
+
     map_path = scenario["map_path"] if scenario else map_json_path
     env = BattleboatsAEC(map_json_path=map_path, max_turns=max_turns)
     if scenario:
@@ -196,18 +212,18 @@ def _play_one_game(
                 t0 = time.perf_counter()
                 if debug_mcts:
                     action, mcts_root_value_step, root_stats = godmode_mcts_search_debug(
-                        env.engine, pid, rng, iterations=iterations
+                        env.engine, pid, rng, value_net, iterations=iterations
                     )
                     # Stringify each child's raw Action via the same labeller used
                     # for the chosen action, so the logged table lines up move-for-move
-                    # with the heuristic move-score panel. Done pre-step (engine still
+                    # with the root-value table. Done pre-step (engine still
                     # at the decision state the search ran from).
                     mcts_root_stats_step = [
                         {"action": _describe_action(s["action"], env.engine), "visits": s["visits"], "q": s["q_root_pov"]}
                         for s in root_stats
                     ]
                 else:
-                    action, mcts_root_value_step = godmode_mcts_search(env.engine, pid, rng, iterations=iterations)
+                    action, mcts_root_value_step = godmode_mcts_search(env.engine, pid, rng, value_net, iterations=iterations)
                 elapsed = time.perf_counter() - t0
                 actor = "mcts"
                 acting_pid = pid
@@ -216,7 +232,7 @@ def _play_one_game(
                     # Print is from the *acting* player's POV so self-play
                     # produces interpretable traces from each side as they
                     # take their turns.
-                    value = heuristic_eval(env.engine, pid)
+                    value = mcts_root_value_step if mcts_root_value_step is not None else 0.0
                     inventory = _format_inventory(env.engine, pid)
                     opp_inventory = _format_inventory(env.engine, 1 - pid)
                     spotted = _format_sightings(env.engine, pid)
@@ -243,14 +259,14 @@ def _play_one_game(
         debug_plot_mcts_only = True
         debug_plot = False
         if debug_plot and (not debug_plot_mcts_only or actor == "mcts"):
-            heur_val = heuristic_eval(env.engine, mcts_player_id)
+            plot_val = mcts_root_value_step if mcts_root_value_step is not None else 0.0
             plot_state(
                 env.engine,
                 action,
                 actor,
                 mcts_player_id,
                 step=steps,
-                value=heur_val,
+                value=plot_val,
             )
             breakpoint()  # <-- inspect the plot here; 'c' to continue.
         # ---------------------------------------------------------------------
@@ -261,21 +277,12 @@ def _play_one_game(
         # symmetry the dataset has no contrast — every kept-game row would
         # share the same target and regression learns nothing.
         #
-        # `value` stays MCTS-side for diagnostic prints. `phi_p0` / `phi_p1`
-        # are always indexed by absolute player id (not by MCTS-or-not) so
-        # downstream code doesn't need to know which seat MCTS occupied.
-        # On terminal states both phi dicts are {} by design (decompose
-        # short-circuits); the harvest filters those out.
-        value, phi_mcts, _ = decompose(env.engine, mcts_player_id)
-        _, phi_opp, _ = decompose(env.engine, 1 - mcts_player_id)
-        phi_p0 = phi_mcts if mcts_player_id == 0 else phi_opp
-        phi_p1 = phi_opp if mcts_player_id == 0 else phi_mcts
-        # Per-perspective entity tokens for the transformer encoder — the
-        # variable-length (N, TOKEN_DIM) set that `phi` aggregates away.
-        # Indexed by absolute player id, same convention as phi_p*. Built
-        # only when harvesting (emit_tokens); the benchmark/trade-study
-        # callers leave it off to avoid the per-step tokenizer cost.
-        # Stored as nested lists so the row stays JSON-serializable.
+        # `value` is the MCTS root value for diagnostic prints (None on
+        # non-MCTS or dead steps). Per-perspective entity tokens are built
+        # only when harvesting (emit_tokens); benchmark callers leave them
+        # off to avoid the per-step tokenizer cost. Stored as nested lists
+        # so the row stays JSON-serializable.
+        value = mcts_root_value_step
         tokens_p0 = build_entity_tokens(env.engine, 0).tolist() if emit_tokens else None
         tokens_p1 = build_entity_tokens(env.engine, 1).tolist() if emit_tokens else None
 
@@ -290,13 +297,13 @@ def _play_one_game(
             action_idx = list(ActionMasks(env.engine, acting_pid).factor(action))
 
         if shard_file is not None:
-            # Stream the two per-perspective rows immediately, then discard —
+            # Stream the two per-perspective rows immediately, then discard --
             # never accumulate. mcts_root_value is attached only to the acting
             # player's perspective (the POV search ran from); the other gets
-            # null, same convention the harvest used. Skip terminal/dead steps
-            # where decompose returned empty phi. No per-row terminal target —
-            # the footer's winner lets the dataset derive it.
-            if phi_p0 and phi_p1:
+            # null, same convention the harvest used. Skip terminal/dead steps.
+            # No per-row terminal target -- the footer's winner lets the
+            # dataset derive it.
+            if actor != "dead" and not env.engine.is_terminal():
                 rv_p0 = mcts_root_value_step if acting_pid == 0 else None
                 rv_p1 = mcts_root_value_step if acting_pid == 1 else None
                 # Root (N, Q) table rides the same acting-player perspective as
@@ -309,13 +316,13 @@ def _play_one_game(
                 act_p0 = action_idx if acting_pid == 0 else None
                 act_p1 = action_idx if acting_pid == 1 else None
                 # Per-player cash (a global, not in the entity tokens). Logged so
-                # a state can be reconstructed steppably from a row — notably to
+                # a state can be reconstructed steppably from a row -- notably to
                 # know which build_ship moves are affordable. Indexed by absolute
-                # player id [p0, p1], same convention as phi_p*/tokens_p*.
+                # player id [p0, p1], same convention as tokens_p*.
                 cash = [env.engine.players[0].cash, env.engine.players[1].cash]
                 step_base = {**base_provenance, "step": steps, "turn": env.engine.turn, "actor": actor, "cash": cash}
-                row0 = {**step_base, "perspective": 0, "phi": phi_p0, "tokens": tokens_p0, "mcts_root_value": rv_p0, "action": act_p0, "mcts_root": mr_p0}
-                row1 = {**step_base, "perspective": 1, "phi": phi_p1, "tokens": tokens_p1, "mcts_root_value": rv_p1, "action": act_p1, "mcts_root": mr_p1}
+                row0 = {**step_base, "perspective": 0, "tokens": tokens_p0, "mcts_root_value": rv_p0, "action": act_p0, "mcts_root": mr_p0}
+                row1 = {**step_base, "perspective": 1, "tokens": tokens_p1, "mcts_root_value": rv_p1, "action": act_p1, "mcts_root": mr_p1}
                 shard_file.write(json.dumps(row0, default=str) + "\n")
                 shard_file.write(json.dumps(row1, default=str) + "\n")
                 kept_rows += 2
@@ -326,8 +333,6 @@ def _play_one_game(
                     "turn": env.engine.turn,
                     "actor": actor,
                     "value": value,
-                    "phi_p0": phi_p0,
-                    "phi_p1": phi_p1,
                     "tokens_p0": tokens_p0,
                     "tokens_p1": tokens_p1,
                     "elapsed_s": elapsed,
@@ -389,6 +394,19 @@ def _worker_run_game(kwargs: Dict[str, Any]) -> Dict[str, Any]:
     return _play_one_game(**kwargs)
 
 
+
+def _mp_context(device: str):
+    """Use spawn whenever the value net may touch a GPU.
+
+    Fork after CUDA/ROCm init is unsafe. ``cpu`` can keep fork.
+    ``auto``/``cuda`` use spawn so each worker loads the net itself.
+    """
+    choice = (device or "auto").strip().lower()
+    if choice == "cpu":
+        return mp.get_context("fork")
+    return mp.get_context("spawn")
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description="MCTS vs random benchmark with telemetry.")
     parser.add_argument("--iterations", type=int, default=2500, help="MCTS iterations per move.")
@@ -415,6 +433,18 @@ def main() -> None:
         "--debug-plot-mcts-only",
         action="store_true",
         help="With --debug-plot, only pause for MCTS-chosen actions (skip random).",
+    )
+    parser.add_argument(
+        "--checkpoint",
+        type=Path,
+        required=True,
+        help="Value-net checkpoint used as the MCTS leaf evaluator.",
+    )
+    parser.add_argument(
+        "--device",
+        type=str,
+        default="auto",
+        help="Torch device for the value net: cpu, cuda, cuda:N, or auto.",
     )
     args = parser.parse_args()
 
@@ -446,6 +476,8 @@ def main() -> None:
                 "verbose": workers == 1,
                 "debug_plot": args.debug_plot,
                 "debug_plot_mcts_only": args.debug_plot_mcts_only,
+                "checkpoint": str(args.checkpoint),
+                "device": args.device,
             }
         )
 
@@ -474,6 +506,8 @@ def main() -> None:
                 "seed": args.seed,
                 "workers": workers,
                 "map_json": MAP_JSON,
+                "checkpoint": str(args.checkpoint),
+                "device": args.device,
             },
             "results": {
                 "mcts_wins": mcts_wins,
@@ -522,7 +556,8 @@ def main() -> None:
         # imap_unordered yields records as workers finish, so progress prints
         # and the on-disk summary update in completion order. The pool context
         # manager handles join/terminate on exception.
-        with mp.Pool(processes=workers) as pool:
+        ctx = _mp_context(args.device)
+        with ctx.Pool(processes=workers) as pool:
             for record in pool.imap_unordered(_worker_run_game, work_items):
                 _process_record(record)
 

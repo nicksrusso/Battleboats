@@ -162,7 +162,7 @@ def main() -> None:
         "--moves",
         action="store_true",
         help="Also show a stacked-bar panel of the to-move player's top-10 legal moves by "
-        "1-ply heuristic value (needs a cash-logged harvest).",
+        "1-ply value (needs a cash-logged harvest).",
     )
     parser.add_argument(
         "--mcts",

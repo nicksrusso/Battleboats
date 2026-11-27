@@ -14,13 +14,11 @@ with the transition and let ``evaluate_actions`` reproduce ``log pi_old`` exactl
 
 from __future__ import annotations
 
-import math
 from dataclasses import dataclass
 from typing import Any, Dict, List, Optional, Tuple
 
 import torch
 
-from battleboats.agents.heuristics import heuristic_eval
 from battleboats.agents.random_agent import random_action
 from battleboats.core.actions import BuildShipAction
 from battleboats.envs.action_masks import ActionMasks
@@ -51,39 +49,6 @@ class Transition:
     ret: float = 0.0  # value target = advantage + value, filled by GAE
     skill_idx: int = 0  # which sandbox / unit type conditioned the policy
     globals: Optional[torch.Tensor] = None  # (GLOBALS_DIM,) board-wide features
-
-
-def heuristic_action(engine, pid: int, rng, eps: float = 1e-9):
-    """Eval-only 1-ply greedy heuristic policy (not a training opponent).
-
-    Clones the engine for each legal action, applies it, scores the resulting
-    state with ``heuristic_eval`` from ``pid``'s point of view, and returns the
-    highest-scoring action (ties broken randomly via ``rng``). Used to
-    benchmark a trained policy against a fixed yardstick; too slow to serve as
-    a training opponent.
-
-    Args:
-        engine: live game engine; cloned per candidate, never mutated.
-        pid: player id whose point of view scores the resulting states.
-        rng: random source used to break score ties.
-        eps: tolerance for treating two scores as tied.
-
-    Returns:
-        The chosen Action, ready for ``engine.step()``.
-    """
-    legal = engine.enumerate_legal(pid)
-    best = []
-    best_score = -math.inf
-    for a in legal:
-        sim = engine.clone()
-        sim.step(a)
-        score = heuristic_eval(sim, pid)
-        if score > best_score + eps:
-            best = [a]
-            best_score = score
-        elif abs(score - best_score) <= eps:
-            best.append(a)
-    return rng.choice(best)
 
 
 @torch.no_grad()
