@@ -32,6 +32,7 @@ from torch.utils.data import DataLoader, Subset
 from battleboats.envs.action_masks import BatchedMasks
 from battleboats.envs.observation import TOKEN_DIM
 from battleboats.training.checkpoints import model_config_of, save_checkpoint
+from battleboats.training.device import resolve_device
 from battleboats.training.manifest import ManifestSession, canonical_run_dir
 from battleboats.training.policy import (
     VERB_NAMES,
@@ -42,6 +43,7 @@ from battleboats.training.policy import (
 from battleboats.training.tactical_bc import (
     V0_3_0_ARCH,
     VERB_GROUP,
+    CompactBCDataset,
     TacticalBCDataset,
     collate_tactical_bc,
     stratified_row_indices,
@@ -202,6 +204,33 @@ def main() -> None:
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--threads", type=int, default=8)
     parser.add_argument("--num-workers", type=int, default=0)
+    parser.add_argument("--device", type=str, default="cpu", help="cpu, cuda, cuda:N, or auto (ROCm GPU shows up as cuda).")
+    parser.add_argument(
+        "--compact",
+        action="store_true",
+        help="Load only the selected rows (CompactBCDataset). Needed for 48x24 harvests that do not fit in RAM.",
+    )
+    parser.add_argument(
+        "--full-val-rows",
+        type=int,
+        default=0,
+        help="With --compact: natural-mix val sample for the final held-out pass (0 = all val rows).",
+    )
+    parser.add_argument(
+        "--cache-dir",
+        type=Path,
+        default=None,
+        help="With --compact: memory-map the selected rows from .npy files here (keeps RSS low).",
+    )
+    parser.add_argument(
+        "--row-mix",
+        choices=("stratified", "natural"),
+        default="stratified",
+        help="With --compact: stratified keeps rare verbs in full (shifts the verb prior toward them); "
+        "natural samples train rows uniformly so the clone keeps the teacher's verb frequencies.",
+    )
+    parser.add_argument("--log-every", type=int, default=0, help="Print running loss every N batches (0 = off).")
+    parser.add_argument("--source-tag", type=str, default="tactical_bc", help="Checkpoint extra['source'] label.")
     parser.add_argument(
         "--max-train-rows",
         type=int,
@@ -219,28 +248,47 @@ def main() -> None:
     torch.set_num_threads(args.threads)
     torch.set_num_interop_threads(1)
     set_seed(args.seed)
-    device = torch.device("cpu")
+    device = resolve_device(args.device)
 
     split_path = args.split or (args.harvest / "split.json")
     split = json.loads(split_path.read_text())
     train_ids = set(int(i) for i in split["train"])
     val_ids = set(int(i) for i in split["val"])
-    train_full = TacticalBCDataset(args.harvest, train_ids, preload=True)
-    val_full = TacticalBCDataset(args.harvest, val_ids, preload=True)
-    train_idx = stratified_row_indices(train_full, args.max_train_rows, args.seed)
-    val_epoch_idx = stratified_row_indices(val_full, args.max_val_rows, args.seed + 1)
+    if args.compact:
+        cache = args.cache_dir
+        train_full = CompactBCDataset(
+            args.harvest, train_ids, args.max_train_rows, args.seed, mode=args.row_mix,
+            cache_dir=cache and cache / f"train_{args.row_mix}",
+        )
+        val_epoch_full = CompactBCDataset(
+            args.harvest, val_ids, args.max_val_rows, args.seed + 1, cache_dir=cache and cache / "val_epoch"
+        )
+        val_full = CompactBCDataset(
+            args.harvest, val_ids, args.full_val_rows, args.seed + 2, mode="natural",
+            cache_dir=cache and cache / "val_full",
+        )
+        train_idx = list(range(len(train_full)))
+        val_epoch_idx = list(range(len(val_epoch_full)))
+        n_full_train_rows = train_full.n_rows_full
+    else:
+        train_full = TacticalBCDataset(args.harvest, train_ids, preload=True)
+        val_full = TacticalBCDataset(args.harvest, val_ids, preload=True)
+        val_epoch_full = val_full
+        train_idx = stratified_row_indices(train_full, args.max_train_rows, args.seed)
+        val_epoch_idx = stratified_row_indices(val_full, args.max_val_rows, args.seed + 1)
+        n_full_train_rows = len(train_full)
     train_ds = Subset(train_full, train_idx)
-    val_ds = Subset(val_full, val_epoch_idx)
+    val_ds = Subset(val_epoch_full, val_epoch_idx)
 
     def _verb_hist(base, indices):
         c = Counter(base.verb_name(i) for i in indices)
         return dict(sorted(c.items()))
 
     train_verb_hist = _verb_hist(train_full, train_idx)
-    val_verb_hist = _verb_hist(val_full, val_epoch_idx)
+    val_verb_hist = _verb_hist(val_epoch_full, val_epoch_idx)
     print(
-        f"train games={len(train_ids)} rows={len(train_ds)}/{len(train_full)} "
-        f"val games={len(val_ids)} rows={len(val_ds)}/{len(val_full)} device=cpu",
+        f"train games={len(train_ids)} rows={len(train_ds)}/{n_full_train_rows} "
+        f"val games={len(val_ids)} rows={len(val_ds)}/{len(val_full)} device={device}",
         flush=True,
     )
     print("train verbs:", json.dumps(train_verb_hist), flush=True)
@@ -303,6 +351,9 @@ def main() -> None:
             opt.step()
             running += float(loss.detach())
             n_b += 1
+            if args.log_every and n_b % args.log_every == 0:
+                print(f"  epoch {epoch} batch {n_b}/{len(train_loader)} loss={running / n_b:.4f} "
+                      f"t={time.time() - epoch_t0:.0f}s", flush=True)
         train_metrics = {
             "loss_running": running / n_b if n_b else None,
         }
@@ -334,7 +385,7 @@ def main() -> None:
             model,
             latest,
             extra={
-                "source": "tactical_bc",
+                "source": args.source_tag,
                 "epoch": epoch,
                 "metrics": {"train": train_metrics, "val": val_metrics},
             },
@@ -346,7 +397,7 @@ def main() -> None:
                 model,
                 best_path,
                 extra={
-                    "source": "tactical_bc",
+                    "source": args.source_tag,
                     "epoch": epoch,
                     "metrics": {"train": train_metrics, "val": val_metrics},
                 },
@@ -366,7 +417,7 @@ def main() -> None:
         "harvest": str(args.harvest),
         "split": str(split_path),
         "n_train_rows": len(train_ds),
-        "n_train_rows_full": len(train_full),
+        "n_train_rows_full": n_full_train_rows,
         "n_val_rows_epoch": len(val_ds),
         "n_val_rows_full": len(val_full),
         "n_train_games": len(train_ids),
