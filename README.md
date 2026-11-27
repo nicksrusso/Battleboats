@@ -190,6 +190,6 @@ poetry run python scripts/eval_agent.py \
 
 # God-mode MCTS leaf
 
-`battleboats/agents/godmode_mcts.py` evaluates leaves with the trained value net only (no hand-coded heuristic). Pass a checkpoint to `load_mcts_value_net` or to `scripts/benchmark_godmode_mcts.py --checkpoint` / `scripts/harvest.py --checkpoint`. The net scores the fogged observation of the side to move; terminal positions short-circuit to ±1 or 0.
+`battleboats/agents/godmode_mcts.py` evaluates leaves with the trained value net only (no hand-coded heuristic). Pass a checkpoint to `load_mcts_value_net` or to `scripts/benchmark_godmode_mcts.py --checkpoint` / `scripts/harvest.py --checkpoint`. Search can run on the Python engine or on a hydration-free `RustMctsEngine` wrapper around `battleboats_core.Game`; the leaf observation is `Game.observation(seat)` (parity-tested against `build_observation`, the same tensors harvest trained on). Leaves are scored in virtual-loss batches of 16–32 (one GPU forward per batch). Each leaf first takes a short tactical rollout (about 32 engine steps: landings head for the nearest enemy home/port, combat ships hunt threatening landings, others end the turn). A terminal during the rollout scores exactly ±1 or 0; otherwise the net scores the fogged observation of the side that faced the leaf, at the rollout end.
 
 Older trainers (`scripts/train_ppo.py`, `train_landing.py`, `train_bc.py`, and the rest) still default to `--device cpu`. They accept `auto` and `cuda` as well. ROCm is `cuda`, not a separate device name.

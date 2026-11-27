@@ -7,7 +7,7 @@ from pathlib import Path
 
 import pytest
 
-from battleboats.agents.godmode_mcts import _evaluate, godmode_mcts_action, load_mcts_value_net
+from battleboats.agents.godmode_mcts import _evaluate, _evaluate_batch, godmode_mcts_action, load_mcts_value_net
 from battleboats.core.gameEngine import gameEngine
 from battleboats.envs.observation import build_observation
 from battleboats.envs.skill_maps import write_full_map
@@ -43,11 +43,29 @@ def test_evaluate_nonterminal_is_value_net_on_fogged_obs(tmp_path: Path) -> None
     engine = gameEngine(write_full_map(tmp_path / "m.json", 6, 6, seed=1))
     engine.reset(seed=1)
     net = _tiny_net()
-    value = _evaluate(engine, 0, random.Random(0), net)
+    value = _evaluate(engine, 0, random.Random(0), net, rollout_steps=0)
     obs = build_observation(engine, 0)
     expected = value_of_observation(net, obs["entity_tokens"], obs["globals"])
     assert value == pytest.approx(expected, abs=1e-6)
     assert -1.0 <= value <= 1.0
+
+
+def test_evaluate_batch_matches_singletons_and_mixes_terminals(tmp_path: Path) -> None:
+    engine = gameEngine(write_full_map(tmp_path / "m.json", 6, 6, seed=1))
+    engine.reset(seed=1)
+    net = _tiny_net()
+    clone = engine.clone()
+    mixed = _evaluate_batch(
+        [clone, _Terminal(1), engine.clone()],
+        [0, 0, 1],
+        net,
+        rollout_steps=0,
+    )
+    assert mixed[1] == -1.0
+    o0 = build_observation(engine, 0)
+    o1 = build_observation(engine, 1)
+    assert mixed[0] == pytest.approx(value_of_observation(net, o0["entity_tokens"], o0["globals"]), abs=1e-5)
+    assert mixed[2] == pytest.approx(value_of_observation(net, o1["entity_tokens"], o1["globals"]), abs=1e-5)
 
 
 def test_mcts_picks_a_legal_action(tmp_path: Path) -> None:
@@ -55,7 +73,20 @@ def test_mcts_picks_a_legal_action(tmp_path: Path) -> None:
     engine.reset(seed=1)
     pid = engine.current_player
     legal = engine.enumerate_legal(pid)
-    action = godmode_mcts_action(engine, pid, random.Random(0), _tiny_net(), iterations=8)
+    action = godmode_mcts_action(
+        engine, pid, random.Random(0), _tiny_net(), iterations=8, leaf_batch=4, rollout_steps=4
+    )
+    assert action in legal
+
+
+def test_batched_search_picks_a_legal_action(tmp_path: Path) -> None:
+    engine = gameEngine(write_full_map(tmp_path / "m.json", 6, 6, seed=1))
+    engine.reset(seed=1)
+    pid = engine.current_player
+    legal = engine.enumerate_legal(pid)
+    action = godmode_mcts_action(
+        engine, pid, random.Random(1), _tiny_net(), iterations=16, leaf_batch=16, rollout_steps=0
+    )
     assert action in legal
 
 
@@ -69,7 +100,9 @@ def test_load_mcts_value_net_caches_and_requires_a_file(tmp_path: Path) -> None:
     assert first is second
     engine = gameEngine(write_full_map(tmp_path / "m.json", 6, 6, seed=1))
     engine.reset(seed=1)
-    action = godmode_mcts_action(engine, engine.current_player, random.Random(1), first, iterations=4)
+    action = godmode_mcts_action(
+        engine, engine.current_player, random.Random(1), first, iterations=4, rollout_steps=0, leaf_batch=2
+    )
     assert action is not None
 
 
